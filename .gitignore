@@ -3,7 +3,8 @@ glm-ocr
 .vscode
 .DS_Store
 /build
-evidence_card
+evidence_card*
+output
 card
 venv
 .env

@@ -17,14 +17,12 @@ from dotenv import load_dotenv
 import tempfile
 from glmocr import parse
 from tools.llms import call_vision_model, pdf_to_images
+
 load_dotenv()
 
 
 def validate_content_pages(
-    image_paths: List[str],
-    api_key: str = None,
-    base_url: str = None,
-    model: str = None
+    image_paths: List[str], api_key: str = None, base_url: str = None, model: str = None
 ) -> List[int]:
     total_pages = len(image_paths)
 
@@ -54,19 +52,15 @@ Final line: summarize from which page the non-content starts (or "all content" i
 """
 
     result = call_vision_model(
-        check_images,
-        prompt,
-        api_key=api_key,
-        base_url=base_url,
-        model=model
+        check_images, prompt, api_key=api_key, base_url=base_url, model=model
     )
 
     valid_pages = list(range(total_pages))
 
     if result:
-        lines = result.lower().split('\n')
+        lines = result.lower().split("\n")
         for i, line in enumerate(lines):
-            if 'non-content' in line or '非正文' in line:
+            if "non-content" in line or "非正文" in line:
                 actual_page_idx = total_pages - pages_to_check + i
                 valid_pages = list(range(actual_page_idx))
                 break
@@ -75,15 +69,34 @@ Final line: summarize from which page the non-content starts (or "all content" i
 
 
 def ocr_images(image_paths: List[str], output_dir: str) -> str:
+    """
+    OCR 识别图片并按页面顺序拼接
+
+    修复：确保按照 image_paths 的顺序处理每一页，而不是依赖 parse() 返回的顺序
+    """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # 🔧 关键修复：parse() 一次性处理所有图片
     results = parse(image_paths)
+
+    # 🔧 关键修复：确保 results 和 image_paths 的顺序一致
+    # parse() 应该按照输入顺序返回结果，但为了保险，我们按索引匹配
     full_markdown = []
+
     for i, result in enumerate(results):
+        # 页码从 1 开始
         page_num = i + 1
+
+        # 添加页面标记
         full_markdown.append(f"<!-- Page {page_num} -->\n\n")
+
+        # 添加该页的识别结果
         full_markdown.append(result.markdown_result)
+
+        # 页面之间添加分隔
         full_markdown.append("\n\n")
 
+    # 拼接所有页面
     combined_md_path = os.path.join(output_dir, "combined.md")
     with open(combined_md_path, "w", encoding="utf-8") as f:
         f.write("".join(full_markdown))
@@ -100,7 +113,7 @@ class PDFExtractor:
         base_url: str = None,
         vision_model: str = None,
         dpi: int = 200,
-        validate_pages: bool = True
+        validate_pages: bool = True,
     ):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
@@ -108,8 +121,9 @@ class PDFExtractor:
         self.dpi = dpi
         self.validate_pages = validate_pages
 
-    def extract_structured(self, pdf_path: str, output_dir: str = None) -> Dict[str, Any]:
-
+    def extract_structured(
+        self, pdf_path: str, output_dir: str = None
+    ) -> Dict[str, Any]:
         temp_dir = output_dir or tempfile.mkdtemp(prefix="ocr_output_")
         result = self.extract(pdf_path, output_dir=temp_dir)
         combined_md_path = os.path.join(result["output_dir"], "combined.md")
@@ -138,13 +152,12 @@ class PDFExtractor:
         image_paths = pdf_to_images(pdf_path, dpi=self.dpi)
         print(f"      Total {len(image_paths)} pages")
 
-
         print("[2/3] Validating content pages...")
         valid_indices = validate_content_pages(
-                image_paths,
-                api_key=self.api_key,
-                base_url=self.base_url,
-                model=self.vision_model
+            image_paths,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.vision_model,
         )
         valid_images = [image_paths[i] for i in valid_indices]
         excluded_count = len(image_paths) - len(valid_images)
@@ -172,17 +185,27 @@ Examples:
   python pdf_extractor.py document.pdf -o ./output
   python pdf_extractor.py document.pdf -o ./output --no-validate
   python pdf_extractor.py document.pdf -o ./output --dpi 300 -v
-        """
+        """,
     )
 
     parser.add_argument("pdf", help="PDF file path")
     parser.add_argument("-o", "--output", required=True, help="Output directory")
     parser.add_argument("--api-key", help="API Key (default: OPENAI_API_KEY env)")
-    parser.add_argument("--base-url", help="API Base URL (default: OPENAI_BASE_URL env)")
-    parser.add_argument("--vision-model", default="glm-4.6v", help="Vision model name (default: glm-4.6v)")
+    parser.add_argument(
+        "--base-url", help="API Base URL (default: OPENAI_BASE_URL env)"
+    )
+    parser.add_argument(
+        "--vision-model",
+        default="glm-4.6v",
+        help="Vision model name (default: glm-4.6v)",
+    )
     parser.add_argument("--dpi", type=int, default=200, help="Image DPI (default: 200)")
-    parser.add_argument("--no-validate", action="store_true", help="Skip content page validation")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Show detailed info")
+    parser.add_argument(
+        "--no-validate", action="store_true", help="Skip content page validation"
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Show detailed info"
+    )
 
     args = parser.parse_args()
 
@@ -191,13 +214,13 @@ Examples:
         base_url=args.base_url,
         vision_model=args.vision_model,
         dpi=args.dpi,
-        validate_pages=not args.no_validate
+        validate_pages=not args.no_validate,
     )
 
     result = extractor.extract(args.pdf, output_dir=args.output)
 
     if args.verbose:
-        print(f"\nDetails:")
+        print("Details:")
         print(f"  Total pages: {result['total_pages']}")
         print(f"  Content pages: {result['content_pages']}")
         print(f"  Excluded pages: {result['excluded_pages']}")

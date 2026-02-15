@@ -7,6 +7,7 @@ from typing import List
 import fitz
 from glmocr import parse
 
+
 def pdf_to_images(pdf_path: str, output_dir: str = None, dpi: int = 200) -> List[str]:
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="pdf_images_")
@@ -36,7 +37,6 @@ def image_to_base64(image_path: str) -> str:
 
 
 def call_large_model(messages, api_key=None, base_url=None, model=None):
-
     if api_key is None:
         api_key = os.getenv("OPENAI_API_KEY")
     if base_url is None:
@@ -64,7 +64,7 @@ def call_vision_model(
     prompt: str,
     api_key: str = None,
     base_url: str = None,
-    model: str = None
+    model: str = None,
 ) -> str:
     from openai import OpenAI
 
@@ -83,13 +83,15 @@ def call_vision_model(
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
             ".gif": "image/gif",
-            ".webp": "image/webp"
+            ".webp": "image/webp",
         }.get(suffix, "image/png")
 
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{media_type};base64,{img_base64}"}
-        })
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{media_type};base64,{img_base64}"},
+            }
+        )
 
     content.append({"type": "text", "text": prompt})
     messages = [{"role": "user", "content": content}]

@@ -4,7 +4,7 @@
 
 本系统用于从医学PDF文献中提取结构化证据卡，支持4种类型：
 - **interventional** (介入性/RCT)
-- **causal** (因果推断)  
+- **causal** (因果推断)
 - **mechanistic** (机制/中介分析)
 - **associational** (关联性研究)
 
@@ -96,9 +96,9 @@
 **输出格式（仅JSON数组）：**
 ```json
 [
-  "BMI → KDM-BA Acceleration → Cardiovascular Disease",
-  "Waist Circumference → KDM-BA Acceleration → Cardiovascular Disease",
-  "TyG Index → KDM-BA Acceleration → Stroke"
+  "BMI → KDM-BY Acceleration → Cardiovascular Disease",
+  "Waist Circumference → KDM-BY Acceleration → Cardiovascular Disease",
+  "TyG Index → KDM-BY Acceleration → Stroke"
 ]
 ```
 ```
@@ -324,7 +324,7 @@
   },
   {
     "contrast": "Resmetirom 100mg vs Placebo → Fibrosis improvement",
-    "timepoint": "Week 52", 
+    "timepoint": "Week 52",
     "claim": "Resmetirom 100mg superior to placebo for fibrosis improvement by ≥1 stage (25.9% vs 14.2%, P<0.001)"
   }
 ]
@@ -540,7 +540,7 @@
     ],
     "M": [
       {
-        "name": "KDM-BA Acceleration",
+        "name": "KDM-BE Acceleration",
         "dataset": "016-blood_tests",
         "field": "albumin|creatinine|glucose|...",
         "status": "derived",

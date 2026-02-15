@@ -1,0 +1,12 @@
+glm-ocr
+.idea
+.vscode
+.DS_Store
+/build
+evidence_card
+card
+venv
+.env
+temlplate
+.claude
+__pycache__

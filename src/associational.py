@@ -27,9 +27,7 @@ class AssociationalExtractor(BaseExtractor):
         prompt_template = self.load_prompt("step2_card")
         pdf_text = self.get_pdf_text(pdf_path)
 
-        prompt = self._build_prompt(
-            prompt_template, pdf_text, target_path=target_path
-        )
+        prompt = self._build_prompt(prompt_template, pdf_text, target_path=target_path)
 
         result = self.client.call_json(prompt, max_tokens=32768)
         if isinstance(result, list):

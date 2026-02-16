@@ -59,7 +59,7 @@
   "transport_signature": {
     "center": "", "era": "", "geo": "",
     "care_setting": "laboratory | clinic | community",
-    "data_source": "trial | registry | EHR"
+    "data_source": "trial | registry | HER"
   },
 
   "arms": [

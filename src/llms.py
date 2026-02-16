@@ -43,20 +43,16 @@ def call_large_model(messages, api_key=None, base_url=None, model=None):
         base_url = os.getenv("OPENAI_BASE_URL")
 
     client = OpenAI(api_key=api_key, base_url=base_url)
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=1.0,
-            max_tokens=16384,
-            stream=False,
-        )
-        if response.choices[0].message.content.strip():
-            return response.choices[0].message.content.strip()
-
-    except Exception as e:
-        print(f"Error in call_large_model as {e}")
-        return {}
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=1.0,
+        max_tokens=16384,
+        stream=False,
+    )
+    if response.choices[0].message.content.strip():
+        return response.choices[0].message.content.strip()
+    return {}
 
 
 def call_vision_model(

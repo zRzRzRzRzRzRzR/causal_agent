@@ -12,8 +12,13 @@ from typing import Dict, List, Any, Tuple
 
 # Required top-level fields shared by all types
 COMMON_REQUIRED_FIELDS = [
-    "schema_version", "evidence_id", "paper", "provenance",
-    "design", "population", "variables",
+    "schema_version",
+    "evidence_id",
+    "paper",
+    "provenance",
+    "design",
+    "population",
+    "variables",
 ]
 
 # Required fields specific to each type
@@ -63,7 +68,9 @@ class EvidenceCardValidator:
         return is_valid, self.errors, self.warnings
 
     def _check_top_level_fields(self, card: Dict):
-        required = COMMON_REQUIRED_FIELDS + TYPE_SPECIFIC_FIELDS.get(self.evidence_type, [])
+        required = COMMON_REQUIRED_FIELDS + TYPE_SPECIFIC_FIELDS.get(
+            self.evidence_type, []
+        )
         for field in required:
             if field not in card:
                 self.errors.append(f"Missing required field: {field}")
@@ -75,13 +82,19 @@ class EvidenceCardValidator:
             if not paper.get(field):
                 self.errors.append(f"paper.{field} is missing or empty")
         if paper.get("year") and not isinstance(paper["year"], int):
-            self.errors.append(f"paper.year should be an integer, current: {paper['year']}")
+            self.errors.append(
+                f"paper.year should be an integer, current: {paper['year']}"
+            )
         if not paper.get("doi") and not paper.get("pmid"):
-            self.warnings.append("paper is missing doi and pmid, recommend providing at least one")
+            self.warnings.append(
+                "paper is missing doi and pmid, recommend providing at least one"
+            )
 
     def _check_provenance(self, prov: Dict):
         if not prov.get("figure_table"):
-            self.warnings.append("provenance.figure_table is empty, missing data source tracking")
+            self.warnings.append(
+                "provenance.figure_table is empty, missing data source tracking"
+            )
         if not prov.get("pages"):
             self.warnings.append("provenance.pages is empty")
 
@@ -122,7 +135,9 @@ class EvidenceCardValidator:
                 self.errors.append(f"mediation_equations[{i}].path is missing")
             for key in ["total_effect", "indirect_effect", "proportion_mediated"]:
                 if not med.get(key) or med[key].get("estimate") is None:
-                    self.warnings.append(f"mediation_equations[{i}].{key}.estimate is null")
+                    self.warnings.append(
+                        f"mediation_equations[{i}].{key}.estimate is null"
+                    )
 
     def _check_effects_consistency(self, card: Dict):
         """Check consistency between effects and estimand_equation"""
@@ -135,7 +150,9 @@ class EvidenceCardValidator:
         # Each equation should reference an existing effect
         unmatched = equation_refs - effect_ids - {None, ""}
         if unmatched:
-            self.warnings.append(f"estimand_equation references non-existent edge_id: {unmatched}")
+            self.warnings.append(
+                f"estimand_equation references non-existent edge_id: {unmatched}"
+            )
 
     def format_report(self) -> str:
         """Format validation report"""
@@ -166,13 +183,15 @@ def validate_evidence_cards(
         is_valid, errors, warnings = validator.validate(card)
         if not is_valid:
             all_valid = False
-        results.append({
-            "index": i,
-            "evidence_id": card.get("evidence_id", "N/A"),
-            "is_valid": is_valid,
-            "errors": errors,
-            "warnings": warnings,
-        })
+        results.append(
+            {
+                "index": i,
+                "evidence_id": card.get("evidence_id", "N/A"),
+                "is_valid": is_valid,
+                "errors": errors,
+                "warnings": warnings,
+            }
+        )
 
     return {
         "all_valid": all_valid,

@@ -51,10 +51,20 @@ def main():
     parser.add_argument("--output", "-o", help="Output directory")
     parser.add_argument("--skip-hpp", action="store_true", help="Skip HPP mapping")
     parser.add_argument("--ocr-dir", default="./cache_ocr", help="OCR cache directory")
-    parser.add_argument("--dpi", type=int, default=200, help="PDF to image DPI (default: 200)")
-    parser.add_argument("--no-validate-pages", action="store_true", help="Skip OCR content page validation")
-    parser.add_argument("--force-ocr", action="store_true", help="Force re-run OCR (ignore cache)")
-    parser.add_argument("--pretty", action="store_true", default=True, help="Pretty JSON output")
+    parser.add_argument(
+        "--dpi", type=int, default=200, help="PDF to image DPI (default: 200)"
+    )
+    parser.add_argument(
+        "--no-validate-pages",
+        action="store_true",
+        help="Skip OCR content page validation",
+    )
+    parser.add_argument(
+        "--force-ocr", action="store_true", help="Force re-run OCR (ignore cache)"
+    )
+    parser.add_argument(
+        "--pretty", action="store_true", default=True, help="Pretty JSON output"
+    )
 
     args = parser.parse_args()
 
@@ -71,31 +81,24 @@ def main():
         ocr_validate_pages=not args.no_validate_pages,
     )
 
-    try:
-        if args.step == "full":
-            result = pipeline.run(
-                pdf_path=args.pdf,
-                force_type=args.type,
-                skip_hpp=args.skip_hpp,
-                output_dir=args.output or ".",
-            )
-        else:
-            result = pipeline.run_single_step(
-                pdf_path=args.pdf,
-                step=args.step,
-                evidence_type=args.type,
-                target_path=args.target,
-            )
+    if args.step == "full":
+        result = pipeline.run(
+            pdf_path=args.pdf,
+            force_type=args.type,
+            skip_hpp=args.skip_hpp,
+            output_dir=args.output or ".",
+        )
+    else:
+        result = pipeline.run_single_step(
+            pdf_path=args.pdf,
+            step=args.step,
+            evidence_type=args.type,
+            target_path=args.target,
+        )
 
-        # Output to stdout
-        indent = 2 if args.pretty else None
-        print(json.dumps(result, ensure_ascii=False, indent=indent))
-
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc(file=sys.stderr)
-        sys.exit(1)
+    # Output to stdout
+    indent = 2 if args.pretty else None
+    print(json.dumps(result, ensure_ascii=False, indent=indent))
 
 
 if __name__ == "__main__":

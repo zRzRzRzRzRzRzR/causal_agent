@@ -1,197 +1,226 @@
-# Step 2: 构建证据卡（对齐 HPP EL-GSE 验证模板）
+# Step 2: 构建完整证据卡
 
-你是医学信息学研究员 + 严谨的信息抽取器。请从 PDF 论文中提取结构化证据卡，**严格对齐下方的 HPP 模板 schema**。
+你是医学信息学研究员 + 严谨的信息抽取器。请从 PDF 论文中提取**一张完整的**结构化证据卡。
 
 ## 核心原则
 - **仅使用 PDF 内容**（正文 + 补充材料）；不确定即 null；**禁止编造**
-- **字段名必须与模板完全一致**，不可自造字段名
-- 提取**所有**报告的效应（含亚组分层），每个效应对应一条 effects 记录
-- 给出溯源（页码/表格/图号）
+- **一篇论文一张卡**：所有效应（总体 + 亚组分层）都放在同一张卡的 effects 数组中
+- **effects 穷举**：论文中每个「结局 Y × 亚组水平」的统计效应都必须是一条 effect
+- 变量 label 必须带完整限定词（如 "Glucose AUC 120min" 而非 "Glucose AUC"）
 
 ## 目标对比路径
 {target_path}
 
 ---
 
-## ★ 权威模板 Schema（你的输出必须严格对齐此结构）
+## ★ 完整 Schema（你的输出必须包含以下所有模块）
 
 ```json
 {
-  "evidence_id": "EV-YYYY-STUDY_NAME",
+  "schema_version": "2.1",
+  "evidence_id": "EV-YYYY-XXXXXX",
+
   "paper": {
-    "title": "论文完整标题",
-    "doi": "10.xxxx/xxxxx",
-    "pmid": "PubMed ID 或 null",
-    "year": 2024,
-    "journal": "期刊名称",
-    "authors": ["第一作者", "第二作者"]
+    "title": "", "doi": "", "pmid": null, "year": 2024,
+    "journal": "", "authors": [], "registry": null, "abstract": ""
   },
+
+  "provenance": {
+    "figure_table": ["Table 2 p.6", "Figure 1 p.3"],
+    "pages": [1, 2, 3],
+    "supplement": false
+  },
+
   "design": {
-    "type": "cohort | RCT | crossover | MR | meta-analysis",
-    "analysis": "使用的统计分析方法描述",
-    "n_total": 10000,
-    "population_description": "人群特征描述"
+    "type": "crossover | parallel_rct | cluster_rct | cohort | ...",
+    "analysis": "统计分析方法描述",
+    "estimand": "ITT | PP | null",
+    "n_total": 0,
+    "n_arms": 2,
+    "randomization": "block | simple | stratified",
+    "allocation_ratio": "1:1",
+    "blinding": "none | single | double | triple",
+    "hypothesis": "superiority | non-inferiority | equivalence",
+    "population_description": "纳入人群特征描述",
+    "missing_data": {"method": "complete_case | MI | LOCF", "notes": ""},
+    "censoring": {"type": "", "competing_risks": false}
   },
+
+  "population": {
+    "eligibility_signature": {
+      "age": "range or mean±SD",
+      "sex": "both | male | female (with %)",
+      "disease": "population description",
+      "key_inclusions": [],
+      "key_exclusions": []
+    }
+  },
+
+  "transport_signature": {
+    "center": "", "era": "", "geo": "",
+    "care_setting": "laboratory | clinic | community",
+    "data_source": "trial | registry | EHR"
+  },
+
+  "arms": [
+    {
+      "arm_id": "A", "label": "", "role": "comparator | intervention",
+      "n_randomized": 0, "n_analyzed_itt": 0,
+      "description": "", "dose_intensity": "", "frequency": "",
+      "duration": "ISO8601", "components": [],
+      "crossover": {"sequence": "AB or BA randomized", "washout": "P1W"}
+    }
+  ],
+
+  "adherence": {
+    "definition": "", "method": "",
+    "per_arm": [{"arm_ref": "A", "n_evaluable": 0, "adherence_rate": 1.0, "notes": ""}],
+    "source": ""
+  },
+
   "variables": {
     "nodes": [
       {
-        "node_id": "local:X",
-        "label": "暴露/干预变量名",
-        "type": "exposure",
-        "unit": "单位",
-        "description": "变量描述",
-        "outcome_family": null
-      },
-      {
-        "node_id": "local:Y",
-        "label": "结局变量名",
-        "type": "outcome",
-        "unit": "单位或binary",
-        "outcome_family": "continuous | binary",
-        "description": "变量描述"
-      },
-      {
-        "node_id": "local:M",
-        "label": "中介变量名（可选）",
-        "type": "mediator",
-        "unit": "单位",
-        "description": "..."
-      },
-      {
-        "node_id": "local:Z1",
-        "label": "协变量名",
-        "type": "covariate",
-        "unit": "单位"
+        "node_id": "local:X", "label": "暴露变量名(带限定)",
+        "type": "exposure | outcome | covariate | mediator",
+        "unit": "", "description": "",
+        "outcome_family": "continuous | binary | null"
       }
     ],
     "roles": {
-      "X": ["暴露变量label列表"],
-      "Y": ["结局变量label列表"],
-      "Z": ["调整变量label列表"],
-      "M": [],
-      "IV": []
+      "X": ["暴露变量label"], "C": ["对照label"],
+      "Y": ["结局1 label", "结局2 label", "..."],
+      "Z": ["调整变量label"], "M": [], "IV": []
     },
     "outcome_direction": {
-      "结局变量label": "higher_is_worse | higher_is_better"
+      "结局label": "higher_is_worse | higher_is_better"
     }
   },
+
+  "time_semantics": {
+    "baseline_window": "", "exposure_window": "",
+    "outcome_window": "", "follow_up_start": "",
+    "assessment_timepoints": [],
+    "follow_up_duration": "", "notes": ""
+  },
+
+  "identification": {
+    "identification_status": "identified",
+    "backdoor_set": [], "instrument": [],
+    "positivity_notes": ""
+  },
+
+  "outcome_summaries": [
+    {
+      "name": "结局变量名", "timepoint": "",
+      "analysis_set": "ITT",
+      "by_arm": [
+        {"arm": "A", "n": 0, "mean": null, "sd": null}
+      ],
+      "source": "Table X p.Y"
+    }
+  ],
+
   "effects": [
     {
-      "edge_id": "EV-YYYY-STUDY#1",
-      "from": "X变量label",
-      "to": "Y变量label",
+      "edge_id": "EV-YYYY-XXXXXX#1",
+      "from": "X变量label", "to": "Y变量label",
       "mediators": [],
       "outcome_family": "continuous | binary",
       "effect_scale": "BETA | OR | RR | HR | MD | RD",
-      "estimate": 0.72,
-      "se": 0.048,
-      "ci": [0.65, 0.80],
-      "ci_level": 0.95,
-      "p_value": "<0.001",
+      "estimate": 0.0,
+      "se": null,
+      "ci": [0.0, 0.0], "ci_level": 0.95,
+      "p_value": "",
       "link_function": "identity | logit | log",
       "model": "统计模型名称",
-      "adjustment_set_used": ["Age", "Sex"],
-      "n_effective": 84200,
-      "time_horizon": "ISO8601格式如P10Y或PT2H",
+      "adjustment_set_used": [],
+      "n_effective": 0,
+      "time_horizon": "ISO8601",
       "exposure_contrast": {
-        "type": "per_unit | per_SD | q5_vs_q1 | treat_vs_control | assignment",
-        "delta": "对比的文字描述",
-        "x0": null,
-        "x1": null,
-        "unit": "SD | 原始单位"
+        "type": "assignment | per_unit | per_SD",
+        "delta": "对比描述(含亚组信息)",
+        "x0": null, "x1": null, "unit": ""
       }
     }
   ],
+
   "estimand_equation": {
+    "contrast_convention": {"I": "Late", "C": "Early"},
     "equations": [
       {
-        "outcome": "结局变量名",
-        "formula": "数学公式",
-        "parameters": {"β": -0.33, "σ": 1.0},
-        "window": "时间窗",
-        "derivation": "推导说明",
-        "source_edge": "EV-YYYY-STUDY#1",
-        "analysis_set": "ITT | PP | full_cohort",
-        "scale": "BETA | log(OR) | MD"
+        "outcome": "", "formula": "ΔY = τ + ε",
+        "parameters": {"τ": 0.0, "σ": 0.0},
+        "derivation": "", "source_edge": "EV-YYYY-XXXXXX#1",
+        "analysis_set": "ITT", "scale": "MD | BETA | log(OR)"
       }
     ]
   },
+
+  "measurement": {
+    "devices": [{"node": "", "device": "", "algo": ""}],
+    "derivations": [{"node": "", "rule": ""}]
+  },
+
   "hpp_mapping": {
-    "X": {
-      "name": "变量名",
-      "dataset": "HPP数据集如016-blood_tests",
-      "field": "字段名如hdl_cholesterol",
-      "status": "exact | close | derived | missing",
-      "notes": "映射说明"
-    },
-    "Y": [
-      {
-        "name": "结局变量名",
-        "dataset": "...",
-        "field": "...",
-        "status": "exact | close | derived | missing",
-        "notes": "..."
-      }
-    ],
-    "Z": [
-      {
-        "name": "协变量名",
-        "dataset": "...",
-        "field": "...",
-        "status": "exact | close | derived | missing",
-        "notes": "..."
-      }
-    ],
+    "X": {"name": "", "dataset": "", "field": "", "status": "exact|close|derived|missing", "notes": ""},
+    "Y": [{"name": "", "dataset": "", "field": "", "status": "", "notes": ""}],
+    "Z": [{"name": "", "dataset": "", "field": "", "status": "", "notes": ""}],
     "M": []
   },
-  "time_semantics": {
-    "baseline_window": "baseline±90d",
-    "exposure_window": "暴露测量时间",
-    "outcome_window": "ISO8601如P10Y",
-    "follow_up_start": "baseline",
-    "notes": ""
-  },
+
   "governance": {
     "tier": "A | B | C",
-    "risk_of_bias": "low | moderate | high | critical",
-    "notes": "质量评估说明"
+    "risk_of_bias": "low | some_concerns | high",
+    "notes": ""
+  },
+
+  "inference": {
+    "contrast": "核心对比的一句话描述",
+    "claim": "主要结论（1-3句话）",
+    "assumptions": ["因果/统计假设1", "假设2"]
   }
 }
 ```
 
 ---
 
-## 关键字段说明
+## ★ Effects 穷举规则（最重要）
 
-### effects 字段规则
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| outcome_family | ✅ | continuous→用BETA+identity; binary→用OR+logit |
-| se | ⚠️ | 标准误，尽量从论文提取；无法获取填 null |
-| estimate | ✅ | OR/RR填原始比值；BETA填回归系数；MD填均数差 |
-| exposure_contrast.type | ✅ | per_unit/per_SD/assignment/treat_vs_control/q5_vs_q1 |
-| link_function | ✅ | 连续结局=identity, 二分类=logit |
+### 规则1：逐行扫描所有 Table
+- 论文 Results 部分的每个 Table 的**每一行**（每个因变量/结局指标），只要报告了 estimate / p-value / CI，就必须提取为一条 effect
+- 不要只提取 2 个"主要结局"就停——beta-cell function 指标（CIR, DI）、胰岛素敏感性（ISI）、比值指标都要提取
 
-### 结局类型速查
-- **连续结局** (如血糖AUC, BMI): outcome_family="continuous", effect_scale="BETA"或"MD", link_function="identity"
-- **二分类结局** (如患病是/否): outcome_family="binary", effect_scale="OR", link_function="logit"
+### 规则2：亚组穷举
+- 如果论文按亚组（如基因型 GG/CG/CC）报告了分层效应，**每个亚组 × 每个 Y** 都是一条独立的 effect
+- 在 `exposure_contrast.delta` 中注明亚组（如 "Late vs Early dinner in MTNR1B GG carriers"）
+- 在 `adjustment_set_used` 中标注分层变量
 
-### HPP 数据集参考
-常用数据集：000-population, 001-events, 002-anthropometrics, 003-blood_pressure, 005-diet_logging, 009-sleep, 014-human_genetics, 016-blood_tests, 017-cgm, 020-health_and_medical_history, 021-medical_conditions, 023-lifestyle_and_environment
+### 规则3：总体 + 亚组都要
+- 先提取全体人群的效应（总体效应），再逐个亚组提取
+- edge_id 编号连续：#1, #2, ... #N
+
+### 效应量快查
+| 结局类型 | outcome_family | effect_scale | link_function | formula 示例 |
+|----------|---------------|-------------|---------------|-------------|
+| AUC (连续) | continuous | MD | identity | ΔY = Y_late - Y_early |
+| log 变换后 | continuous | BETA | identity | Δlog(Y) = β |
+| 二分类 | binary | OR | logit | logit(P) = α + β·X |
+
+### HPP 数据集参考（用于 hpp_mapping）
+000-population, 001-events, 002-anthropometrics, 003-blood_pressure, 005-diet_logging, 009-sleep, 014-human_genetics, 016-blood_tests, 017-cgm, 020-health_and_medical_history, 021-medical_conditions, 023-lifestyle_and_environment
 
 ### hpp_mapping.status 规则
-- exact: 定义/单位/测量完全一致
-- close: 概念一致但单位/设备/时间窗有差异
-- derived: 需从多个HPP字段计算
-- missing: HPP中无此变量
+- exact: HPP 字段与论文变量完全一致
+- close: 概念一致但测量方式不同（如 CGM glucose vs OGTT glucose）
+- derived: 需从 HPP 字段计算（notes 中说明公式）
+- missing: HPP 中确实无此变量
+- **严禁编造不存在的 HPP 字段名**，如不确定某字段是否存在，标 missing
+
+### estimand_equation
+每条 effect 对应一个 equation，通过 `source_edge` 关联 `edge_id`。equations 数量应与 effects 数量一致。
 
 ---
 
-## 亚组效应提取规则
-如果论文按亚组（如基因型 GG/CG/CC、性别、年龄分层）报告了分层效应：
-- 每个**亚组 × 结局**单独提取一条 effect
-- exposure_contrast.delta 中注明亚组（如 "Late vs Early in MTNR1B GG carriers"）
-- adjustment_set_used 中包含分层变量
-
-## 输出格式
-输出为 **JSON 数组**（即使只有一张卡也用 `[{...}]` 包裹），严格对齐上述模板。不确定的字段填 null。
+## 输出
+输出为 JSON **数组**（`[{...}]`），即使只有一张卡。严格对齐上述 schema。不确定的字段填 null。

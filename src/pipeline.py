@@ -59,7 +59,6 @@ def _merge_paths_to_target(paths: List) -> str:
 
     for p in paths:
         if isinstance(p, str):
-            # If string, concatenate directly
             claims.append(p)
             continue
 
@@ -89,7 +88,7 @@ def _merge_paths_to_target(paths: List) -> str:
         "C": C,
         "Y": all_Y,
         "subgroups": all_subgroups,
-        "source": "; ".join(dict.fromkeys(sources)),  # Deduplicate while preserving order
+        "source": "; ".join(dict.fromkeys(sources)),
         "claim": " | ".join(claims),
     }
     return json.dumps(merged, ensure_ascii=False)
@@ -110,6 +109,7 @@ class EvidenceCardPipeline:
 
         init_ocr(
             ocr_output_dir=ocr_output_dir,
+            client=client,
             dpi=ocr_dpi,
             validate_pages=ocr_validate_pages,
         )

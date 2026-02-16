@@ -20,11 +20,9 @@ Usage:
 """
 import argparse
 import json
-import sys
 
 from llm_client import GLMClient
 from pipeline import EvidenceCardPipeline
-from config import DEFAULT_MODEL
 
 
 def main():
@@ -39,9 +37,9 @@ def main():
         help="Step: full (full pipeline), classify, paths (extract paths), card (evidence card), hpp (HPP mapping)",
     )
     parser.add_argument("pdf", help="PDF file path")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="GLM model name")
-    parser.add_argument("--api-key", help="ZhipuAI API Key")
-    parser.add_argument("--base-url", help="API Base URL")
+    parser.add_argument("--model", help="Model name (overrides DEFAULT_MODEL in .env)")
+    parser.add_argument("--api-key", help="API Key (overrides OPENAI_API_KEY in .env)")
+    parser.add_argument("--base-url", help="API Base URL (overrides OPENAI_BASE_URL in .env)")
     parser.add_argument(
         "--type",
         choices=["interventional", "causal", "mechanistic", "associational"],
@@ -68,7 +66,7 @@ def main():
 
     args = parser.parse_args()
 
-    # Initialize client
+    # Initialize client (all defaults come from .env via llm_client module)
     client = GLMClient(
         api_key=args.api_key,
         base_url=args.base_url,

@@ -1,84 +1,36 @@
-# 医学文献证据卡提取工具
+# 证据卡 2月16版本
 
-使用 GLM 模型 (智谱AI) 从医学 PDF 文献中提取结构化证据卡。
+## 完整流水线：分类 → 提取路径 → 证据卡 → HPP映射
 
-## 安装
+python main.py full ../paper.pdf --output ../output
 
-```bash
-# 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# venv\Scripts\activate   # Windows
+## 强制指定类型，跳过HPP映射
 
-# 安装依赖
-pip install -r requirements.txt
+python main.py full ../paper.pdf --type interventional --skip-hpp -o ../output
+
+## 单步运行
+
+```shell
+python main.py classify ../paper.pdf                          # Step 0: 分类
+python main.py paths ../paper.pdf --type interventional        # Step 1: 提路径
+python main.py card ../paper.pdf --type interventional \       # Step 2: 证据卡
+  --target "Late dinner vs Early dinner -> Glucose AUC"
+python main.py hpp ../paper.pdf --type interventional \        # Step 3: HPP映射
+  --target ../output/paper_evidence_cards.json
 ```
 
-## 配置
-
-1. 获取智谱AI API Key: https://open.bigmodel.cn/
-2. 复制 `.env.example` 为 `.env`
-3. 填入你的 API Key
-
-```bash
-cp .env.example .env
-# 编辑 .env，填入 ZHIPU_API_KEY
-```
-
-或直接修改 `config.py` 中的 `ZHIPU_API_KEY`
-
-## 使用
-
-### 1. 文献分类
-
-判断文献属于哪种类型 (interventional/causal/mechanistic/associational):
-
-```bash
-python extract.py paper.pdf --step classify
-```
-
-### 2. 提取机制通路
-
-对于 mechanistic 类型，提取所有 X→M→Y 通路:
-
-```bash
-python extract.py paper.pdf --step paths
-```
-
-### 3. 完整提取
-
-自动执行分类、提取通路、生成证据卡:
-
-```bash
-python extract.py paper.pdf --step extract
-```
-
-## 参数
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--model` | GLM 模型名称 | glm-4.7 |
-| `--api-key` | 覆盖 API Key | 从环境变量读取 |
-| `--step` | 执行步骤 | classify |
-
-## 支持的 GLM 模型
-
-| 模型 | 说明 |
-|------|------|
-| `glm-4.7` | 最新版本 (默认) |
-| `glm-4-flash` | 快速/便宜 |
-| `glm-4-plus` | 通用模型 |
-| `glm-4-air` | 轻量级 |
-
-## 项目结构
+## 3. 流水线执行流程
 
 ```
-causal_agent/
-├── config.py          # GLM API 配置
-├── extract.py         # 主脚本
-├── requirements.txt   # 依赖
-├── prompt/
-│   └── extract.md     # LLM 提示词模板
-├── Evidence Card/     # 输出目录
-└── .env.example       # 环境变量模板
+paper.pdf
+  │
+  ├─ Step 0: Classifier 读PDF → GLM判断类型 → interventional/causal/mechanistic/associational
+  │
+  ├─ Step 1: Extractor.extract_paths() → 提取 X vs C → 所有Y + 亚组
+  │
+  ├─ Step 2: 合并paths → Extractor.extract_evidence_card() → 完整证据卡JSON
+  │
+  └─ Step 3: Extractor.extract_hpp_mapping() → 映射到HPP平台字段
+  
+输出: output/paper_evidence_cards.json
 ```

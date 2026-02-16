@@ -3,7 +3,7 @@ PDF Text Extraction Module — Based on GLM-OCR
 
 Workflow:
   1. PDF → Images (pdf_to_images)
-  2. GLM-4.6V identifies main content pages, excludes references/appendices (optional)
+  2. GLM vision model identifies main content pages, excludes references/appendices (optional)
   3. GLM-OCR recognizes content, outputs Markdown
   4. Results cached to ocr_output_dir/{pdf_stem}/combined.md
 
@@ -16,15 +16,40 @@ import os
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+import fitz
 from glmocr import parse
-from llms import call_vision_model, pdf_to_images
+
+from llm_client import GLMClient
+
+
+def pdf_to_images(pdf_path: str, output_dir: str = None, dpi: int = 200) -> List[str]:
+    """Convert PDF pages to images."""
+    if output_dir is None:
+        output_dir = tempfile.mkdtemp(prefix="pdf_images_")
+    else:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    pdf_name = Path(pdf_path).stem
+    image_paths = []
+    doc = fitz.open(pdf_path)
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        zoom = dpi / 72
+        matrix = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=matrix)
+        image_path = os.path.join(output_dir, f"{pdf_name}_page_{page_num + 1:03d}.png")
+        pix.save(image_path)
+        image_paths.append(image_path)
+
+    doc.close()
+    return image_paths
 
 
 def _validate_content_pages(
     image_paths: List[str],
-    api_key: str = None,
-    base_url: str = None,
-    model: str = None,
+    client: GLMClient,
 ) -> List[int]:
     """Use vision model to filter non-content pages at the end (references/appendices etc.)"""
     total_pages = len(image_paths)
@@ -49,9 +74,7 @@ Page 1: content/non-content - brief reason
 Final line: from which page the non-content starts (or "all content").
 """
 
-    result = call_vision_model(
-        check_images, prompt, api_key=api_key, base_url=base_url, model=model
-    )
+    result = client.call_vision(check_images, prompt)
 
     valid_pages = list(range(total_pages))
     if result:
@@ -89,9 +112,9 @@ class PDFExtractor:
     Parameters
     ----------
     ocr_output_dir : str
-        OCR output/cache directory, recommended to specify explicitly for reuse.
-    api_key / base_url / vision_model : str | None
-        GLM API configuration, can be set via OPENAI_API_KEY / OPENAI_BASE_URL / VISION_MODEL environment variables.
+        OCR output/cache directory.
+    client : GLMClient | None
+        Shared GLMClient instance for vision calls.
     dpi : int
         PDF to image resolution, default 200.
     validate_pages : bool
@@ -101,16 +124,12 @@ class PDFExtractor:
     def __init__(
         self,
         ocr_output_dir: Optional[str] = None,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        vision_model: Optional[str] = None,
+        client: Optional[GLMClient] = None,
         dpi: int = 200,
         validate_pages: bool = True,
     ):
         self.ocr_output_dir = ocr_output_dir or tempfile.mkdtemp(prefix="ocr_output_")
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
-        self.vision_model = vision_model or os.getenv("VISION_MODEL", "glm-4.6v")
+        self.client = client or GLMClient()
         self.dpi = dpi
         self.validate_pages = validate_pages
 
@@ -125,7 +144,7 @@ class PDFExtractor:
         force_rerun: bool = False,
     ) -> Dict[str, Any]:
         """
-        Extract PDF to structured result
+        Extract PDF to structured result.
 
         Returns: {"markdown", "output_dir", "total_pages", "content_pages", "combined_md_path"}
         """
@@ -160,12 +179,7 @@ class PDFExtractor:
 
         if self.validate_pages and total_pages > 3:
             print("[OCR] Step 2/3: Identifying content pages...")
-            valid_indices = _validate_content_pages(
-                image_paths,
-                api_key=self.api_key,
-                base_url=self.base_url,
-                model=self.vision_model,
-            )
+            valid_indices = _validate_content_pages(image_paths, self.client)
             valid_images = [image_paths[i] for i in valid_indices]
             excluded = total_pages - len(valid_images)
             if excluded > 0:

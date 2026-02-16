@@ -11,3 +11,4 @@ venv
 temlplate
 .claude
 __pycache__
+cache*

@@ -35,7 +35,7 @@ class EvidenceCardPipeline:
     def __init__(
         self,
         client: GLMClient,
-        ocr_output_dir: str = "./ocr_cache",
+        ocr_output_dir: str = "./cache_ocr",
         ocr_dpi: int = 200,
         ocr_validate_pages: bool = True,
     ):

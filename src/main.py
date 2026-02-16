@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--target", help="目标路径（用于 card/hpp 步骤）")
     parser.add_argument("--output", "-o", help="输出目录")
     parser.add_argument("--skip-hpp", action="store_true", help="跳过 HPP 映射")
-    parser.add_argument("--ocr-dir", default="./ocr_cache", help="OCR 缓存目录 (默认 ./ocr_cache)")
+    parser.add_argument("--ocr-dir", default="./cache_ocr", help="OCR 缓存目录 (默认 ./ocr_cache)")
     parser.add_argument("--dpi", type=int, default=200, help="PDF 转图片 DPI (默认 200)")
     parser.add_argument("--no-validate-pages", action="store_true", help="跳过 OCR 正文页验证")
     parser.add_argument("--force-ocr", action="store_true", help="强制重跑 OCR（忽略缓存）")

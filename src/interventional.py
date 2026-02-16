@@ -1,4 +1,4 @@
-"""Interventional (干预/RCT) 证据卡提取器"""
+"""Interventional (RCT) Evidence Card Extractor"""
 import json
 from typing import Any, Dict, List
 
@@ -10,7 +10,7 @@ class InterventionalExtractor(BaseExtractor):
     PROMPT_DIR = "interventional"
 
     def extract_paths(self, pdf_path: str) -> List[Dict]:
-        """Step 1: 提取介入对比路径"""
+        """Step 1: Extract intervention/comparator paths"""
         prompt_template = self.load_prompt("step1_paths")
         pdf_text = self.get_pdf_text(pdf_path)
         prompt = self._build_prompt(prompt_template, pdf_text)
@@ -23,7 +23,7 @@ class InterventionalExtractor(BaseExtractor):
         return [result]
 
     def extract_evidence_card(self, pdf_path: str, target_path: str) -> List[Dict]:
-        """Step 2: 以对比为单位构建完整证据卡（对齐 HPP 模板）"""
+        """Step 2: Build complete evidence cards by comparator (aligned with HPP template)"""
         prompt_template = self.load_prompt("step2_card")
         pdf_text = self.get_pdf_text(pdf_path)
 

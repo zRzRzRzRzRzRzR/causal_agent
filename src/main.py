@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-医学文献证据卡提取工具 - 命令行入口
+Medical Literature Evidence Card Extraction Tool - Command Line Interface
 
-用法：
-  # 完整流水线（自动分类 → 提取路径 → 证据卡 → HPP映射）
+Usage:
+  # Full pipeline (auto-classify -> extract paths -> evidence cards -> HPP mapping)
   python main.py full paper.pdf --output ./output
 
-  # 仅分类
+  # Classify only
   python main.py classify paper.pdf
 
-  # 仅提取路径（指定类型）
+  # Extract paths only (specify type)
   python main.py paths paper.pdf --type interventional
 
-  # 仅提取证据卡（指定路径）
-  python main.py card paper.pdf --type interventional --target "Late dinner vs Early dinner → Glucose AUC"
+  # Extract evidence cards only (specify path)
+  python main.py card paper.pdf --type interventional --target "Late dinner vs Early dinner -> Glucose AUC"
 
-  # 完整流水线（强制类型，跳过HPP映射）
+  # Full pipeline (force type, skip HPP mapping)
   python main.py full paper.pdf --type interventional --skip-hpp --output ./output
 """
 import argparse
@@ -29,36 +29,36 @@ from config import DEFAULT_MODEL
 
 def main():
     parser = argparse.ArgumentParser(
-        description="医学文献证据卡提取工具",
+        description="Medical Literature Evidence Card Extraction Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument(
         "step",
         choices=["full", "classify", "paths", "card", "hpp"],
-        help="执行步骤: full(完整流水线), classify(分类), paths(提取路径), card(证据卡), hpp(HPP映射)",
+        help="Step: full (full pipeline), classify, paths (extract paths), card (evidence card), hpp (HPP mapping)",
     )
-    parser.add_argument("pdf", help="PDF 文件路径")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="GLM 模型名称")
-    parser.add_argument("--api-key", help="智谱AI API Key")
+    parser.add_argument("pdf", help="PDF file path")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="GLM model name")
+    parser.add_argument("--api-key", help="ZhipuAI API Key")
     parser.add_argument("--base-url", help="API Base URL")
     parser.add_argument(
         "--type",
         choices=["interventional", "causal", "mechanistic", "associational"],
-        help="强制指定文献类型（跳过自动分类）",
+        help="Force document type (skip auto-classification)",
     )
-    parser.add_argument("--target", help="目标路径（用于 card/hpp 步骤）")
-    parser.add_argument("--output", "-o", help="输出目录")
-    parser.add_argument("--skip-hpp", action="store_true", help="跳过 HPP 映射")
-    parser.add_argument("--ocr-dir", default="./cache_ocr", help="OCR 缓存目录 (默认 ./ocr_cache)")
-    parser.add_argument("--dpi", type=int, default=200, help="PDF 转图片 DPI (默认 200)")
-    parser.add_argument("--no-validate-pages", action="store_true", help="跳过 OCR 正文页验证")
-    parser.add_argument("--force-ocr", action="store_true", help="强制重跑 OCR（忽略缓存）")
-    parser.add_argument("--pretty", action="store_true", default=True, help="美化 JSON 输出")
+    parser.add_argument("--target", help="Target path (for card/hpp steps)")
+    parser.add_argument("--output", "-o", help="Output directory")
+    parser.add_argument("--skip-hpp", action="store_true", help="Skip HPP mapping")
+    parser.add_argument("--ocr-dir", default="./cache_ocr", help="OCR cache directory")
+    parser.add_argument("--dpi", type=int, default=200, help="PDF to image DPI (default: 200)")
+    parser.add_argument("--no-validate-pages", action="store_true", help="Skip OCR content page validation")
+    parser.add_argument("--force-ocr", action="store_true", help="Force re-run OCR (ignore cache)")
+    parser.add_argument("--pretty", action="store_true", default=True, help="Pretty JSON output")
 
     args = parser.parse_args()
 
-    # 初始化客户端
+    # Initialize client
     client = GLMClient(
         api_key=args.api_key,
         base_url=args.base_url,
@@ -87,12 +87,12 @@ def main():
                 target_path=args.target,
             )
 
-        # 输出到 stdout
+        # Output to stdout
         indent = 2 if args.pretty else None
         print(json.dumps(result, ensure_ascii=False, indent=indent))
 
     except Exception as e:
-        print(f"❌ 错误: {e}", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)

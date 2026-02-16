@@ -1,4 +1,4 @@
-"""GLM LLM 客户端封装"""
+"""GLM LLM Client Wrapper"""
 import os
 import json
 import base64
@@ -49,11 +49,11 @@ class GLMClient:
     def call_json(
         self,
         prompt: str,
-        system_prompt: str = "你是医学文献分析专家，严格按照 JSON 格式输出。",
+        system_prompt: str = "You are a medical literature analysis expert. Output strictly in JSON format.",
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> Any:
-        """调用 LLM 并解析 JSON 响应"""
+        """Call LLM and parse JSON response"""
         response = self.call(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -65,14 +65,14 @@ class GLMClient:
 
     @staticmethod
     def _parse_json(text: str) -> Any:
-        """尝试多种方式解析 JSON"""
-        # 直接解析
+        """Try multiple ways to parse JSON"""
+        # Direct parse
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
 
-        # 提取 ```json ... ``` 块
+        # Extract ```json ... ``` block
         match = re.search(r'```json\s*([\s\S]*?)```', text)
         if match:
             try:
@@ -80,7 +80,7 @@ class GLMClient:
             except json.JSONDecodeError:
                 pass
 
-        # 提取最外层 { } 或 [ ]
+        # Extract outermost { } or [ ]
         for pattern in [r'\{[\s\S]*\}', r'\[[\s\S]*\]']:
             match = re.search(pattern, text)
             if match:
@@ -89,7 +89,7 @@ class GLMClient:
                 except json.JSONDecodeError:
                     pass
 
-        raise ValueError(f"无法解析模型响应为 JSON: {text[:500]}")
+        raise ValueError(f"Failed to parse model response as JSON: {text[:500]}")
 
     def encode_pdf(self, pdf_path: str) -> str:
         with open(pdf_path, "rb") as f:

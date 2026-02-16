@@ -1,7 +1,4 @@
-"""Causal (因果推断) 证据卡提取器"""
-import json
-from typing import Any, Dict, List
-
+from typing import Dict, List
 from base import BaseExtractor
 
 
@@ -10,7 +7,7 @@ class CausalExtractor(BaseExtractor):
     PROMPT_DIR = "causal"
 
     def extract_paths(self, pdf_path: str) -> List[Dict]:
-        """Step 1: 提取因果对比路径"""
+        """Step 1: Extract causal comparison paths"""
         prompt_template = self.load_prompt("step1_paths")
         pdf_text = self.get_pdf_text(pdf_path)
         prompt = self._build_prompt(prompt_template, pdf_text)
@@ -23,7 +20,7 @@ class CausalExtractor(BaseExtractor):
         return [result]
 
     def extract_evidence_card(self, pdf_path: str, target_path: str) -> List[Dict]:
-        """Step 2: 以因果对比为单位构建证据卡"""
+        """Step 2: Build evidence cards by causal comparison"""
         prompt_template = self.load_prompt("step2_card")
         pdf_text = self.get_pdf_text(pdf_path)
 

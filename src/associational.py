@@ -1,4 +1,4 @@
-"""Associational (关联性) 证据卡提取器"""
+"""Associational Evidence Card Extractor"""
 import json
 from typing import Any, Dict, List
 
@@ -10,7 +10,7 @@ class AssociationalExtractor(BaseExtractor):
     PROMPT_DIR = "associational"
 
     def extract_paths(self, pdf_path: str) -> List[Dict]:
-        """Step 1: 提取关联对"""
+        """Step 1: Extract association pairs"""
         prompt_template = self.load_prompt("step1_paths")
         pdf_text = self.get_pdf_text(pdf_path)
         prompt = self._build_prompt(prompt_template, pdf_text)
@@ -23,7 +23,7 @@ class AssociationalExtractor(BaseExtractor):
         return [result]
 
     def extract_evidence_card(self, pdf_path: str, target_path: str) -> List[Dict]:
-        """Step 2: 以关联对为单位构建证据卡"""
+        """Step 2: Build evidence cards by association pairs"""
         prompt_template = self.load_prompt("step2_card")
         pdf_text = self.get_pdf_text(pdf_path)
 

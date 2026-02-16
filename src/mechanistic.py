@@ -1,4 +1,4 @@
-"""Mechanistic (机制/中介/通路) 证据卡提取器"""
+"""Mechanistic Evidence Card Extractor"""
 import json
 from typing import Any, Dict, List
 
@@ -10,7 +10,7 @@ class MechanisticExtractor(BaseExtractor):
     PROMPT_DIR = "mechanistic"
 
     def extract_paths(self, pdf_path: str) -> List[str]:
-        """Step 1: 提取机制通路"""
+        """Step 1: Extract mechanistic pathways"""
         prompt_template = self.load_prompt("step1_paths")
         pdf_text = self.get_pdf_text(pdf_path)
         prompt = self._build_prompt(prompt_template, pdf_text)
@@ -23,7 +23,7 @@ class MechanisticExtractor(BaseExtractor):
         return [result]
 
     def extract_evidence_card(self, pdf_path: str, target_path: str) -> List[Dict]:
-        """Step 2: 以通路为单位构建证据卡"""
+        """Step 2: Build evidence cards by pathway"""
         prompt_template = self.load_prompt("step2_card")
         pdf_text = self.get_pdf_text(pdf_path)
 

@@ -31,6 +31,6 @@ paper.pdf
   ├─ Step 2: 合并paths → Extractor.extract_evidence_card() → 完整证据卡JSON
   │
   └─ Step 3: Extractor.extract_hpp_mapping() → 映射到HPP平台字段
-  
+
 输出: output/paper_evidence_cards.json
 ```

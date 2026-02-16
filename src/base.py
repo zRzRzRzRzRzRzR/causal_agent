@@ -5,6 +5,7 @@ from llm_client import GLMClient
 from ocr import get_pdf_text
 import sys
 
+
 class BaseExtractor:
     EVIDENCE_TYPE: str = ""
     PROMPT_DIR: str = ""
@@ -49,7 +50,6 @@ class BaseExtractor:
         return evidence_card
 
     def run_full_pipeline(self, pdf_path: str) -> List[Dict]:
-
         print(f"[{self.EVIDENCE_TYPE}] Step 1: Extracting paths...", file=sys.stderr)
         paths = self.extract_paths(pdf_path)
         print(f"  Found {len(paths)} paths", file=sys.stderr)

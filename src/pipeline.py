@@ -152,7 +152,10 @@ class EvidenceCardPipeline:
 
         # Get extractor
         if evidence_type not in EXTRACTOR_MAP:
-            print(f"  Unknown type {evidence_type}, falling back to associational", file=sys.stderr)
+            print(
+                f"  Unknown type {evidence_type}, falling back to associational",
+                file=sys.stderr,
+            )
             evidence_type = "associational"
 
         extractor = EXTRACTOR_MAP[evidence_type](self.client)
@@ -178,7 +181,8 @@ class EvidenceCardPipeline:
         # Step 2: Merge paths into one card
         merged_target = _merge_paths_to_target(paths)
         print(
-            f"\n[Pipeline] Step 2: Building evidence cards (merging {len(paths)} paths into 1 card)...", file=sys.stderr
+            f"\n[Pipeline] Step 2: Building evidence cards (merging {len(paths)} paths into 1 card)...",
+            file=sys.stderr,
         )
 
         cards = extractor.extract_evidence_card(pdf_path, merged_target)
@@ -186,7 +190,9 @@ class EvidenceCardPipeline:
             cards = [cards]
 
         n_effects = sum(len(c.get("effects", [])) for c in cards)
-        print(f"  Generated {len(cards)} cards with {n_effects} effects", file=sys.stderr)
+        print(
+            f"  Generated {len(cards)} cards with {n_effects} effects", file=sys.stderr
+        )
 
         # Step 3: HPP mapping
         if not skip_hpp:
@@ -203,7 +209,10 @@ class EvidenceCardPipeline:
             output_file = out_dir / f"{pdf_name}_evidence_cards.json"
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(cards, f, ensure_ascii=False, indent=2)
-            print(f"\n[Pipeline] Saved {len(cards)} evidence cards to: {output_file}", file=sys.stderr)
+            print(
+                f"\n[Pipeline] Saved {len(cards)} evidence cards to: {output_file}",
+                file=sys.stderr,
+            )
 
         return cards
 

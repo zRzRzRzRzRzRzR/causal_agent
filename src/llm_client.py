@@ -102,10 +102,12 @@ class GLMClient:
                 "gif": "image/gif",
                 "webp": "image/webp",
             }.get(suffix, "image/png")
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{media_type};base64,{img_base64}"},
-            })
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{img_base64}"},
+                }
+            )
         content.append({"type": "text", "text": prompt})
 
         response = self.client.chat.completions.create(

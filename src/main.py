@@ -39,7 +39,9 @@ def main():
     parser.add_argument("pdf", help="PDF file path")
     parser.add_argument("--model", help="Model name (overrides DEFAULT_MODEL in .env)")
     parser.add_argument("--api-key", help="API Key (overrides OPENAI_API_KEY in .env)")
-    parser.add_argument("--base-url", help="API Base URL (overrides OPENAI_BASE_URL in .env)")
+    parser.add_argument(
+        "--base-url", help="API Base URL (overrides OPENAI_BASE_URL in .env)"
+    )
     parser.add_argument(
         "--type",
         choices=["interventional", "causal", "mechanistic", "associational"],

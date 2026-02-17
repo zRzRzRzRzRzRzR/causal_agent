@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Medical Literature Evidence Card Extraction Tool - Command Line Interface
 
@@ -8,12 +7,14 @@ Usage:
   python main.py paths paper.pdf --type interventional
   python main.py full paper.pdf --type interventional --skip-hpp --output ./output
 """
+
 import argparse
 import json
 
 from src.llm_client import GLMClient
+from src.ocr import get_pdf_text
+from src.ocr import init_extractor as init_ocr
 from src.pipeline import EvidenceCardPipeline
-from src.ocr import init_extractor as init_ocr, get_pdf_text
 
 
 def main():

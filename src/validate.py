@@ -6,8 +6,8 @@ Functionality:
 2. Numerical consistency checks (effects aligned with estimand_equation)
 3. Reproducibility checks (core parameters are non-null)
 """
-from typing import Dict, List, Tuple
 
+from typing import Dict, List, Tuple
 
 # Required top-level fields shared by all types
 COMMON_REQUIRED_FIELDS = [

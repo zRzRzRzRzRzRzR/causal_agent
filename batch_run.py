@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Batch Evidence Card Extraction Script
 
@@ -15,12 +14,13 @@ import json
 import sys
 import time
 import traceback
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from src.llm_client import GLMClient
+from src.ocr import get_pdf_text
+from src.ocr import init_extractor as init_ocr
 from src.pipeline import EvidenceCardPipeline
-from src.ocr import init_extractor as init_ocr, get_pdf_text
 
 
 def process_single_pdf(
@@ -68,7 +68,11 @@ def main():
     parser = argparse.ArgumentParser(description="Batch evidence card extraction")
     parser.add_argument("-i", "--input-dir", default="./evidence_card")
     parser.add_argument("-o", "--output-dir", default="./output")
-    parser.add_argument("--type", choices=["interventional", "causal", "mechanistic", "associational"], default=None)
+    parser.add_argument(
+        "--type",
+        choices=["interventional", "causal", "mechanistic", "associational"],
+        default=None,
+    )
     parser.add_argument("--skip-hpp", action="store_true")
     parser.add_argument("--ocr-dir", default="./cache_ocr")
     parser.add_argument("--dpi", type=int, default=200)
@@ -120,14 +124,26 @@ def main():
         for idx, pdf_path in enumerate(pdf_files, 1):
             print(f"\n{'─'*50}", file=sys.stderr)
             print(f"[{idx}/{len(pdf_files)}] {pdf_path.name}", file=sys.stderr)
-            summary = process_single_pdf(pdf_path, pipeline, output_dir, args.type, args.skip_hpp)
+            summary = process_single_pdf(
+                pdf_path, pipeline, output_dir, args.type, args.skip_hpp
+            )
             results.append(summary)
             emoji = "✅" if summary["status"] == "success" else "❌"
-            print(f"{emoji} {summary['n_cards']} cards, {summary['n_effects']} effects, {summary['elapsed_sec']}s", file=sys.stderr)
+            print(
+                f"{emoji} {summary['n_cards']} cards, {summary['n_effects']} effects, {summary['elapsed_sec']}s",
+                file=sys.stderr,
+            )
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
             future_to_pdf = {
-                executor.submit(process_single_pdf, p, pipeline, output_dir, args.type, args.skip_hpp): p
+                executor.submit(
+                    process_single_pdf,
+                    p,
+                    pipeline,
+                    output_dir,
+                    args.type,
+                    args.skip_hpp,
+                ): p
                 for p in pdf_files
             }
             for future in as_completed(future_to_pdf):
@@ -135,20 +151,33 @@ def main():
                 try:
                     summary = future.result()
                 except Exception as e:
-                    summary = {"pdf": pdf_path.name, "status": "failed", "n_cards": 0, "n_effects": 0, "elapsed_sec": 0, "error": str(e)}
+                    summary = {
+                        "pdf": pdf_path.name,
+                        "status": "failed",
+                        "n_cards": 0,
+                        "n_effects": 0,
+                        "elapsed_sec": 0,
+                        "error": str(e),
+                    }
                 results.append(summary)
                 emoji = "✅" if summary["status"] == "success" else "❌"
-                print(f"{emoji} {pdf_path.name}: {summary['n_cards']} cards {summary['elapsed_sec']}s", file=sys.stderr)
+                print(
+                    f"{emoji} {pdf_path.name}: {summary['n_cards']} cards {summary['elapsed_sec']}s",
+                    file=sys.stderr,
+                )
 
     total_elapsed = round(time.time() - t_start, 1)
     n_success = sum(1 for r in results if r["status"] == "success")
     n_failed = len(results) - n_success
 
     batch_summary = {
-        "total_pdfs": len(pdf_files), "success": n_success, "failed": n_failed,
+        "total_pdfs": len(pdf_files),
+        "success": n_success,
+        "failed": n_failed,
         "total_cards": sum(r["n_cards"] for r in results),
         "total_effects": sum(r["n_effects"] for r in results),
-        "total_elapsed_sec": total_elapsed, "details": results,
+        "total_elapsed_sec": total_elapsed,
+        "details": results,
     }
 
     summary_path = output_dir / "_batch_summary.json"
@@ -156,7 +185,10 @@ def main():
         json.dump(batch_summary, f, ensure_ascii=False, indent=2)
 
     print(f"\n{'='*60}", file=sys.stderr)
-    print(f"📊 Complete: {n_success}/{len(pdf_files)} succeeded, {total_elapsed}s", file=sys.stderr)
+    print(
+        f"📊 Complete: {n_success}/{len(pdf_files)} succeeded, {total_elapsed}s",
+        file=sys.stderr,
+    )
     print(f"   Summary: {summary_path}", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
 

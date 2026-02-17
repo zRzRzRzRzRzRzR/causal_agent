@@ -12,18 +12,18 @@ Key design:
   - Subgroup stratification uses different edges in effects, does not split cards
   - Multiple paths from Step 1 are merged and passed to Step 2
 """
+
 import json
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .llm_client import GLMClient
-from .base import BaseExtractor, Classifier
-from .interventional import InterventionalExtractor
-from .causal import CausalExtractor
-from .mechanistic import MechanisticExtractor
 from .associational import AssociationalExtractor
-
+from .base import BaseExtractor, Classifier
+from .causal import CausalExtractor
+from .interventional import InterventionalExtractor
+from .llm_client import GLMClient
+from .mechanistic import MechanisticExtractor
 
 EXTRACTOR_MAP = {
     "interventional": InterventionalExtractor,

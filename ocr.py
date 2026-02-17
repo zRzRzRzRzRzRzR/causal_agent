@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 PDF Extractor - Based on GLM-4.6V and GLM-OCR
 
@@ -9,13 +8,15 @@ Workflow:
 4. Save results to output directory
 """
 
-import os
 import argparse
-from pathlib import Path
-from typing import List, Dict, Any
-from dotenv import load_dotenv
+import os
 import tempfile
+from pathlib import Path
+from typing import Any, Dict, List
+
+from dotenv import load_dotenv
 from glmocr import parse
+
 from src.llms import call_vision_model, pdf_to_images
 
 load_dotenv()

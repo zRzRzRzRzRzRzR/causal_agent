@@ -15,7 +15,7 @@ Cache strategy:
 import os
 import tempfile
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import fitz
 from glmocr import parse

@@ -1,4 +1,5 @@
 from typing import Dict, List
+
 from .base import BaseExtractor
 
 

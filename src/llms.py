@@ -1,10 +1,11 @@
-from openai import OpenAI
-import os
 import base64
+import os
 import tempfile
 from pathlib import Path
 from typing import List
+
 import fitz
+from openai import OpenAI
 
 
 def pdf_to_images(pdf_path: str, output_dir: str = None, dpi: int = 200) -> List[str]:

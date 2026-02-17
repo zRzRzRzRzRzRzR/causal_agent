@@ -1,10 +1,10 @@
-from .base import BaseExtractor, Classifier
-from .mechanistic import MechanisticExtractor
-from .interventional import InterventionalExtractor
-from .causal import CausalExtractor
 from .associational import AssociationalExtractor
-from .pipeline import EvidenceCardPipeline
+from .base import BaseExtractor, Classifier
+from .causal import CausalExtractor
+from .interventional import InterventionalExtractor
 from .llm_client import GLMClient
+from .mechanistic import MechanisticExtractor
+from .pipeline import EvidenceCardPipeline
 
 __all__ = [
     "BaseExtractor",

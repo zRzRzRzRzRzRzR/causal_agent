@@ -7,10 +7,11 @@ Reads configuration from environment variables (loaded via .env):
   - DEFAULT_TEMPERATURE
   - DEFAULT_MAX_TOKENS
 """
-import os
-import json
+
 import base64
-from typing import Optional, Dict, Any
+import json
+import os
+from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 from openai import OpenAI

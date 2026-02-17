@@ -1,11 +1,10 @@
 """
-Batch Evidence Card Extraction Script
+Batch Evidence Edge Extraction Script
 
 Usage:
   python batch_run.py                              # Default: ./evidence_card -> ./output
   python batch_run.py -i ./pdfs -o ./results        # Custom input/output directories
   python batch_run.py --type interventional          # Force document type (skip classification)
-  python batch_run.py --skip-hpp                     # Skip HPP mapping
   python batch_run.py --max-workers 3                # Concurrency (default 1, sequential)
 """
 
@@ -20,32 +19,28 @@ from pathlib import Path
 from src.llm_client import GLMClient
 from src.ocr import get_pdf_text
 from src.ocr import init_extractor as init_ocr
-from src.pipeline import EvidenceCardPipeline
+from src.pipeline import EdgeExtractionPipeline
 
 
 def process_single_pdf(
     pdf_path: Path,
-    pipeline: EvidenceCardPipeline,
+    pipeline: EdgeExtractionPipeline,
     output_dir: Path,
     force_type: str = None,
-    skip_hpp: bool = False,
 ) -> dict:
-    """Process a single PDF, return result summary"""
+    """Process a single PDF and return a result summary."""
     t0 = time.time()
     status = "success"
     error_msg = None
-    n_cards = 0
-    n_effects = 0
+    n_edges = 0
 
     try:
-        cards = pipeline.run(
+        edges = pipeline.run(
             pdf_path=str(pdf_path),
             force_type=force_type,
-            skip_hpp=skip_hpp,
             output_dir=str(output_dir),
         )
-        n_cards = len(cards) if cards else 0
-        n_effects = sum(len(c.get("effects", [])) for c in cards) if cards else 0
+        n_edges = len(edges) if edges else 0
 
     except Exception as e:
         status = "failed"
@@ -57,15 +52,14 @@ def process_single_pdf(
     return {
         "pdf": pdf_path.name,
         "status": status,
-        "n_cards": n_cards,
-        "n_effects": n_effects,
+        "n_edges": n_edges,
         "elapsed_sec": elapsed,
         "error": error_msg,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch evidence card extraction")
+    parser = argparse.ArgumentParser(description="Batch evidence edge extraction")
     parser.add_argument("-i", "--input-dir", default="./evidence_card")
     parser.add_argument("-o", "--output-dir", default="./output")
     parser.add_argument(
@@ -73,7 +67,6 @@ def main():
         choices=["interventional", "causal", "mechanistic", "associational"],
         default=None,
     )
-    parser.add_argument("--skip-hpp", action="store_true")
     parser.add_argument("--ocr-dir", default="./cache_ocr")
     parser.add_argument("--dpi", type=int, default=200)
     parser.add_argument("--no-validate-pages", action="store_true")
@@ -87,29 +80,25 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
-    if not input_dir.exists():
-        print(f"❌ Input directory does not exist: {input_dir}", file=sys.stderr)
-        sys.exit(1)
+    assert input_dir.exists(), f"Input directory does not exist: {input_dir}"
 
     pdf_files = sorted(input_dir.glob("*.pdf"))
-    if not pdf_files:
-        print(f"❌ No PDF files in input directory: {input_dir}", file=sys.stderr)
-        sys.exit(1)
+    assert pdf_files, f"No PDF files found in: {input_dir}"
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"{'='*60}", file=sys.stderr)
-    print(f"📚 Batch Evidence Card Extraction", file=sys.stderr)
-    print(f"   Input: {input_dir.resolve()} ({len(pdf_files)} PDFs)", file=sys.stderr)
-    print(f"   Output: {output_dir.resolve()}", file=sys.stderr)
-    print(f"   Type: {args.type or 'auto'}", file=sys.stderr)
-    print(f"   HPP:  {'disabled' if args.skip_hpp else 'enabled'}", file=sys.stderr)
+    print(f"Batch Evidence Edge Extraction", file=sys.stderr)
+    print(f"  Input:  {input_dir.resolve()} ({len(pdf_files)} PDFs)", file=sys.stderr)
+    print(f"  Output: {output_dir.resolve()}", file=sys.stderr)
+    print(f"  Type:   {args.type or 'auto-classify'}", file=sys.stderr)
+    print(f"  Workers: {args.max_workers}", file=sys.stderr)
     print(f"{'='*60}\n", file=sys.stderr)
 
     client = GLMClient(api_key=args.api_key, base_url=args.base_url, model=args.model)
 
-    pipeline = EvidenceCardPipeline(
-        client,
+    pipeline = EdgeExtractionPipeline(
+        client=client,
         ocr_text_func=get_pdf_text,
         ocr_init_func=init_ocr,
         ocr_output_dir=args.ocr_dir,
@@ -124,25 +113,18 @@ def main():
         for idx, pdf_path in enumerate(pdf_files, 1):
             print(f"\n{'─'*50}", file=sys.stderr)
             print(f"[{idx}/{len(pdf_files)}] {pdf_path.name}", file=sys.stderr)
-            summary = process_single_pdf(
-                pdf_path, pipeline, output_dir, args.type, args.skip_hpp
-            )
+            summary = process_single_pdf(pdf_path, pipeline, output_dir, args.type)
             results.append(summary)
-            emoji = "✅" if summary["status"] == "success" else "❌"
+            tag = "OK" if summary["status"] == "success" else "FAIL"
             print(
-                f"{emoji} {summary['n_cards']} cards, {summary['n_effects']} effects, {summary['elapsed_sec']}s",
+                f"  [{tag}] {summary['n_edges']} edges, {summary['elapsed_sec']}s",
                 file=sys.stderr,
             )
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
             future_to_pdf = {
                 executor.submit(
-                    process_single_pdf,
-                    p,
-                    pipeline,
-                    output_dir,
-                    args.type,
-                    args.skip_hpp,
+                    process_single_pdf, p, pipeline, output_dir, args.type
                 ): p
                 for p in pdf_files
             }
@@ -154,15 +136,15 @@ def main():
                     summary = {
                         "pdf": pdf_path.name,
                         "status": "failed",
-                        "n_cards": 0,
-                        "n_effects": 0,
+                        "n_edges": 0,
                         "elapsed_sec": 0,
                         "error": str(e),
                     }
                 results.append(summary)
-                emoji = "✅" if summary["status"] == "success" else "❌"
+                tag = "OK" if summary["status"] == "success" else "FAIL"
                 print(
-                    f"{emoji} {pdf_path.name}: {summary['n_cards']} cards {summary['elapsed_sec']}s",
+                    f"  [{tag}] {pdf_path.name}: {summary['n_edges']} edges, "
+                    f"{summary['elapsed_sec']}s",
                     file=sys.stderr,
                 )
 
@@ -174,8 +156,7 @@ def main():
         "total_pdfs": len(pdf_files),
         "success": n_success,
         "failed": n_failed,
-        "total_cards": sum(r["n_cards"] for r in results),
-        "total_effects": sum(r["n_effects"] for r in results),
+        "total_edges": sum(r["n_edges"] for r in results),
         "total_elapsed_sec": total_elapsed,
         "details": results,
     }
@@ -186,10 +167,11 @@ def main():
 
     print(f"\n{'='*60}", file=sys.stderr)
     print(
-        f"📊 Complete: {n_success}/{len(pdf_files)} succeeded, {total_elapsed}s",
+        f"Complete: {n_success}/{len(pdf_files)} succeeded, "
+        f"{batch_summary['total_edges']} total edges, {total_elapsed}s",
         file=sys.stderr,
     )
-    print(f"   Summary: {summary_path}", file=sys.stderr)
+    print(f"  Summary: {summary_path}", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
 
     sys.exit(1 if n_failed == len(pdf_files) else 0)

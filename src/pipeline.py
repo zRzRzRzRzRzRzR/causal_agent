@@ -239,12 +239,18 @@ class EdgeExtractionPipeline:
         Returns a list of edge JSONs conforming to hpp_mapping_template.
         """
         pdf_name = Path(pdf_path).stem
-        out_dir = Path(output_dir) if output_dir else None
-        if out_dir:
-            out_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(output_dir) if output_dir else None
+
+        # Create a subfolder for each PDF
+        pdf_dir = None
+        if base_dir:
+            pdf_dir = base_dir / pdf_name
+            pdf_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"\n{'='*60}", file=sys.stderr)
         print(f"[Pipeline] Processing: {pdf_name}", file=sys.stderr)
+        if pdf_dir:
+            print(f"[Pipeline] Output folder: {pdf_dir}", file=sys.stderr)
         print(f"{'='*60}", file=sys.stderr)
         pdf_text = self._get_pdf_text(pdf_path)
 
@@ -257,18 +263,16 @@ class EdgeExtractionPipeline:
             classification = step0_classify(self.client, pdf_text)
             evidence_type = classification.get("primary_category", "associational")
 
-        if out_dir:
-            _save_json(
-                out_dir / f"{pdf_name}_step0_classification.json", classification
-            )
+        if pdf_dir:
+            _save_json(pdf_dir / "step0_classification.json", classification)
 
         print("\n[Step 1] Enumerating edges ...", file=sys.stderr)
         step1_result = step1_enumerate_edges(self.client, pdf_text, evidence_type)
         edges_list = step1_result.get("edges", [])
         paper_info = step1_result.get("paper_info", {})
 
-        if out_dir:
-            _save_json(out_dir / f"{pdf_name}_step1_edges.json", step1_result)
+        if pdf_dir:
+            _save_json(pdf_dir / "step1_edges.json", step1_result)
 
         print(
             f"\n[Step 2] Filling templates for {len(edges_list)} edges ...",
@@ -301,8 +305,8 @@ class EdgeExtractionPipeline:
             eq = filled.get("equation_type", "?")
             print(f"         Done: {eid} (equation_type={eq})", file=sys.stderr)
 
-        if out_dir:
-            output_file = out_dir / f"{pdf_name}_edges.json"
+        if pdf_dir:
+            output_file = pdf_dir / "edges.json"
             _save_json(output_file, all_filled_edges)
             print(
                 f"\n[Pipeline] Saved {len(all_filled_edges)} edges to: {output_file}",

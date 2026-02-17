@@ -91,7 +91,7 @@ DOI: {doi}
 ### epsilon.alpha（因果识别策略）
 - `id_strategy`: 用1-2句话描述论文使用的因果/统计识别方法
 - `assumptions`: 列出关键假设
-- `status`: 
+- `status`:
   - `identified` — RCT 或有效的因果识别设计
   - `partially_identified` — 观察性研究有调整但可能有残余混杂
   - `not_identified` — 纯描述性，无因果推断

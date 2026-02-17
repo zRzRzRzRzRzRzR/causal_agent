@@ -1,385 +1,331 @@
 {
-  "_comment_00": "============================================================",
-  "_comment_01": "HPP证据卡JSON模板 v2.1.0 - 带详细字段说明",
-  "_comment_02": "用途: 为EL-GSE验证框架提供标准化的证据卡输入格式",
-  "_comment_03": "============================================================",
-  "$schema": "hpp_evidence_card_v1",
-  "_template_description": "HPP映射输入模板 - 用于EL-GSE验证框架",
-  "_template_version": "2.1.0",
-  "_comment_10": "=== evidence_id: 证据卡唯一标识符 ===",
-  "_comment_11": "格式建议: EV-年份-研究名称, 例如 EV-2024-FRAMINGHAM-HDL",
-  "evidence_id": "EV-YYYY-STUDY_NAME",
-  "_comment_20": "=== paper: 论文元信息 ===",
-  "paper": {
-    "_comment": "论文基本信息，用于追溯数据来源",
-    "title": "论文完整标题",
-    "doi": "10.xxxx/xxxxx",
-    "pmid": "PubMed ID (8位数字)",
-    "year": 2024,
-    "journal": "期刊名称",
-    "authors": [
-      "第一作者",
-      "第二作者",
-      "..."
-    ]
-  },
-  "_comment_30": "=== design: 研究设计信息 ===",
-  "design": {
-    "_comment": "研究设计类型和基本信息",
-    "type": "cohort",
-    "_type_options": [
-      "cohort      - 队列研究 (前瞻性/回顾性)",
-      "RCT         - 随机对照试验",
-      "MR          - 孟德尔随机化研究",
-      "meta-analysis - 荟萃分析",
-      "guideline   - 临床指南"
+  "_description": "PDF-derived initial input template. One JSON object per line when used as jsonl.",
+  "_equation_type_note": "Optional. Can be null and inferred downstream from equation_inference_hints + epsilon/modeling_directives.",
+  "_input_redundancy_policy": {
+    "auto_backfill_rules": [
+      "If equation_type is null, infer from hints: has_joint_intervention->E6; has_counterfactual_query->E5; has_mediator->E4; has_survival_outcome->E2; has_longitudinal_timepoints->E3; else E1.",
+      "If epsilon.rho.M missing and hpp_mapping.M has one element, backfill rho.M[0] from mapping.M[0].name.",
+      "If E5 context mapping missing, fallback to epsilon.rho.Z variable names.",
+      "If E6 rho.X1/X2 missing, backfill from epsilon.iota_1.core.name / epsilon.iota_2.core.name."
     ],
-    "analysis": "多变量线性/逻辑回归调整年龄、性别",
-    "_analysis_hint": "描述使用的统计分析方法",
-    "n_total": 10000,
-    "_n_total_hint": "研究总样本量",
-    "population_description": "研究纳入的人群特征描述"
-  },
-  "_comment_40": "=== variables: 变量定义 ===",
-  "variables": {
-    "_comment": "定义研究中涉及的所有变量及其角色",
-    "nodes": [
-      {
-        "_comment": "=== 暴露变量 (X) ===",
-        "node_id": "local:X",
-        "_node_id_hint": "变量唯一标识，格式: local:变量代号",
-        "label": "HDL Cholesterol",
-        "_label_hint": "变量的显示名称",
-        "type": "exposure",
-        "_type_options": [
-          "exposure - 暴露/干预变量"
-        ],
-        "unit": "mmol/L",
-        "_unit_hint": "变量的计量单位",
-        "description": "高密度脂蛋白胆固醇水平"
-      },
-      {
-        "_comment": "=== 结局变量 (Y) ===",
-        "node_id": "local:Y",
-        "label": "Cardiovascular Disease",
-        "type": "outcome",
-        "_type_options": [
-          "outcome - 结局/响应变量"
-        ],
-        "unit": "binary",
-        "outcome_family": "binary",
-        "_outcome_family_options": [
-          "continuous - 连续型结局 (如血压值、BMI)",
-          "binary     - 二分类结局 (如是否患病: 0/1)",
-          "survival   - 生存型结局 (如死亡时间) [当前不支持]"
-        ],
-        "description": "是否发生心血管事件"
-      },
-      {
-        "_comment": "=== 中介变量 (M) - 可选 ===",
-        "node_id": "local:M",
-        "label": "Triglycerides",
-        "type": "mediator",
-        "_type_options": [
-          "mediator - 中介变量，位于X和Y之间的中间变量"
-        ],
-        "unit": "mmol/L",
-        "description": "甘油三酯水平（如进行中介分析时使用）"
-      },
-      {
-        "_comment": "=== 协变量/调整变量 (Z) ===",
-        "node_id": "local:Z1",
-        "label": "Age",
-        "type": "covariate",
-        "_type_options": [
-          "covariate - 协变量/混杂因素，用于调整"
-        ],
-        "unit": "years"
-      },
-      {
-        "_comment": "=== 协变量2 ===",
-        "node_id": "local:Z2",
-        "label": "Sex",
-        "type": "covariate",
-        "unit": "binary (0=Female, 1=Male)"
-      }
+    "critical_fields_must_present": [
+      "schema_version",
+      "edge_id",
+      "epsilon",
+      "epsilon.o.type",
+      "epsilon.rho.X",
+      "epsilon.rho.Y",
+      "hpp_mapping.X.dataset",
+      "hpp_mapping.X.field",
+      "hpp_mapping.Y.dataset",
+      "hpp_mapping.Y.field"
     ],
-    "_comment_roles": "=== roles: 变量角色分组 ===",
-    "roles": {
-      "X": [
-        "HDL Cholesterol"
+    "fallback_priority": [
+      "explicit_field",
+      "modeling_directives",
+      "literature_estimate",
+      "equation_inference_hints",
+      "global_default"
+    ],
+    "max_missing_ratio": 0.3,
+    "missing_flag_prefix": "input_missing:",
+    "recommended_fields": [
+      "epsilon.tau.core.index",
+      "epsilon.tau.core.horizon",
+      "epsilon.rho.Z",
+      "literature_estimate.theta_hat",
+      "literature_estimate.ci",
+      "literature_estimate.design",
+      "literature_estimate.model"
+    ],
+    "target_fill_rate_min": 0.7
+  },
+  "_template_name": "HPP Unified Input Template (E1-E6, equation_type optional)",
+  "_template_version": "1.2.0",
+  "analysis_plan": {
+    "multiomics": [],
+    "sensitivity": {
+      "alternative_models": [
+        "iptw",
+        "ps_matching"
       ],
-      "_X_hint": "暴露变量列表 - 因果路径的起点",
-      "Y": [
-        "Cardiovascular Disease"
-      ],
-      "_Y_hint": "结局变量列表 - 因果路径的终点",
-      "Z": [
-        "Age",
-        "Sex"
-      ],
-      "_Z_hint": "调整变量/协变量列表 - 用于控制混杂",
-      "M": [],
-      "_M_hint": "中介变量列表 - 可选，用于中介分析",
-      "IV": [],
-      "_IV_hint": "工具变量列表 - 用于孟德尔随机化研究"
+      "e_value": true,
+      "leave_one_out": true,
+      "run": true
     },
-    "_comment_direction": "=== outcome_direction: 结局方向定义 ===",
-    "outcome_direction": {
-      "Cardiovascular Disease": "higher_is_worse",
-      "_options": [
-        "higher_is_worse  - 值越高越差 (如疾病发生、死亡)",
-        "higher_is_better - 值越高越好 (如生存率、健康评分)"
-      ]
-    }
+    "subgroup": []
   },
-  "_comment_50": "=== effects: 效应估计列表 ===",
-  "_comment_51": "每条因果边 (X→Y) 对应一个effect对象",
-  "effects": [
-    {
-      "_comment": "=== 效应基本信息 ===",
-      "edge_id": "EV-2024-STUDY#1",
-      "_edge_id_hint": "边的唯一标识，格式: 证据ID#序号",
-      "from": "HDL Cholesterol",
-      "_from_hint": "起点变量名 (暴露X)",
-      "to": "Cardiovascular Disease",
-      "_to_hint": "终点变量名 (结局Y)",
-      "mediators": [],
-      "_mediators_hint": "中介变量列表，空数组表示直接效应",
-      "_comment_outcome": "=== 结局类型 ===",
-      "outcome_family": "binary",
-      "_outcome_family_options": [
-        "continuous - 连续结局，使用OLS线性回归",
-        "binary     - 二分类结局，使用Logistic回归"
-      ],
-      "_comment_effect": "=== 效应量信息 ===",
-      "effect_scale": "OR",
-      "_effect_scale_options": [
-        "BETA - β回归系数 (连续结局)",
-        "OR   - 比值比 Odds Ratio (二分类结局)",
-        "RR   - 相对风险 Risk Ratio",
-        "HR   - 风险比 Hazard Ratio (生存分析) [当前不支持]",
-        "MD   - 均数差 Mean Difference",
-        "RD   - 风险差 Risk Difference"
-      ],
-      "estimate": 0.72,
-      "_estimate_hint": "效应点估计值。对于OR/RR/HR，这是比值(如0.72)；对于BETA，这是回归系数",
-      "se": 0.048,
-      "_se_hint": "标准误 (Standard Error)，用于精确的统计对比",
-      "ci": [
-        0.65,
-        0.80
-      ],
-      "_ci_hint": "置信区间 [下界, 上界]",
-      "ci_level": 0.95,
-      "_ci_level_hint": "置信水平，通常为0.95表示95%CI",
-      "p_value": "<0.001",
-      "_p_value_hint": "P值，可以是数字(0.003)或字符串('<0.001')",
-      "_comment_model": "=== 统计模型信息 ===",
-      "link_function": "logit",
-      "_link_function_options": [
-        "identity - 恒等连接 (连续结局，Y = α + βX + ...)",
-        "logit    - logit连接 (二分类结局，logit(P) = α + βX + ...)",
-        "log      - 对数连接 (计数结局) [当前不支持]"
-      ],
-      "model": "Multivariable Logistic Regression",
-      "_model_hint": "使用的统计模型名称",
-      "adjustment_set_used": [
-        "Age",
-        "Sex"
-      ],
-      "_adjustment_set_hint": "实际调整的协变量列表",
-      "n_effective": 84200,
-      "_n_effective_hint": "该效应估计使用的有效样本量",
-      "time_horizon": "P10Y",
-      "_time_horizon_hint": "随访时间范围，ISO8601格式 (P5Y=5年, P10Y=10年)",
-      "_comment_contrast": "=== exposure_contrast: 暴露对比定义 ===",
-      "_comment_contrast2": "决定如何编码暴露变量X进行分析",
-      "exposure_contrast": {
-        "type": "per_SD",
-        "_type_options": [
-          "per_unit        - 每单位变化 (原始值)",
-          "per_SD          - 每标准差变化 (Z-score标准化)",
-          "q5_vs_q1        - 最高五分位 vs 最低五分位",
-          "treat_vs_control- 治疗组 vs 对照组 (二分类暴露)",
-          "assignment      - 随机分组 (RCT)"
-        ],
-        "delta": "per 1 SD increase in HDL cholesterol",
-        "_delta_hint": "对比的文字描述",
+  "edge_id": "EV-YYYY-UNIQUE#N",
+  "epsilon": {
+    "Pi": "...",
+    "_iota_1_note": "Used by E6 only. Can stay null for non-E6 edges.",
+    "_iota_2_note": "Used by E6 only. Can stay null for non-E6 edges.",
+    "alpha": {
+      "assumption_required": [],
+      "assumptions": [],
+      "id_strategy": "...",
+      "status": "identified|partially_identified|not_identified"
+    },
+    "iota": {
+      "core": {
+        "name": "..."
+      },
+      "ext": {
+        "contrast_type": "category|per_unit|arm_vs_control|dose|binary|continuous",
+        "tx_encoding": "identity|log|one_hot|custom",
+        "unit": null,
         "x0": null,
-        "_x0_hint": "参照值 (如treat_vs_control时为0)",
-        "x1": null,
-        "_x1_hint": "比较值 (如treat_vs_control时为1)",
-        "unit": "SD"
+        "x1": null
       }
-    }
-  ],
-  "_comment_60": "=== estimand_equation: 结构方程定义 ===",
-  "_comment_61": "描述因果效应的数学形式",
-  "estimand_equation": {
-    "equations": [
-      {
-        "outcome": "Cardiovascular Disease",
-        "formula": "logit(P(Y=1)) = α + β·Z_score(X) + γ₁·Age + γ₂·Sex",
-        "_formula_hint": "结构方程的数学表达式",
-        "parameters": {
-          "β": -0.33,
-          "_β_hint": "主效应参数 (log(OR)=-0.33 对应 OR=0.72)",
-          "γ₁": 0.05,
-          "γ₂": 0.25
-        },
-        "window": "baseline±90d",
-        "_window_hint": "数据采集的时间窗口",
-        "derivation": "β = log(0.72) ≈ -0.33 from multivariable logistic regression",
-        "source_edge": "EV-2024-STUDY#1",
-        "_source_edge_hint": "对应的effects条目edge_id",
-        "analysis_set": "full_cohort",
-        "_analysis_set_options": [
-          "ITT         - 意向治疗分析",
-          "PP          - 方案符合分析",
-          "safety      - 安全性分析集",
-          "full_cohort - 全队列分析"
-        ],
-        "scale": "log(OR)",
-        "_scale_options": [
-          "BETA    - 原始β系数 (连续结局)",
-          "log(OR) - OR的对数值 (二分类结局)",
-          "log(HR) - HR的对数值 (生存分析)"
-        ]
-      }
-    ]
-  },
-  "_comment_70": "=== hpp_mapping: HPP平台变量映射 ===",
-  "_comment_71": "【核心配置】定义每个变量在HPP数据库中的位置",
-  "_comment_72": "只有status为exact/close/derived的变量才能用于HPP验证",
-  "hpp_mapping": {
-    "_comment_X": "=== X变量 (暴露) 的HPP映射 ===",
-    "X": {
-      "name": "HDL Cholesterol",
-      "_name_hint": "变量名称，需与variables中一致",
-      "dataset": "016-blood_tests",
-      "_dataset_hint": "HPP数据集名称，格式: 编号-名称",
-      "_dataset_options": [
-        "000-population              - 人口统计学数据",
-        "001-events                  - 事件/结局数据",
-        "002-anthropometrics         - 人体测量数据",
-        "003-blood_pressure          - 血压数据",
-        "004-body_composition        - 体成分数据",
-        "016-blood_tests             - 血液检测数据",
-        "020-health_and_medical_history - 健康病史",
-        "021-medical_conditions      - 医学状况/诊断",
-        "023-lifestyle_and_environment - 生活方式和环境"
-      ],
-      "field": "hdl_cholesterol",
-      "_field_hint": "数据集中的具体字段名",
-      "status": "exact",
-      "_status_options": [
-        "exact   - 精确匹配：HPP字段与论文变量完全一致 ✓可验证",
-        "close   - 近似匹配：HPP字段与论文变量相近 ✓可验证",
-        "derived - 派生变量：需从HPP数据计算得出 ✓可验证",
-        "missing - 缺失：HPP中无此变量 ✗无法验证"
-      ],
-      "notes": "直接映射，单位mmol/L"
     },
-    "_comment_Y": "=== Y变量 (结局) 的HPP映射 ===",
-    "_comment_Y2": "注意: Y是数组格式，可包含多个结局变量",
-    "Y": [
-      {
-        "name": "Cardiovascular Disease",
-        "dataset": "021-medical_conditions",
-        "field": "icd11_code",
-        "status": "derived",
-        "_status_note": "derived表示需要从ICD编码派生出二分类变量",
-        "notes": "根据ICD-11编码 BA(冠心病), 8B(脑血管病) 派生为0/1"
-      }
-    ],
-    "_comment_Z": "=== Z变量 (协变量) 的HPP映射 ===",
-    "Z": [
-      {
-        "name": "Age",
-        "dataset": "000-population",
-        "field": "age",
-        "status": "exact",
-        "notes": "年龄，单位：岁"
+    "iota_1": {
+      "core": {
+        "name": null
       },
-      {
-        "name": "Sex",
-        "dataset": "000-population",
-        "field": "sex",
-        "status": "exact",
-        "notes": "性别编码: 0=女性, 1=男性"
+      "ext": {
+        "contrast_type": null,
+        "unit": null,
+        "x0": null,
+        "x1": null
       }
-    ],
-    "_comment_M": "=== M变量 (中介变量) 的HPP映射 - 可选 ===",
-    "M": []
-  },
-  "_comment_80": "=== time_semantics: 时间语义 ===",
-  "time_semantics": {
-    "baseline_window": "baseline±90d",
-    "_baseline_window_hint": "基线数据采集窗口",
-    "exposure_window": "baseline measurement",
-    "_exposure_window_hint": "暴露测量时间",
-    "outcome_window": "P10Y",
-    "_outcome_window_hint": "结局观察窗口 (ISO8601格式: P5Y=5年)",
-    "follow_up_start": "baseline",
-    "_follow_up_hint": "随访开始时间点",
-    "notes": "遵循ISO8601持续时间格式"
-  },
-  "_comment_90": "=== governance: 证据质量评估 ===",
-  "governance": {
-    "tier": "A",
-    "_tier_options": [
-      "A - 高质量证据 (大样本RCT/前瞻性队列)",
-      "B - 中等质量证据",
-      "C - 低质量证据"
-    ],
-    "risk_of_bias": "low",
-    "_risk_of_bias_options": [
-      "low      - 低偏倚风险",
-      "moderate - 中等偏倚风险",
-      "high     - 高偏倚风险",
-      "critical - 严重偏倚风险"
-    ],
-    "notes": "大型前瞻性队列研究，方法学质量高"
-  },
-  "_comment_100": "============================================================",
-  "_comment_101": "以下为验证系统内部使用的说明信息",
-  "_comment_102": "============================================================",
-  "_validation_requirements": {
-    "_description": "HPP验证的必要条件检查清单",
-    "required_for_validation": [
-      "1. hpp_mapping.X.status 必须为 exact/close/derived (非missing)",
-      "2. hpp_mapping.Y[].status 必须为 exact/close/derived (非missing)",
-      "3. effects[].estimate 必须有数值",
-      "4. effects[].effect_scale 必须明确",
-      "5. effects[].outcome_family 必须明确指定 (continuous 或 binary)",
-      "6. effects[].link_function 对于连续结局用identity, 二分类用logit"
-    ],
-    "supported_outcome_families": [
-      "continuous",
-      "binary"
-    ],
-    "not_yet_supported": [
-      "survival (Cox HR)",
-      "count (Poisson)"
-    ]
-  },
-  "_quick_reference": {
-    "_title": "快速参考表",
-    "连续结局配置": {
-      "outcome_family": "continuous",
-      "effect_scale": "BETA",
-      "link_function": "identity",
-      "formula": "Y = α + β·T_X(X) + γ^T·T_Z(Z) + ε",
-      "model": "OLS Linear Regression"
     },
-    "二分类结局配置": {
-      "outcome_family": "binary",
-      "effect_scale": "OR",
-      "link_function": "logit",
-      "formula": "logit(P(Y=1)) = α + β·T_X(X) + γ^T·T_Z(Z)",
-      "model": "Logistic Regression",
-      "note": "estimate填OR值，系统自动转换为log(OR)进行比较"
+    "iota_2": {
+      "core": {
+        "name": null
+      },
+      "ext": {
+        "contrast_type": null,
+        "unit": null,
+        "x0": null,
+        "x1": null
+      }
+    },
+    "mu": {
+      "core": {
+        "family": "difference|ratio",
+        "scale": "identity|log",
+        "type": "MD|logOR|logRR|logHR|RD|beta|SD"
+      },
+      "ext": {}
+    },
+    "o": {
+      "name": "...",
+      "type": "continuous|binary|survival"
+    },
+    "rho": {
+      "IV": null,
+      "M": [],
+      "X": "...",
+      "X1": null,
+      "X2": null,
+      "Y": "...",
+      "Z": [
+        "..."
+      ],
+      "_M_note": "E4 mediator role(s). Empty list for non-E4.",
+      "_X1_X2_note": "E6 joint intervention roles. null for non-E6."
+    },
+    "tau": {
+      "core": {
+        "horizon": "...",
+        "index": "...",
+        "tau_aligned": null
+      },
+      "ext": {
+        "baseline_window": null,
+        "follow_up_window": null,
+        "time_grid": null
+      }
+    },
+    "z_context": {
+      "individual": null,
+      "subgroup": null
     }
-  }
+  },
+  "equation_inference_hints": {
+    "has_counterfactual_query": false,
+    "has_joint_intervention": false,
+    "has_longitudinal_timepoints": false,
+    "has_mediator": false,
+    "has_survival_outcome": false
+  },
+  "equation_type": null,
+  "equation_version": "1.0",
+  "hpp_mapping": {
+    "IV": null,
+    "M": [],
+    "X": {
+      "dataset": "...",
+      "field": "...",
+      "notes": "",
+      "status": "manual|auto_resolved"
+    },
+    "X1": null,
+    "X2": null,
+    "Y": {
+      "dataset": "...",
+      "field": "...",
+      "notes": "",
+      "status": "manual|auto_resolved"
+    },
+    "Z": [],
+    "_M_note": "E4 mediator mappings. Example item: {\"name\":\"CRP\",\"dataset\":\"016-blood_tests\",\"field\":\"bt__crp_float_value\",\"status\":\"manual\",\"notes\":\"\"}",
+    "_X1_X2_note": "E6 joint intervention mappings.",
+    "_context_note": "E5 individual context mappings. If empty, fallback to epsilon.rho.Z.",
+    "context": []
+  },
+  "literature_estimate": {
+    "_decomposed_effects_note": "Optional literature block for E4.",
+    "adjustment_set": [
+      "..."
+    ],
+    "ci": [
+      null,
+      null
+    ],
+    "ci_level": 0.95,
+    "decomposed_effects": {
+      "NDE": {
+        "ci": [
+          null,
+          null
+        ],
+        "p_value": null,
+        "theta_hat": null
+      },
+      "NIE": {
+        "ci": [
+          null,
+          null
+        ],
+        "p_value": null,
+        "theta_hat": null
+      },
+      "TE": {
+        "ci": [
+          null,
+          null
+        ],
+        "p_value": null,
+        "theta_hat": null
+      }
+    },
+    "design": "RCT|cohort|cross-sectional|MR|registry|other",
+    "grade": "A|B|C",
+    "model": "...",
+    "n": null,
+    "p_value": null,
+    "ref": "...",
+    "theta_hat": null
+  },
+  "modeling_directives": {
+    "e1": {
+      "enabled": null,
+      "model_preference": [
+        "OLS",
+        "Logistic",
+        "Poisson"
+      ],
+      "target_parameter": "beta_X"
+    },
+    "e2": {
+      "censor_definition": null,
+      "enabled": null,
+      "event_definition": null,
+      "model_preference": [
+        "CoxPH",
+        "Logistic_survival_proxy"
+      ],
+      "target_parameter": "beta_X_logHR"
+    },
+    "e3": {
+      "enabled": null,
+      "model_preference": [
+        "LMM",
+        "GEE",
+        "OLS_fallback"
+      ],
+      "subject_id_variable": "participant_id",
+      "target_parameter": "beta_XT",
+      "time_variable": "time"
+    },
+    "e4": {
+      "decomposition_scale": "identity|log",
+      "enabled": null,
+      "mediator_model": "auto",
+      "outcome_model": "auto",
+      "primary_target": "TE",
+      "target_effects": [
+        "TE",
+        "NDE",
+        "NIE"
+      ],
+      "time_order": {
+        "m_time": null,
+        "rule": "t_X < t_M < t_Y",
+        "x_time": null,
+        "y_time": null
+      }
+    },
+    "e5": {
+      "assumption_required": [
+        "model_approximation_not_true_counterfactual"
+      ],
+      "context_window": {
+        "lookback": null,
+        "step": null
+      },
+      "counterfactual_contrast": {
+        "x0": null,
+        "x1": null
+      },
+      "enabled": null,
+      "estimand": "tau_i",
+      "model": {
+        "base_model": "linear|xgboost|lightgbm",
+        "type": "T_learner|S_learner|DR"
+      },
+      "uncertainty": {
+        "ci_level": 0.95,
+        "method": "bootstrap|posterior",
+        "n_bootstrap": 500
+      }
+    },
+    "e6": {
+      "assumption_required": [
+        "beta12_zero_if_additive_fallback"
+      ],
+      "enabled": null,
+      "fallback_additive_if_unidentifiable": true,
+      "interaction": {
+        "enabled": true,
+        "term": "X1*X2"
+      },
+      "joint_contrast": {
+        "x0": [
+          null,
+          null
+        ],
+        "x1": [
+          null,
+          null
+        ]
+      },
+      "primary_target": "beta_12"
+    }
+  },
+  "pi": {
+    "design": "...",
+    "grade": "...",
+    "n_literature": null,
+    "ref": "...",
+    "source": "pdf_extraction"
+  },
+  "provenance": {
+    "extractor": "manual|llm|hybrid",
+    "page": null,
+    "pdf_name": "...",
+    "table_or_figure": null
+  },
+  "schema_version": "1.1"
 }

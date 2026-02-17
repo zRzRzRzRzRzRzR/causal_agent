@@ -20,7 +20,7 @@ from typing import List, Dict, Any, Optional
 import fitz
 from glmocr import parse
 
-from llm_client import GLMClient
+from .llm_client import GLMClient
 
 
 def pdf_to_images(pdf_path: str, output_dir: str = None, dpi: int = 200) -> List[str]:

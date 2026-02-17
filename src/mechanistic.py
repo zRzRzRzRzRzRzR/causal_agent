@@ -1,5 +1,5 @@
 from typing import Dict, List
-from base import BaseExtractor
+from .base import BaseExtractor
 
 
 class MechanisticExtractor(BaseExtractor):

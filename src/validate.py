@@ -6,8 +6,7 @@ Functionality:
 2. Numerical consistency checks (effects aligned with estimand_equation)
 3. Reproducibility checks (core parameters are non-null)
 """
-import json
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Tuple
 
 
 # Required top-level fields shared by all types

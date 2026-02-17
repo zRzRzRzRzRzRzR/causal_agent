@@ -16,7 +16,7 @@ from typing import List, Dict, Any
 from dotenv import load_dotenv
 import tempfile
 from glmocr import parse
-from tools.llms import call_vision_model, pdf_to_images
+from src.llms import call_vision_model, pdf_to_images
 
 load_dotenv()
 
@@ -70,33 +70,33 @@ Final line: summarize from which page the non-content starts (or "all content" i
 
 def ocr_images(image_paths: List[str], output_dir: str) -> str:
     """
-    OCR 识别图片并按页面顺序拼接
+    OCR recognize images and concatenate in page order
 
-    修复：确保按照 image_paths 的顺序处理每一页，而不是依赖 parse() 返回的顺序
+    Fix: Ensure processing each page in image_paths order, not relying on parse() return order
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # 🔧 关键修复：parse() 一次性处理所有图片
+    # Key fix: parse() processes all images at once
     results = parse(image_paths)
 
-    # 🔧 关键修复：确保 results 和 image_paths 的顺序一致
-    # parse() 应该按照输入顺序返回结果，但为了保险，我们按索引匹配
+    # Key fix: Ensure results and image_paths order consistency
+    # parse() should return results in input order, but for safety we match by index
     full_markdown = []
 
     for i, result in enumerate(results):
-        # 页码从 1 开始
+        # Page numbers start from 1
         page_num = i + 1
 
-        # 添加页面标记
+        # Add page marker
         full_markdown.append(f"<!-- Page {page_num} -->\n\n")
 
-        # 添加该页的识别结果
+        # Add recognition result for this page
         full_markdown.append(result.markdown_result)
 
-        # 页面之间添加分隔
+        # Add separator between pages
         full_markdown.append("\n\n")
 
-    # 拼接所有页面
+    # Concatenate all pages
     combined_md_path = os.path.join(output_dir, "combined.md")
     with open(combined_md_path, "w", encoding="utf-8") as f:
         f.write("".join(full_markdown))

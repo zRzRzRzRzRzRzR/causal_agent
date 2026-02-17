@@ -17,13 +17,12 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from llm_client import GLMClient
-from ocr import init_extractor as init_ocr
-from base import Classifier
-from interventional import InterventionalExtractor
-from causal import CausalExtractor
-from mechanistic import MechanisticExtractor
-from associational import AssociationalExtractor
+from .llm_client import GLMClient
+from .base import BaseExtractor, Classifier
+from .interventional import InterventionalExtractor
+from .causal import CausalExtractor
+from .mechanistic import MechanisticExtractor
+from .associational import AssociationalExtractor
 
 
 EXTRACTOR_MAP = {
@@ -100,6 +99,8 @@ class EvidenceCardPipeline:
     def __init__(
         self,
         client: GLMClient,
+        ocr_text_func=None,
+        ocr_init_func=None,
         ocr_output_dir: str = "./ocr_cache",
         ocr_dpi: int = 200,
         ocr_validate_pages: bool = True,
@@ -107,12 +108,16 @@ class EvidenceCardPipeline:
         self.client = client
         self.classifier = Classifier(client)
 
-        init_ocr(
-            ocr_output_dir=ocr_output_dir,
-            client=client,
-            dpi=ocr_dpi,
-            validate_pages=ocr_validate_pages,
-        )
+        # Initialize OCR and inject into BaseExtractor
+        if ocr_init_func is not None:
+            ocr_init_func(
+                ocr_output_dir=ocr_output_dir,
+                client=client,
+                dpi=ocr_dpi,
+                validate_pages=ocr_validate_pages,
+            )
+        if ocr_text_func is not None:
+            BaseExtractor.set_ocr_func(ocr_text_func)
 
     def run(
         self,
@@ -133,9 +138,9 @@ class EvidenceCardPipeline:
         if force_type:
             evidence_type = force_type
             classification = {"primary_category": force_type, "forced": True}
-            print(f"[Pipeline] Forced type: {evidence_type}", file=sys.stderr)
+            print("[Pipeline] Forced type: {evidence_type}", file=sys.stderr)
         else:
-            print(f"[Pipeline] Step 0: Document classification...", file=sys.stderr)
+            print("[Pipeline] Step 0: Document classification...", file=sys.stderr)
             classification = self.classifier.classify(pdf_path)
             evidence_type = classification.get("primary_category", "associational")
             print(
@@ -161,7 +166,7 @@ class EvidenceCardPipeline:
         extractor = EXTRACTOR_MAP[evidence_type](self.client)
 
         # Step 1: Extract paths
-        print(f"\n[Pipeline] Step 1: Extracting paths...", file=sys.stderr)
+        print("[Pipeline] Step 1: Extracting paths...", file=sys.stderr)
         paths = extractor.extract_paths(pdf_path)
         if isinstance(paths, dict):
             paths = [paths]

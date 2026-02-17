@@ -3,6 +3,7 @@
 你是医学信息学研究员 + 严谨的信息抽取器。请从 PDF 论文中提取**一张完整的**结构化证据卡。
 
 ## 核心原则
+
 - **仅使用 PDF 内容**（正文 + 补充材料）；不确定即 null；**禁止编造**
 - **一篇论文一张卡**：所有效应（总体 + 亚组分层）都放在同一张卡的 effects 数组中
 - **effects 穷举**：论文中每个「结局 Y × 亚组水平」的统计效应都必须是一条 effect
@@ -13,24 +14,34 @@
 
 ---
 
-## ★ 完整 Schema（你的输出必须包含以下所有模块）
+## 完整 Schema（你的输出必须包含以下所有模块）
 
 ```json
 {
   "schema_version": "2.1",
   "evidence_id": "EV-YYYY-XXXXXX",
-
   "paper": {
-    "title": "", "doi": "", "pmid": null, "year": 2024,
-    "journal": "", "authors": [], "registry": null, "abstract": ""
+    "title": "",
+    "doi": "",
+    "pmid": null,
+    "year": 2024,
+    "journal": "",
+    "authors": [],
+    "registry": null,
+    "abstract": ""
   },
-
   "provenance": {
-    "figure_table": ["Table 2 p.6", "Figure 1 p.3"],
-    "pages": [1, 2, 3],
+    "figure_table": [
+      "Table 2 p.6",
+      "Figure 1 p.3"
+    ],
+    "pages": [
+      1,
+      2,
+      3
+    ],
     "supplement": false
   },
-
   "design": {
     "type": "crossover | parallel_rct | cluster_rct | cohort | ...",
     "analysis": "统计分析方法描述",
@@ -42,10 +53,15 @@
     "blinding": "none | single | double | triple",
     "hypothesis": "superiority | non-inferiority | equivalence",
     "population_description": "纳入人群特征描述",
-    "missing_data": {"method": "complete_case | MI | LOCF", "notes": ""},
-    "censoring": {"type": "", "competing_risks": false}
+    "missing_data": {
+      "method": "complete_case | MI | LOCF",
+      "notes": ""
+    },
+    "censoring": {
+      "type": "",
+      "competing_risks": false
+    }
   },
-
   "population": {
     "eligibility_signature": {
       "age": "range or mean±SD",
@@ -55,82 +71,123 @@
       "key_exclusions": []
     }
   },
-
   "transport_signature": {
-    "center": "", "era": "", "geo": "",
+    "center": "",
+    "era": "",
+    "geo": "",
     "care_setting": "laboratory | clinic | community",
     "data_source": "trial | registry | HER"
   },
-
   "arms": [
     {
-      "arm_id": "A", "label": "", "role": "comparator | intervention",
-      "n_randomized": 0, "n_analyzed_itt": 0,
-      "description": "", "dose_intensity": "", "frequency": "",
-      "duration": "ISO8601", "components": [],
-      "crossover": {"sequence": "AB or BA randomized", "washout": "P1W"}
+      "arm_id": "A",
+      "label": "",
+      "role": "comparator | intervention",
+      "n_randomized": 0,
+      "n_analyzed_itt": 0,
+      "description": "",
+      "dose_intensity": "",
+      "frequency": "",
+      "duration": "ISO8601",
+      "components": [],
+      "crossover": {
+        "sequence": "",
+        "washout": "P1W"
+      }
     }
   ],
-
   "adherence": {
-    "definition": "", "method": "",
-    "per_arm": [{"arm_ref": "A", "n_evaluable": 0, "adherence_rate": 1.0, "notes": ""}],
+    "definition": "",
+    "method": "",
+    "per_arm": [
+      {
+        "arm_ref": "A",
+        "n_evaluable": 0,
+        "adherence_rate": 1.0,
+        "notes": ""
+      }
+    ],
     "source": ""
   },
-
   "variables": {
     "nodes": [
       {
-        "node_id": "local:X", "label": "暴露变量名(带限定)",
+        "node_id": "local:X",
+        "label": "暴露变量名(带限定)",
         "type": "exposure | outcome | covariate | mediator",
-        "unit": "", "description": "",
+        "unit": "",
+        "description": "",
         "outcome_family": "continuous | binary | null"
       }
     ],
     "roles": {
-      "X": ["暴露变量label"], "C": ["对照label"],
-      "Y": ["结局1 label", "结局2 label", "..."],
-      "Z": ["调整变量label"], "M": [], "IV": []
+      "X": [
+        "暴露变量label"
+      ],
+      "C": [
+        "对照label"
+      ],
+      "Y": [
+        "结局1 label",
+        "结局2 label",
+        "..."
+      ],
+      "Z": [
+        "调整变量label"
+      ],
+      "M": [],
+      "IV": []
     },
     "outcome_direction": {
       "结局label": "higher_is_worse | higher_is_better"
     }
   },
-
   "time_semantics": {
-    "baseline_window": "", "exposure_window": "",
-    "outcome_window": "", "follow_up_start": "",
+    "baseline_window": "",
+    "exposure_window": "",
+    "outcome_window": "",
+    "follow_up_start": "",
     "assessment_timepoints": [],
-    "follow_up_duration": "", "notes": ""
+    "follow_up_duration": "",
+    "notes": ""
   },
-
   "identification": {
     "identification_status": "identified",
-    "backdoor_set": [], "instrument": [],
+    "backdoor_set": [],
+    "instrument": [],
     "positivity_notes": ""
   },
-
   "outcome_summaries": [
     {
-      "name": "结局变量名", "timepoint": "",
+      "name": "结局变量名",
+      "timepoint": "",
       "analysis_set": "ITT",
       "by_arm": [
-        {"arm": "A", "n": 0, "mean": null, "sd": null}
+        {
+          "arm": "A",
+          "n": 0,
+          "mean": null,
+          "sd": null
+        }
       ],
       "source": "Table X p.Y"
     }
   ],
-
   "effects": [
     {
       "edge_id": "EV-YYYY-XXXXXX#1",
-      "from": "X变量label", "to": "Y变量label",
+      "from": "X变量label",
+      "to": "Y变量label",
       "mediators": [],
       "outcome_family": "continuous | binary",
       "effect_scale": "BETA | OR | RR | HR | MD | RD",
       "estimate": 0.0,
       "se": null,
-      "ci": [0.0, 0.0], "ci_level": 0.95,
+      "ci": [
+        0.0,
+        0.0
+      ],
+      "ci_level": 0.95,
       "p_value": "",
       "link_function": "identity | logit | log",
       "model": "统计模型名称",
@@ -140,45 +197,87 @@
       "exposure_contrast": {
         "type": "assignment | per_unit | per_SD",
         "delta": "对比描述(含亚组信息)",
-        "x0": null, "x1": null, "unit": ""
+        "x0": null,
+        "x1": null,
+        "unit": ""
       }
     }
   ],
-
   "estimand_equation": {
-    "contrast_convention": {"I": "Late", "C": "Early"},
+    "contrast_convention": {
+      "I": "Late",
+      "C": "Early"
+    },
     "equations": [
       {
-        "outcome": "", "formula": "ΔY = τ + ε",
-        "parameters": {"τ": 0.0, "σ": 0.0},
-        "derivation": "", "source_edge": "EV-YYYY-XXXXXX#1",
-        "analysis_set": "ITT", "scale": "MD | BETA | log(OR)"
+        "outcome": "",
+        "formula": "ΔY = τ + ε",
+        "parameters": {
+          "τ": 0.0,
+          "σ": 0.0
+        },
+        "derivation": "",
+        "source_edge": "EV-YYYY-XXXXXX#1",
+        "analysis_set": "ITT",
+        "scale": "MD | BETA | log(OR)"
       }
     ]
   },
-
   "measurement": {
-    "devices": [{"node": "", "device": "", "algo": ""}],
-    "derivations": [{"node": "", "rule": ""}]
+    "devices": [
+      {
+        "node": "",
+        "device": "",
+        "algo": ""
+      }
+    ],
+    "derivations": [
+      {
+        "node": "",
+        "rule": ""
+      }
+    ]
   },
-
   "hpp_mapping": {
-    "X": {"name": "", "dataset": "", "field": "", "status": "exact|close|derived|missing", "notes": ""},
-    "Y": [{"name": "", "dataset": "", "field": "", "status": "", "notes": ""}],
-    "Z": [{"name": "", "dataset": "", "field": "", "status": "", "notes": ""}],
+    "X": {
+      "name": "",
+      "dataset": "",
+      "field": "",
+      "status": "exact|close|derived|missing",
+      "notes": ""
+    },
+    "Y": [
+      {
+        "name": "",
+        "dataset": "",
+        "field": "",
+        "status": "",
+        "notes": ""
+      }
+    ],
+    "Z": [
+      {
+        "name": "",
+        "dataset": "",
+        "field": "",
+        "status": "",
+        "notes": ""
+      }
+    ],
     "M": []
   },
-
   "governance": {
     "tier": "A | B | C",
     "risk_of_bias": "low | some_concerns | high",
     "notes": ""
   },
-
   "inference": {
     "contrast": "核心对比的一句话描述",
     "claim": "主要结论（1-3句话）",
-    "assumptions": ["因果/统计假设1", "假设2"]
+    "assumptions": [
+      "因果/统计假设1",
+      "假设2"
+    ]
   }
 }
 ```

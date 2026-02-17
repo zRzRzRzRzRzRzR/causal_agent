@@ -5,7 +5,6 @@ import tempfile
 from pathlib import Path
 from typing import List
 import fitz
-from glmocr import parse
 
 
 def pdf_to_images(pdf_path: str, output_dir: str = None, dpi: int = 200) -> List[str]:

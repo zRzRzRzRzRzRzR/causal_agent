@@ -3,6 +3,8 @@ from .mechanistic import MechanisticExtractor
 from .interventional import InterventionalExtractor
 from .causal import CausalExtractor
 from .associational import AssociationalExtractor
+from .pipeline import EvidenceCardPipeline
+from .llm_client import GLMClient
 
 __all__ = [
     "BaseExtractor",
@@ -11,4 +13,6 @@ __all__ = [
     "InterventionalExtractor",
     "CausalExtractor",
     "AssociationalExtractor",
+    "EvidenceCardPipeline",
+    "GLMClient",
 ]

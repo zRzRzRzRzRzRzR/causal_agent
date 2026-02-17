@@ -1,8 +1,6 @@
-"""Interventional (RCT) Evidence Card Extractor"""
-import json
-from typing import Any, Dict, List
+from typing import Dict, List
 
-from base import BaseExtractor
+from .base import BaseExtractor
 
 
 class InterventionalExtractor(BaseExtractor):

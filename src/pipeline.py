@@ -15,16 +15,19 @@ Step 2 uses a template-first approach:
   5. Auto-fix, validate, compute fill rate
 """
 
-import json
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .hpp_mapper import get_hpp_context
 from .llm_client import GLMClient
-from .template_utils import (build_filled_edge, load_template,
-                             prepare_template_for_prompt,
-                             prepare_template_with_comments)
+from .template_utils import (
+    build_filled_edge,
+    load_template,
+    prepare_template_for_prompt,
+    prepare_template_with_comments,
+)
+from .utils import save_json
 
 _SRC_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _SRC_DIR.parent
@@ -47,11 +50,6 @@ def _load_prompt(name: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-# ===================================================================
-# Step 0: Classify paper type
-# ===================================================================
-
-
 def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
     """Classify paper into: interventional / causal / mechanistic / associational."""
     prompt_template = _load_prompt("step0_classify")
@@ -64,11 +62,6 @@ def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
         file=sys.stderr,
     )
     return result
-
-
-# ===================================================================
-# Step 1: Enumerate all statistical edges
-# ===================================================================
 
 
 def step1_enumerate_edges(
@@ -136,11 +129,6 @@ def step1_enumerate_edges(
     return result
 
 
-# ===================================================================
-# Step 2: Fill one edge using template-first approach
-# ===================================================================
-
-
 def step2_fill_one_edge(
     client: GLMClient,
     pdf_text: str,
@@ -152,28 +140,14 @@ def step2_fill_one_edge(
     template_path: Optional[str] = None,
     hpp_dict_path: Optional[str] = None,
 ) -> Dict:
-    """
-    Fill one edge using the template-first approach.
-
-    The key insight: the new template has // comments that serve as
-    excellent inline hints for the LLM. We include the raw template
-    (with comments) in the prompt so the LLM reads the guidance,
-    and also provide the clean JSON skeleton as the output format.
-    """
     prompt_template = _load_prompt("step2_fill_template")
-
-    # Prepare two versions of the template:
-    # 1. Clean JSON for output format reference
     template_json = prepare_template_for_prompt(annotated_template)
 
-    # 2. Raw template with // comments for the LLM to read as hints
-    # (if template_path available)
     if template_path:
         template_with_hints = prepare_template_with_comments(template_path)
     else:
         template_with_hints = template_json
 
-    # Build replacement values
     replacements = {
         "{edge_index}": str(edge.get("edge_index", 1)),
         "{X}": str(edge.get("X", "")),
@@ -193,7 +167,6 @@ def step2_fill_one_edge(
         "{template_json}": template_with_hints,
     }
 
-    # Retrieve HPP field context
     if hpp_dict_path:
         hpp_context = get_hpp_context(edge, dict_path=hpp_dict_path)
         print(
@@ -212,11 +185,7 @@ def step2_fill_one_edge(
         prompt_template = prompt_template.replace(placeholder, value)
 
     full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
-
-    # Call LLM
     llm_output = client.call_json(full_prompt, max_tokens=32768)
-
-    # Template-first merge: skeleton is structural authority
     filled, is_valid, issues, fill_rate = build_filled_edge(
         annotated_template=annotated_template,
         llm_output=llm_output,
@@ -227,11 +196,6 @@ def step2_fill_one_edge(
     )
 
     return filled
-
-
-# ===================================================================
-# Pipeline class
-# ===================================================================
 
 
 class EdgeExtractionPipeline:
@@ -277,7 +241,6 @@ class EdgeExtractionPipeline:
             )
 
     def _get_pdf_text(self, pdf_path: str) -> str:
-        """Extract text from PDF using the configured OCR function."""
         return self.ocr_text_func(pdf_path)
 
     def run(
@@ -286,7 +249,6 @@ class EdgeExtractionPipeline:
         force_type: Optional[str] = None,
         output_dir: Optional[str] = None,
     ) -> List[Dict]:
-        """Run the full 3-step pipeline on a PDF."""
         pdf_name = Path(pdf_path).stem
         base_dir = Path(output_dir) if output_dir else None
 
@@ -303,7 +265,6 @@ class EdgeExtractionPipeline:
 
         pdf_text = self._get_pdf_text(pdf_path)
 
-        # ---- Step 0: Classify ----
         if force_type:
             evidence_type = force_type
             classification = {"primary_category": force_type, "forced": True}
@@ -313,19 +274,14 @@ class EdgeExtractionPipeline:
             classification = step0_classify(self.client, pdf_text)
             evidence_type = classification.get("primary_category", "associational")
 
-        if pdf_dir:
-            _save_json(pdf_dir / "step0_classification.json", classification)
+        save_json(pdf_dir / "step0_classification.json", classification)
 
-        # ---- Step 1: Enumerate edges ----
         print("\n[Step 1] Enumerating edges ...", file=sys.stderr)
         step1_result = step1_enumerate_edges(self.client, pdf_text, evidence_type)
         edges_list = step1_result.get("edges", [])
         paper_info = step1_result.get("paper_info", {})
+        save_json(pdf_dir / "step1_edges.json", step1_result)
 
-        if pdf_dir:
-            _save_json(pdf_dir / "step1_edges.json", step1_result)
-
-        # ---- Step 2: Fill each edge ----
         print(
             f"\n[Step 2] Filling templates for {len(edges_list)} edges ...",
             file=sys.stderr,
@@ -358,14 +314,12 @@ class EdgeExtractionPipeline:
             eq = filled.get("equation_type", "?")
             print(f"         Done: {eid} (equation_type={eq})", file=sys.stderr)
 
-        # ---- Save outputs ----
-        if pdf_dir:
-            output_file = pdf_dir / "edges.json"
-            _save_json(output_file, all_filled_edges)
-            print(
-                f"\n[Pipeline] Saved {len(all_filled_edges)} edges to: {output_file}",
-                file=sys.stderr,
-            )
+        output_file = pdf_dir / "edges.json"
+        save_json(output_file, all_filled_edges)
+        print(
+            f"\n[Pipeline] Saved {len(all_filled_edges)} edges to: {output_file}",
+            file=sys.stderr,
+        )
 
         print(f"\n{'='*60}", file=sys.stderr)
         print(
@@ -395,15 +349,3 @@ class EdgeExtractionPipeline:
             return step1_enumerate_edges(self.client, pdf_text, evidence_type)
 
         raise ValueError(f"Unknown step: {step}. Valid: classify, edges")
-
-
-# ===================================================================
-# Utility
-# ===================================================================
-
-
-def _save_json(path: Path, data: Any) -> None:
-    """Save data as formatted JSON."""
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"  -> Saved: {path}", file=sys.stderr)

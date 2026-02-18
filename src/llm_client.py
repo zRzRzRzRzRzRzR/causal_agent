@@ -11,7 +11,7 @@ load_dotenv()
 _API_KEY = os.getenv("OPENAI_API_KEY", "")
 _BASE_URL = os.getenv("OPENAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
 _DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "glm-5")
-_DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.1"))
+_DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "1.0"))
 _DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "16384"))
 _VISION_MODEL = os.getenv("VISION_MODEL", "glm-4.6v")
 
@@ -30,9 +30,6 @@ class GLMClient:
         self.model = model or _DEFAULT_MODEL
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
-    # ------------------------------------------------------------------
-    # Core call
-    # ------------------------------------------------------------------
     def call(
         self,
         prompt: str,
@@ -61,11 +58,10 @@ class GLMClient:
     def call_json(
         self,
         prompt: str,
-        system_prompt: str = "你是医学文献分析专家。请严格以 JSON 格式输出。",
+        system_prompt: str = "请你遵循我的指令，请严格以 JSON 格式输出。",
         temperature: float = _DEFAULT_TEMPERATURE,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
     ) -> Any:
-        """Call LLM with JSON response format and parse the result."""
         raw = self.call(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -83,7 +79,6 @@ class GLMClient:
         temperature: float = 0.1,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
     ) -> str:
-        """Call vision model with base64-encoded images."""
         vision_model = model or _VISION_MODEL
 
         content: List[Dict] = []

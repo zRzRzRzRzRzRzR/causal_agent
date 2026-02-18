@@ -1,8 +1,10 @@
 import base64
+import json
 import os
+import sys
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 import fitz
 from openai import OpenAI
@@ -99,3 +101,9 @@ def call_vision_model(
         max_tokens=16384,
     )
     return response.choices[0].message.content.strip()
+
+
+def save_json(path: Path, data: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print(f"  -> Saved: {path}", file=sys.stderr)

@@ -1,13 +1,3 @@
-"""
-Evidence Edge Extraction Tool — CLI
-
-Usage:
-  python main.py full paper.pdf --output ./output
-  python main.py full paper.pdf --type associational --output ./output
-  python main.py classify paper.pdf
-  python main.py edges paper.pdf
-"""
-
 import argparse
 import json
 

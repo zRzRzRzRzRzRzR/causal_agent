@@ -19,7 +19,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .llm_client import GLMClient
 
-# Directories
 _SRC_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _SRC_DIR.parent
 _PROMPTS_DIR = _PROJECT_DIR / "prompts"
@@ -27,21 +26,18 @@ _TEMPLATES_DIR = _PROJECT_DIR / "templates"
 
 
 def _load_prompt(name: str) -> str:
-    """Load a prompt markdown file from prompts/ directory."""
     path = _PROMPTS_DIR / f"{name}.md"
     assert path.exists(), f"Prompt file not found: {path}"
     return path.read_text(encoding="utf-8")
 
 
 def _load_template() -> Dict:
-    """Load the HPP unified template JSON."""
     path = _TEMPLATES_DIR / "hpp_mapping_template.json"
     assert path.exists(), f"Template not found: {path}"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _clean_template_for_prompt(template: Dict) -> Dict:
-    """Remove internal metadata keys (starting with _) from template for cleaner prompt."""
     cleaned = {}
     for k, v in template.items():
         if k.startswith("_"):
@@ -54,11 +50,8 @@ def _clean_template_for_prompt(template: Dict) -> Dict:
 
 
 def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
-    """Classify the paper into one of four evidence types."""
     prompt_template = _load_prompt("step0_classify")
-    full_prompt = (
-        f"{prompt_template}\n\n---\n\n**论文全文如下：**\n\n{pdf_text[:500000]}"
-    )
+    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
     result = client.call_json(full_prompt)
 
     print(
@@ -72,18 +65,51 @@ def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
 def step1_enumerate_edges(
     client: GLMClient, pdf_text: str, evidence_type: str
 ) -> Dict[str, Any]:
-    """Extract all X→Y edges from the paper."""
     prompt_template = _load_prompt("step1_edges")
-    # Inject evidence_type into the prompt
     prompt_template = prompt_template.replace("{evidence_type}", evidence_type)
-    full_prompt = (
-        f"{prompt_template}\n\n---\n\n**论文全文如下：**\n\n{pdf_text[:500000]}"
-    )
+    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
 
     result = client.call_json(full_prompt, max_tokens=32768)
 
     edges = result.get("edges", [])
     paper_info = result.get("paper_info", {})
+
+    _BASELINE_DEMO_KEYWORDS = {
+        "age",
+        "sex",
+        "gender",
+        "bmi",
+        "weight",
+        "height",
+        "ethnicity",
+        "race",
+        "waist",
+        "% female",
+        "% male",
+        "systolic",
+        "diastolic",
+        "years",
+    }
+
+    def _is_baseline_check(edge: Dict) -> bool:
+        if edge.get("significant", True):
+            return False
+        source = str(edge.get("source", "")).lower()
+        if "table 1" not in source and "supplementary" not in source:
+            return False
+        y = str(edge.get("Y", "")).lower()
+        return any(kw in y for kw in _BASELINE_DEMO_KEYWORDS)
+
+    filtered = [e for e in edges if not _is_baseline_check(e)]
+    n_filtered = len(edges) - len(filtered)
+    if n_filtered:
+        print(
+            f"[Step 1] Filtered {n_filtered} baseline balance check edges",
+            file=sys.stderr,
+        )
+    result["edges"] = filtered
+    edges = filtered
+
     print(
         f"[Step 1] Found {len(edges)} edges from "
         f"{paper_info.get('first_author', '?')} {paper_info.get('year', '?')}",
@@ -108,14 +134,9 @@ def step2_fill_one_edge(
     template: Dict,
     pdf_name: str,
 ) -> Dict:
-    """Fill the HPP template for a single edge."""
     prompt_template = _load_prompt("step2_fill_template")
-
-    # Build template JSON string (cleaned of internal _ keys)
     clean_tmpl = _clean_template_for_prompt(template)
     template_json_str = json.dumps(clean_tmpl, indent=2, ensure_ascii=False)
-
-    # Substitute variables into prompt
     replacements = {
         "{edge_index}": str(edge.get("edge_index", 1)),
         "{X}": str(edge.get("X", "")),
@@ -137,13 +158,10 @@ def step2_fill_one_edge(
     for placeholder, value in replacements.items():
         prompt_template = prompt_template.replace(placeholder, value)
 
-    full_prompt = (
-        f"{prompt_template}\n\n---\n\n**论文全文如下：**\n\n{pdf_text[:180000]}"
-    )
+    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
 
     result = client.call_json(full_prompt, max_tokens=32768)
 
-    # Post-process: inject provenance if not set
     if "provenance" not in result or not result["provenance"].get("pdf_name"):
         result["provenance"] = {
             "pdf_name": pdf_name,
@@ -156,9 +174,7 @@ def step2_fill_one_edge(
 
 
 def _postprocess_edge(edge_json: Dict) -> Dict:
-    """Apply deterministic rules that don't need LLM."""
 
-    # --- Infer equation_type from hints if missing ---
     hints = edge_json.get("equation_inference_hints", {})
     eq_type = edge_json.get("equation_type")
 
@@ -177,14 +193,31 @@ def _postprocess_edge(edge_json: Dict) -> Dict:
             eq_type = "E1"
         edge_json["equation_type"] = eq_type
 
-    # --- Ensure modeling_directives consistency ---
     md = edge_json.get("modeling_directives", {})
-    eq_num = eq_type.replace("E", "e")  # "E1" -> "e1"
+    eq_num = eq_type.replace("E", "e")
     for key in ["e1", "e2", "e3", "e4", "e5", "e6"]:
         if key in md and isinstance(md[key], dict):
-            md[key]["enabled"] = (key == eq_num) or md[key].get("enabled", False)
+            md[key]["enabled"] = key == eq_num
 
-    # --- Ensure schema_version ---
+    hm = edge_json.get("hpp_mapping", {})
+    for role in ["X", "Y", "X1", "X2"]:
+        role_data = hm.get(role)
+        if isinstance(role_data, dict) and role_data.get("status") == "missing":
+            for fld in ["dataset", "field"]:
+                if role_data.get(fld) in ("missing", "...", "", None):
+                    role_data[fld] = "N/A"
+
+    rho = edge_json.get("epsilon", {}).get("rho", {})
+    for key in ["X", "Y", "X1", "X2"]:
+        val = rho.get(key)
+        if isinstance(val, str):
+            rho[key] = val.replace(" ", "_")
+
+    iota = edge_json.get("epsilon", {}).get("iota", {})
+    iota_name = iota.get("core", {}).get("name")
+    if isinstance(iota_name, str):
+        iota["core"]["name"] = iota_name.replace(" ", "_")
+
     if "schema_version" not in edge_json:
         edge_json["schema_version"] = "1.1"
     if "equation_version" not in edge_json:
@@ -194,13 +227,6 @@ def _postprocess_edge(edge_json: Dict) -> Dict:
 
 
 class EdgeExtractionPipeline:
-    """
-    End-to-end pipeline: PDF → list of HPP-template-conformant edge JSONs.
-
-    Usage:
-        pipeline = EdgeExtractionPipeline(client, ocr_func)
-        edges = pipeline.run("paper.pdf", output_dir="./output")
-    """
 
     def __init__(
         self,
@@ -233,15 +259,9 @@ class EdgeExtractionPipeline:
         force_type: Optional[str] = None,
         output_dir: Optional[str] = None,
     ) -> List[Dict]:
-        """
-        Run the full pipeline on a PDF.
-
-        Returns a list of edge JSONs conforming to hpp_mapping_template.
-        """
         pdf_name = Path(pdf_path).stem
         base_dir = Path(output_dir) if output_dir else None
 
-        # Create a subfolder for each PDF
         pdf_dir = None
         if base_dir:
             pdf_dir = base_dir / pdf_name

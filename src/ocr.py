@@ -1,10 +1,3 @@
-"""
-PDF Text Extraction via GLM-OCR.
-
-Workflow: PDF → Images → (optional page validation) → GLM-OCR → Markdown
-Results cached to ocr_output_dir/{pdf_stem}/combined.md
-"""
-
 import os
 import tempfile
 from pathlib import Path
@@ -19,7 +12,6 @@ from .llm_client import GLMClient
 def pdf_to_images(
     pdf_path: str, output_dir: Optional[str] = None, dpi: int = 200
 ) -> List[str]:
-    """Convert every page of a PDF into a PNG image."""
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="pdf_images_")
     else:
@@ -43,7 +35,6 @@ def pdf_to_images(
 
 
 def _validate_content_pages(image_paths: List[str], client: GLMClient) -> List[int]:
-    """Use vision model to detect non-content tail pages (references, appendix)."""
     total = len(image_paths)
     if total <= 3:
         return list(range(total))
@@ -70,7 +61,6 @@ def _validate_content_pages(image_paths: List[str], client: GLMClient) -> List[i
 
 
 def _ocr_images(image_paths: List[str], output_dir: str) -> str:
-    """Run glmocr.parse on images and write combined.md."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     results = parse(image_paths)
 
@@ -87,8 +77,6 @@ def _ocr_images(image_paths: List[str], output_dir: str) -> str:
 
 
 class PDFExtractor:
-    """PDF → Markdown extractor with caching."""
-
     def __init__(
         self,
         ocr_output_dir: Optional[str] = None,
@@ -116,7 +104,6 @@ class PDFExtractor:
         final_dir = os.path.join(base_dir, pdf_stem)
         combined_md_path = os.path.join(final_dir, "combined.md")
 
-        # --- Cache hit ---
         if not force_rerun and os.path.exists(combined_md_path):
             md = Path(combined_md_path).read_text(encoding="utf-8")
             if md.strip():
@@ -130,7 +117,6 @@ class PDFExtractor:
                     "combined_md_path": combined_md_path,
                 }
 
-        # --- Full OCR pipeline ---
         print(f"[OCR] Step 1/3: PDF -> images (DPI={self.dpi}) ...")
         image_paths = pdf_to_images(pdf_path, dpi=self.dpi)
         total = len(image_paths)
@@ -161,7 +147,6 @@ class PDFExtractor:
         }
 
 
-# ---- Module-level singleton ----
 _default_extractor: Optional[PDFExtractor] = None
 
 

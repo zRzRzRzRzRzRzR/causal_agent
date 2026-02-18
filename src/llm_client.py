@@ -1,11 +1,3 @@
-"""
-GLM LLM Client - Unified interface for text and vision calls.
-
-Reads config from .env:
-  OPENAI_API_KEY, OPENAI_BASE_URL, DEFAULT_MODEL,
-  DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS, VISION_MODEL
-"""
-
 import base64
 import json
 import os
@@ -49,7 +41,6 @@ class GLMClient:
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         response_format: Optional[Dict[str, str]] = None,
     ) -> str:
-        """Send a single-turn chat completion and return the text."""
         messages: List[Dict] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -67,9 +58,6 @@ class GLMClient:
         response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content
 
-    # ------------------------------------------------------------------
-    # JSON call - forces JSON output and parses
-    # ------------------------------------------------------------------
     def call_json(
         self,
         prompt: str,
@@ -87,9 +75,6 @@ class GLMClient:
         )
         return json.loads(raw)
 
-    # ------------------------------------------------------------------
-    # Vision call
-    # ------------------------------------------------------------------
     def call_vision(
         self,
         images: List[str],
@@ -128,9 +113,6 @@ class GLMClient:
         )
         return response.choices[0].message.content.strip()
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     @staticmethod
     def _image_to_base64(image_path: str) -> str:
         with open(image_path, "rb") as f:

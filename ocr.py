@@ -17,7 +17,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 from glmocr import parse
 
-from src.llms import call_vision_model, pdf_to_images
+from src.utils import call_vision_model, pdf_to_images
 
 load_dotenv()
 

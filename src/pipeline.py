@@ -22,12 +22,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .hpp_mapper import get_hpp_context
 from .llm_client import GLMClient
-from .template_utils import (
-    build_filled_edge,
-    load_template,
-    prepare_template_for_prompt,
-    prepare_template_with_comments,
-)
+from .template_utils import (build_filled_edge, load_template,
+                             prepare_template_for_prompt,
+                             prepare_template_with_comments)
 
 _SRC_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _SRC_DIR.parent
@@ -258,16 +255,10 @@ class EdgeExtractionPipeline:
     ):
         self.client = client
         self.ocr_text_func = ocr_text_func
-
-        # Load the template
         self.template_path = template_path or str(_DEFAULT_TEMPLATE)
-        if Path(self.template_path).exists():
-            self.annotated_template = load_template(self.template_path)
-            print(f"[Pipeline] Template: {self.template_path}", file=sys.stderr)
-        else:
-            raise FileNotFoundError(f"Template not found: {self.template_path}")
+        self.annotated_template = load_template(self.template_path)
+        print(f"[Pipeline] Template: {self.template_path}", file=sys.stderr)
 
-        # Resolve HPP dictionary path
         if hpp_dict_path:
             self.hpp_dict_path = hpp_dict_path
         elif _DEFAULT_HPP_DICT.exists():
@@ -275,16 +266,8 @@ class EdgeExtractionPipeline:
         else:
             self.hpp_dict_path = None
 
-        if self.hpp_dict_path:
-            print(f"[Pipeline] HPP dict: {self.hpp_dict_path}", file=sys.stderr)
-        else:
-            print(
-                "[Pipeline] WARNING: HPP data dictionary not found, "
-                "hpp_mapping will be less accurate",
-                file=sys.stderr,
-            )
+        print(f"[Pipeline] HPP dict: {self.hpp_dict_path}", file=sys.stderr)
 
-        # Initialize OCR module if init function provided
         if ocr_init_func is not None:
             ocr_init_func(
                 ocr_output_dir=ocr_output_dir,

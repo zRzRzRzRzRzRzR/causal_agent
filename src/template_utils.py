@@ -25,9 +25,7 @@ import re
 import sys
 from typing import Any, Dict, List, Tuple
 
-# ---------------------------------------------------------------------------
-# 1. Load & clean the annotated template
-# ---------------------------------------------------------------------------
+import json5
 
 
 def load_template(template_path: str) -> Dict:
@@ -62,7 +60,7 @@ def load_template(template_path: str) -> Dict:
             cleaned.append(line[:cut_pos])
         else:
             cleaned.append(line)
-    return json.loads("\n".join(cleaned))
+    return json5.loads("\n".join(cleaned))
 
 
 def strip_comments(obj: Any) -> Any:
@@ -77,11 +75,6 @@ def strip_comments(obj: Any) -> Any:
 def get_clean_skeleton(template: Dict) -> Dict:
     """Get a clean skeleton from the template, removing _comment keys."""
     return strip_comments(copy.deepcopy(template))
-
-
-# ---------------------------------------------------------------------------
-# 2. Pre-fill deterministic fields from edge + paper metadata
-# ---------------------------------------------------------------------------
 
 
 def prefill_skeleton(

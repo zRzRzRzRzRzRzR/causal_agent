@@ -4,6 +4,7 @@
 1. 一个 JSON 模板（所有字段已预定义）
 2. 一篇论文的全文
 3. 从这篇论文中提取的一条 edge（X → Y 关系）的摘要信息
+4. **与本条 edge 相关的 HPP 数据集和字段**（由检索系统提供）
 
 你的任务是**根据论文内容填写模板中的每一个字段**。
 
@@ -19,7 +20,7 @@ Edge #{edge_index}: {X} → {Y}
 效应尺度: {effect_scale}
 效应量: {estimate}
 CI: {ci}
-P��: {p_value}
+P值: {p_value}
 来源: {source}
 ```
 
@@ -165,32 +166,13 @@ DOI: {doi}
 
 ### hpp_mapping（HPP 平台字段映射）
 
-**HPP 已知数据集及字段清单**：
+下面是**检索系统为本条 edge 提供的相关 HPP 数据集和字段**。请基于这些信息完成映射。
 
-| 数据集 | 可用字段 | 备注 |
-|--------|----------|------|
-| 000-population | age, sex, ethnicity | 人口统计 |
-| 002-anthropometrics | height, weight, bmi, waist_circumference | 人体测量 |
-| 003-blood_pressure | systolic_bp, diastolic_bp | 血压 |
-| 004-body_composition | body_fat_pct, lean_mass | 体成分 |
-| 005-diet_logging | local_timestamp, calories, meal_type | 饮食记录 |
-| 009-sleep | sleep_duration, bedtime, wake_time, total_sleep_time | 睡眠 |
-| 014-human_genetics | gencove_vcf, variants_qc_parquet | 基因组原始数据 |
-| 016-blood_tests | glucose, hba1c, hdl, ldl, triglycerides, crp | 血液生化 |
-| 017-cgm | cgm_mean, cgm_auc, cgm_cv, cgm_mage | 连续血糖监测 |
-| 020-health_and_medical_history | diagnosis, medication | 病史 |
-| 021-medical_conditions | icd11_code, condition_name | 诊断 |
-| 023-lifestyle_and_environment | physical_activity, smoking | 生活方式 |
-
-**HPP 不存在的数据（必须标 missing）**：
-- OGTT（口服葡萄糖耐量试验）及其衍生指标：glucose_auc、insulin_auc、CIR、DI、ISI
-- 胰岛素（insulin）：016-blood_tests 中**没有**胰岛素字段
-- 血清褪黑素（serum melatonin）
-- 任何需要临床检测才能获得的、不在上表中的指标
+{hpp_context}
 
 **status 取值规则**：
 - `exact`: HPP 字段与论文变量定义、单位、测量方式完全一致
-- `close`: 概念一致但测量方式不同（如论文用 OGTT 血糖，HPP 用 CGM）
+- `close`: 概念一致但测量方式不同（如论文用问卷自报 BMI，HPP 用实测 BMI）
 - `derived`: 需从 HPP 字段计算才能得到（notes 写明计算公式）
 - `tentative`: 仅概念相近，实际可能无法替代
 - `missing`: HPP 中完全没有此类数据
@@ -199,15 +181,8 @@ DOI: {doi}
 - 当 status = `missing` 时：`dataset` 填 `"N/A"`，`field` 填 `"N/A"`，notes 写明原因
 - 当 status = `derived` 时：`dataset` 填来源数据集，`field` 填需计算的基础字段，notes 写计算方法
 - **禁止**把 `"missing"` 或 `"..."` 填入 `dataset` 或 `field` 字段
-
-**特定变量的标准映射**（直接使用，不要自行判断）：
-- 晚餐时间（dinner timing）：`dataset="005-diet_logging"`, `field="local_timestamp"`, `status="derived"`, `notes="dinner_timing_derived_as_minutes_before_009-sleep.bedtime"`
-- MTNR1B 基因型：`dataset="014-human_genetics"`, `field="variants_qc_parquet"`, `status="derived"`, `notes="extract_rs10830963_from_gencove_vcf"`
-- Glucose AUC (OGTT)：`status="missing"`, `dataset="N/A"`, `field="N/A"`, `notes="HPP_has_017-cgm_but_no_OGTT_protocol"`
-- Insulin AUC：`status="missing"`, `dataset="N/A"`, `field="N/A"`, `notes="HPP_016-blood_tests_has_no_insulin_field"`
-- 血清褪黑素：`status="missing"`, `dataset="N/A"`, `field="N/A"`, `notes="serum_melatonin_not_available_in_HPP"`
-- CIR / DI / ISI（胰岛素功能指数）：`status="missing"`, `dataset="N/A"`, `field="N/A"`, `notes="OGTT-derived_index_not_available_in_HPP"`
-- Fasting glucose：`dataset="016-blood_tests"`, `field="glucose"`, `status="close"`, `notes="HPP_fasting_glucose_vs_OGTT_fasting_glucose_similar_but_context_differs"`
+- `dataset` 和 `field` 必须使用上面检索结果中列出的**实际**数据集 ID 和字段名
+- 如果检索结果中没有匹配的字段，设 status=`missing`
 
 ---
 

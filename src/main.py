@@ -11,7 +11,6 @@ def main():
     parser = argparse.ArgumentParser(
         description="Evidence Edge Extraction Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
     )
     parser.add_argument(
         "step",
@@ -37,6 +36,11 @@ def main():
         help="Skip page validation during OCR",
     )
     parser.add_argument(
+        "--hpp-dict",
+        default=None,
+        help="Path to HPP data dictionary JSON (pheno_ai_data_dictionaries_simplified.json)",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         default=True,
@@ -45,14 +49,12 @@ def main():
 
     args = parser.parse_args()
 
-    # Initialize client
     client = GLMClient(
         api_key=args.api_key,
         base_url=args.base_url,
         model=args.model,
     )
 
-    # Initialize pipeline
     pipeline = EdgeExtractionPipeline(
         client=client,
         ocr_text_func=get_pdf_text,
@@ -60,9 +62,9 @@ def main():
         ocr_output_dir=args.ocr_dir,
         ocr_dpi=args.dpi,
         ocr_validate_pages=not args.no_validate_pages,
+        hpp_dict_path=args.hpp_dict,
     )
 
-    # Run
     if args.step == "full":
         result = pipeline.run(
             pdf_path=args.pdf,
@@ -76,7 +78,6 @@ def main():
             evidence_type=args.type,
         )
 
-    # Print to stdout
     indent = 2 if args.pretty else None
     print(json.dumps(result, ensure_ascii=False, indent=indent))
 

@@ -1,34 +1,28 @@
-"""
-Evidence Edge Extraction Pipeline (Template-Fill Architecture)
-
-Design:
-  Step 0: Classify paper type (interventional / causal / mechanistic / associational)
-  Step 1: Enumerate all X→Y edges from the paper
-  Step 2: For each edge, fill the HPP unified template via LLM
-
-Key principles:
-  - One edge = one X→Y statistical relationship = one LLM call
-  - LLM fills a pre-defined template (no free-form generation)
-  - No try/except; all operations assumed to succeed on the happy path
-"""
-
 import json
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .hpp_mapper import get_hpp_context
 from .llm_client import GLMClient
 
 _SRC_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _SRC_DIR.parent
 _PROMPTS_DIR = _PROJECT_DIR / "prompts"
 _TEMPLATES_DIR = _PROJECT_DIR / "templates"
+_DEFAULT_HPP_DICT = _TEMPLATES_DIR / "pheno_ai_data_dictionaries_simplified.json"
 
 
 def _load_prompt(name: str) -> str:
     path = _PROMPTS_DIR / f"{name}.md"
     assert path.exists(), f"Prompt file not found: {path}"
-    return path.read_text(encoding="utf-8")
+    raw = path.read_bytes()
+    for enc in ("utf-8", "utf-8-sig", "latin1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def _load_template() -> Dict:
@@ -133,10 +127,12 @@ def step2_fill_one_edge(
     evidence_type: str,
     template: Dict,
     pdf_name: str,
+    hpp_dict_path: Optional[str] = None,
 ) -> Dict:
     prompt_template = _load_prompt("step2_fill_template")
     clean_tmpl = _clean_template_for_prompt(template)
     template_json_str = json.dumps(clean_tmpl, indent=2, ensure_ascii=False)
+
     replacements = {
         "{edge_index}": str(edge.get("edge_index", 1)),
         "{X}": str(edge.get("X", "")),
@@ -155,6 +151,17 @@ def step2_fill_one_edge(
         "{evidence_type}": evidence_type,
         "{template_json}": template_json_str,
     }
+
+    if hpp_dict_path:
+        hpp_context = get_hpp_context(edge, dict_path=hpp_dict_path)
+        print(
+            f"         [HPP] Retrieved ~{len(hpp_context)//4} tokens of field context",
+            file=sys.stderr,
+        )
+    else:
+        hpp_context = "(HPP 数据字典未配置，hpp_mapping 部分请根据已知信息填写)"
+    replacements["{hpp_context}"] = hpp_context
+
     for placeholder, value in replacements.items():
         prompt_template = prompt_template.replace(placeholder, value)
 
@@ -236,10 +243,27 @@ class EdgeExtractionPipeline:
         ocr_output_dir: str = "./ocr_cache",
         ocr_dpi: int = 200,
         ocr_validate_pages: bool = True,
+        hpp_dict_path: Optional[str] = None,
     ):
         self.client = client
         self.ocr_text_func = ocr_text_func
         self.template = _load_template()
+
+        if hpp_dict_path:
+            self.hpp_dict_path = hpp_dict_path
+        elif _DEFAULT_HPP_DICT.exists():
+            self.hpp_dict_path = str(_DEFAULT_HPP_DICT)
+        else:
+            self.hpp_dict_path = None
+
+        if self.hpp_dict_path:
+            print(f"[Pipeline] HPP dict: {self.hpp_dict_path}", file=sys.stderr)
+        else:
+            print(
+                "[Pipeline] WARNING: HPP data dictionary not found, "
+                "hpp_mapping will be less accurate",
+                file=sys.stderr,
+            )
 
         # Initialize OCR module if init function provided
         if ocr_init_func is not None:
@@ -274,6 +298,7 @@ class EdgeExtractionPipeline:
         print(f"{'='*60}", file=sys.stderr)
         pdf_text = self._get_pdf_text(pdf_path)
 
+        # Step 0: 分类
         if force_type:
             evidence_type = force_type
             classification = {"primary_category": force_type, "forced": True}
@@ -316,6 +341,7 @@ class EdgeExtractionPipeline:
                 evidence_type=evidence_type,
                 template=self.template,
                 pdf_name=pdf_name,
+                hpp_dict_path=self.hpp_dict_path,
             )
 
             filled = _postprocess_edge(filled)
@@ -348,7 +374,6 @@ class EdgeExtractionPipeline:
         step: str,
         evidence_type: Optional[str] = None,
     ) -> Any:
-        """Run only one step of the pipeline."""
         pdf_text = self._get_pdf_text(pdf_path)
 
         if step == "classify":
@@ -364,7 +389,6 @@ class EdgeExtractionPipeline:
 
 
 def _save_json(path: Path, data: Any) -> None:
-    """Write data as pretty-printed JSON."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     print(f"  -> Saved: {path}", file=sys.stderr)

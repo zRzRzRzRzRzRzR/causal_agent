@@ -1,5 +1,6 @@
 default_stages: [pre-commit, pre-push, manual]
 
+exclude: ^templates/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

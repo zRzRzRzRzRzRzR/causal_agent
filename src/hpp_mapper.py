@@ -3,25 +3,56 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Set, Tuple
 
-
 SYNONYM_MAP: Dict[str, Set[str]] = {
     # 人体测量
-    "bmi": {"body", "mass", "index", "anthropometrics", "weight", "obesity", "overweight"},
+    "bmi": {
+        "body",
+        "mass",
+        "index",
+        "anthropometrics",
+        "weight",
+        "obesity",
+        "overweight",
+    },
     "weight": {"bmi", "obesity", "overweight", "body", "anthropometrics"},
     "height": {"stature", "anthropometrics"},
     "waist": {"circumference", "abdominal", "anthropometrics"},
     # 生活方式
     "smoking": {"tobacco", "smoke", "cigarette", "smoker", "nicotine"},
     "alcohol": {"drinking", "ethanol", "drink", "beer", "wine", "spirits"},
-    "diet": {"dietary", "food", "nutrition", "fruit", "vegetable", "meat", "grain", "fish"},
-    "exercise": {"physical", "activity", "sport", "fitness", "walking", "vigorous", "moderate"},
+    "diet": {
+        "dietary",
+        "food",
+        "nutrition",
+        "fruit",
+        "vegetable",
+        "meat",
+        "grain",
+        "fish",
+    },
+    "exercise": {
+        "physical",
+        "activity",
+        "sport",
+        "fitness",
+        "walking",
+        "vigorous",
+        "moderate",
+    },
     "physical": {"exercise", "activity", "sport", "fitness"},
     "activity": {"exercise", "physical", "sport", "walking"},
     "lifestyle": {"smoking", "alcohol", "diet", "exercise", "physical", "activity"},
     # 心血管
     "hypertension": {"blood", "pressure", "systolic", "diastolic"},
     "blood": {"pressure", "hypertension", "tests"},
-    "heart": {"cardiac", "cardiovascular", "ischemic", "coronary", "arrhythmia", "failure"},
+    "heart": {
+        "cardiac",
+        "cardiovascular",
+        "ischemic",
+        "coronary",
+        "arrhythmia",
+        "failure",
+    },
     "cardiac": {"heart", "cardiovascular", "ecg"},
     "ischemic": {"coronary", "heart", "angina"},
     "arrhythmia": {"atrial", "fibrillation", "rhythm", "ecg"},
@@ -149,12 +180,36 @@ class HPPFieldIndex:
 
 class HPPMapper:
     _DISEASE_KEYWORDS = {
-        "diabetes", "hypertension", "cancer", "heart", "failure", "stroke",
-        "arrhythmia", "asthma", "liver", "kidney", "renal", "gout",
-        "osteoarthritis", "arthritis", "sleep", "mood", "depression",
-        "anxiety", "infection", "thrombosis", "embolism", "cerebrovascular",
-        "arteriosclerosis", "atherosclerosis", "disease", "disorder",
-        "mortality", "death", "incidence", "pulmonary",
+        "diabetes",
+        "hypertension",
+        "cancer",
+        "heart",
+        "failure",
+        "stroke",
+        "arrhythmia",
+        "asthma",
+        "liver",
+        "kidney",
+        "renal",
+        "gout",
+        "osteoarthritis",
+        "arthritis",
+        "sleep",
+        "mood",
+        "depression",
+        "anxiety",
+        "infection",
+        "thrombosis",
+        "embolism",
+        "cerebrovascular",
+        "arteriosclerosis",
+        "atherosclerosis",
+        "disease",
+        "disorder",
+        "mortality",
+        "death",
+        "incidence",
+        "pulmonary",
     }
 
     _FORCE_INCLUDE_RULES = {
@@ -169,25 +224,52 @@ class HPPMapper:
             if role.startswith("Y") or role == "Y"
         ),
         "055-lifestyle_and_environment": lambda queries: any(
-            any(kw in q.lower() for kw in [
-                "lifestyle", "smoking", "alcohol", "diet", "exercise",
-                "physical activity", "tobacco", "drinking",
-            ])
+            any(
+                kw in q.lower()
+                for kw in [
+                    "lifestyle",
+                    "smoking",
+                    "alcohol",
+                    "diet",
+                    "exercise",
+                    "physical activity",
+                    "tobacco",
+                    "drinking",
+                ]
+            )
             for q in queries.values()
         ),
         "000-population": lambda _: True,
         "002-anthropometrics": lambda queries: any(
-            any(kw in q.lower() for kw in [
-                "bmi", "weight", "obesity", "overweight", "body mass",
-                "anthropo", "height", "waist",
-            ])
+            any(
+                kw in q.lower()
+                for kw in [
+                    "bmi",
+                    "weight",
+                    "obesity",
+                    "overweight",
+                    "body mass",
+                    "anthropo",
+                    "height",
+                    "waist",
+                ]
+            )
             for q in queries.values()
         ),
         "009-sleep": lambda queries: any(
-            any(kw in q.lower() for kw in [
-                "sleep", "insomnia", "apnea", "circadian", "bedtime",
-                "wake", "rest", "nap",
-            ])
+            any(
+                kw in q.lower()
+                for kw in [
+                    "sleep",
+                    "insomnia",
+                    "apnea",
+                    "circadian",
+                    "bedtime",
+                    "wake",
+                    "rest",
+                    "nap",
+                ]
+            )
             for q in queries.values()
         ),
     }
@@ -227,9 +309,9 @@ class HPPMapper:
                 if ds_id not in relevant_datasets:
                     relevant_datasets[ds_id] = 0.01
 
-        sorted_datasets = sorted(
-            relevant_datasets.items(), key=lambda x: -x[1]
-        )[:max_datasets]
+        sorted_datasets = sorted(relevant_datasets.items(), key=lambda x: -x[1])[
+            :max_datasets
+        ]
 
         parts = []
         parts.append("#### 检索到的相关 HPP 数据集\n")
@@ -282,6 +364,7 @@ class HPPMapper:
             queries["subgroup"] = str(subgroup)
 
         return queries
+
 
 _mapper_cache: Dict[str, HPPMapper] = {}
 

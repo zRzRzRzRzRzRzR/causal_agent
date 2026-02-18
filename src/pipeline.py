@@ -1,3 +1,17 @@
+"""
+pipeline.py — Edge extraction pipeline with template-first filling.
+
+Key change from v1: Step 2 now uses a template-first approach:
+  1. Load annotated template (with _hint fields for every value)
+  2. Pre-fill deterministic fields (edge_id, provenance, known estimates)
+  3. Send annotated template + hints to LLM for filling
+  4. Merge LLM output back into the skeleton (skeleton is structural authority)
+  5. Auto-fix, validate, compute fill rate
+
+This guarantees output always matches the template schema exactly,
+regardless of what the LLM returns.
+"""
+
 import json
 import sys
 from pathlib import Path
@@ -5,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .hpp_mapper import get_hpp_context
 from .llm_client import GLMClient
+from .template_utils import build_filled_edge, prepare_template_for_prompt
 
 _SRC_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _SRC_DIR.parent
@@ -14,6 +29,7 @@ _DEFAULT_HPP_DICT = _TEMPLATES_DIR / "pheno_ai_data_dictionaries_simplified.json
 
 
 def _load_prompt(name: str) -> str:
+    """Load a prompt template from the prompts directory."""
     path = _PROMPTS_DIR / f"{name}.md"
     assert path.exists(), f"Prompt file not found: {path}"
     raw = path.read_bytes()
@@ -25,25 +41,20 @@ def _load_prompt(name: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _load_template() -> Dict:
+def _load_annotated_template() -> Dict:
+    """Load the annotated template (with _hint fields)."""
     path = _TEMPLATES_DIR / "hpp_mapping_template.json"
     assert path.exists(), f"Template not found: {path}"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _clean_template_for_prompt(template: Dict) -> Dict:
-    cleaned = {}
-    for k, v in template.items():
-        if k.startswith("_"):
-            continue
-        if isinstance(v, dict):
-            cleaned[k] = _clean_template_for_prompt(v)
-        else:
-            cleaned[k] = v
-    return cleaned
+# ===================================================================
+# Step 0: Classify paper type
+# ===================================================================
 
 
 def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
+    """Classify paper into: interventional / causal / mechanistic / associational."""
     prompt_template = _load_prompt("step0_classify")
     full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
     result = client.call_json(full_prompt)
@@ -56,9 +67,15 @@ def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
     return result
 
 
+# ===================================================================
+# Step 1: Enumerate all statistical edges
+# ===================================================================
+
+
 def step1_enumerate_edges(
     client: GLMClient, pdf_text: str, evidence_type: str
 ) -> Dict[str, Any]:
+    """Extract all X->Y statistical edges from the paper."""
     prompt_template = _load_prompt("step1_edges")
     prompt_template = prompt_template.replace("{evidence_type}", evidence_type)
     full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
@@ -68,6 +85,7 @@ def step1_enumerate_edges(
     edges = result.get("edges", [])
     paper_info = result.get("paper_info", {})
 
+    # Filter out baseline balance check rows (Table 1 demographic comparisons)
     _BASELINE_DEMO_KEYWORDS = {
         "age",
         "sex",
@@ -110,13 +128,18 @@ def step1_enumerate_edges(
         file=sys.stderr,
     )
     for i, e in enumerate(edges):
-        sig = "✓" if e.get("significant") else "✗"
+        sig = "\u2713" if e.get("significant") else "\u2717"
         print(
-            f"  [{i+1}] {sig} {e.get('X', '?')[:40]} → {e.get('Y', '?')[:40]}"
+            f"  [{i+1}] {sig} {e.get('X', '?')[:40]} \u2192 {e.get('Y', '?')[:40]}"
             f"  ({e.get('source', '')})",
             file=sys.stderr,
         )
     return result
+
+
+# ===================================================================
+# Step 2: Fill one edge using template-first approach
+# ===================================================================
 
 
 def step2_fill_one_edge(
@@ -125,20 +148,31 @@ def step2_fill_one_edge(
     edge: Dict,
     paper_info: Dict,
     evidence_type: str,
-    template: Dict,
+    annotated_template: Dict,
     pdf_name: str,
     hpp_dict_path: Optional[str] = None,
 ) -> Dict:
+    """
+    Fill one edge using the template-first approach:
+      1. Prepare annotated template (with _hint fields) for the prompt
+      2. Build prompt with edge info + HPP context + annotated template
+      3. Call LLM to fill the template
+      4. Merge LLM output into a clean skeleton (template is structural authority)
+      5. Auto-fix and validate
+    """
     prompt_template = _load_prompt("step2_fill_template")
-    clean_tmpl = _clean_template_for_prompt(template)
-    template_json_str = json.dumps(clean_tmpl, indent=2, ensure_ascii=False)
 
+    # Prepare annotated template string for the prompt
+    # Keep _hint fields so the LLM sees inline guidance for each field
+    template_for_prompt = prepare_template_for_prompt(annotated_template)
+
+    # Build replacement values
     replacements = {
         "{edge_index}": str(edge.get("edge_index", 1)),
         "{X}": str(edge.get("X", "")),
         "{C}": str(edge.get("C", "")),
         "{Y}": str(edge.get("Y", "")),
-        "{subgroup}": str(edge.get("subgroup", "总体人群")),
+        "{subgroup}": str(edge.get("subgroup", "\u603b\u4f53\u4eba\u7fa4")),
         "{outcome_type}": str(edge.get("outcome_type", "")),
         "{effect_scale}": str(edge.get("effect_scale", "")),
         "{estimate}": str(edge.get("estimate", "null")),
@@ -149,9 +183,10 @@ def step2_fill_one_edge(
         "{year}": str(paper_info.get("year", "")),
         "{doi}": str(paper_info.get("doi", "")),
         "{evidence_type}": evidence_type,
-        "{template_json}": template_json_str,
+        "{template_json}": template_for_prompt,
     }
 
+    # Retrieve HPP field context
     if hpp_dict_path:
         hpp_context = get_hpp_context(edge, dict_path=hpp_dict_path)
         print(
@@ -159,81 +194,46 @@ def step2_fill_one_edge(
             file=sys.stderr,
         )
     else:
-        hpp_context = "(HPP 数据字典未配置，hpp_mapping 部分请根据已知信息填写)"
+        hpp_context = (
+            "(HPP data dictionary not configured. "
+            "Fill hpp_mapping based on available information.)"
+        )
     replacements["{hpp_context}"] = hpp_context
 
+    # Apply replacements
     for placeholder, value in replacements.items():
         prompt_template = prompt_template.replace(placeholder, value)
 
     full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
 
-    result = client.call_json(full_prompt, max_tokens=32768)
+    # Call LLM
+    llm_output = client.call_json(full_prompt, max_tokens=32768)
 
-    if "provenance" not in result or not result["provenance"].get("pdf_name"):
-        result["provenance"] = {
-            "pdf_name": pdf_name,
-            "page": None,
-            "table_or_figure": edge.get("source", None),
-            "extractor": "llm",
-        }
+    # Template-first merge: skeleton is structural authority
+    filled, is_valid, issues, fill_rate = build_filled_edge(
+        annotated_template=annotated_template,
+        llm_output=llm_output,
+        edge=edge,
+        paper_info=paper_info,
+        evidence_type=evidence_type,
+        pdf_name=pdf_name,
+    )
 
-    return result
+    return filled
 
 
-def _postprocess_edge(edge_json: Dict) -> Dict:
-
-    hints = edge_json.get("equation_inference_hints", {})
-    eq_type = edge_json.get("equation_type")
-
-    if not eq_type:
-        if hints.get("has_joint_intervention"):
-            eq_type = "E6"
-        elif hints.get("has_counterfactual_query"):
-            eq_type = "E5"
-        elif hints.get("has_mediator"):
-            eq_type = "E4"
-        elif hints.get("has_survival_outcome"):
-            eq_type = "E2"
-        elif hints.get("has_longitudinal_timepoints"):
-            eq_type = "E3"
-        else:
-            eq_type = "E1"
-        edge_json["equation_type"] = eq_type
-
-    md = edge_json.get("modeling_directives", {})
-    eq_num = eq_type.replace("E", "e")
-    for key in ["e1", "e2", "e3", "e4", "e5", "e6"]:
-        if key in md and isinstance(md[key], dict):
-            md[key]["enabled"] = key == eq_num
-
-    hm = edge_json.get("hpp_mapping", {})
-    for role in ["X", "Y", "X1", "X2"]:
-        role_data = hm.get(role)
-        if isinstance(role_data, dict) and role_data.get("status") == "missing":
-            for fld in ["dataset", "field"]:
-                if role_data.get(fld) in ("missing", "...", "", None):
-                    role_data[fld] = "N/A"
-
-    rho = edge_json.get("epsilon", {}).get("rho", {})
-    for key in ["X", "Y", "X1", "X2"]:
-        val = rho.get(key)
-        if isinstance(val, str):
-            rho[key] = val.replace(" ", "_")
-
-    iota = edge_json.get("epsilon", {}).get("iota", {})
-    iota_name = iota.get("core", {}).get("name")
-    if isinstance(iota_name, str):
-        iota["core"]["name"] = iota_name.replace(" ", "_")
-
-    if "schema_version" not in edge_json:
-        edge_json["schema_version"] = "1.1"
-    if "equation_version" not in edge_json:
-        edge_json["equation_version"] = "1.0"
-
-    return edge_json
+# ===================================================================
+# Pipeline class
+# ===================================================================
 
 
 class EdgeExtractionPipeline:
+    """
+    Three-step pipeline:
+      Step 0: Classify paper type
+      Step 1: Enumerate all statistical edges
+      Step 2: Fill each edge into the HPP template
+    """
 
     def __init__(
         self,
@@ -247,8 +247,11 @@ class EdgeExtractionPipeline:
     ):
         self.client = client
         self.ocr_text_func = ocr_text_func
-        self.template = _load_template()
 
+        # Load the annotated template (with _hint fields)
+        self.annotated_template = _load_annotated_template()
+
+        # Resolve HPP dictionary path
         if hpp_dict_path:
             self.hpp_dict_path = hpp_dict_path
         elif _DEFAULT_HPP_DICT.exists():
@@ -275,6 +278,7 @@ class EdgeExtractionPipeline:
             )
 
     def _get_pdf_text(self, pdf_path: str) -> str:
+        """Extract text from PDF using the configured OCR function."""
         return self.ocr_text_func(pdf_path)
 
     def run(
@@ -283,6 +287,7 @@ class EdgeExtractionPipeline:
         force_type: Optional[str] = None,
         output_dir: Optional[str] = None,
     ) -> List[Dict]:
+        """Run the full 3-step pipeline on a PDF."""
         pdf_name = Path(pdf_path).stem
         base_dir = Path(output_dir) if output_dir else None
 
@@ -296,9 +301,10 @@ class EdgeExtractionPipeline:
         if pdf_dir:
             print(f"[Pipeline] Output folder: {pdf_dir}", file=sys.stderr)
         print(f"{'='*60}", file=sys.stderr)
+
         pdf_text = self._get_pdf_text(pdf_path)
 
-        # Step 0: 分类
+        # ---- Step 0: Classify ----
         if force_type:
             evidence_type = force_type
             classification = {"primary_category": force_type, "forced": True}
@@ -311,6 +317,7 @@ class EdgeExtractionPipeline:
         if pdf_dir:
             _save_json(pdf_dir / "step0_classification.json", classification)
 
+        # ---- Step 1: Enumerate edges ----
         print("\n[Step 1] Enumerating edges ...", file=sys.stderr)
         step1_result = step1_enumerate_edges(self.client, pdf_text, evidence_type)
         edges_list = step1_result.get("edges", [])
@@ -319,6 +326,7 @@ class EdgeExtractionPipeline:
         if pdf_dir:
             _save_json(pdf_dir / "step1_edges.json", step1_result)
 
+        # ---- Step 2: Fill each edge ----
         print(
             f"\n[Step 2] Filling templates for {len(edges_list)} edges ...",
             file=sys.stderr,
@@ -329,7 +337,7 @@ class EdgeExtractionPipeline:
             idx = edge.get("edge_index", i + 1)
             y_short = str(edge.get("Y", ""))[:50]
             print(
-                f"\n  [{idx}/{len(edges_list)}] Filling: → {y_short} ...",
+                f"\n  [{idx}/{len(edges_list)}] Filling: \u2192 {y_short} ...",
                 file=sys.stderr,
             )
 
@@ -339,18 +347,18 @@ class EdgeExtractionPipeline:
                 edge=edge,
                 paper_info=paper_info,
                 evidence_type=evidence_type,
-                template=self.template,
+                annotated_template=self.annotated_template,
                 pdf_name=pdf_name,
                 hpp_dict_path=self.hpp_dict_path,
             )
 
-            filled = _postprocess_edge(filled)
             all_filled_edges.append(filled)
 
             eid = filled.get("edge_id", f"#{idx}")
             eq = filled.get("equation_type", "?")
             print(f"         Done: {eid} (equation_type={eq})", file=sys.stderr)
 
+        # ---- Save outputs ----
         if pdf_dir:
             output_file = pdf_dir / "edges.json"
             _save_json(output_file, all_filled_edges)
@@ -374,6 +382,7 @@ class EdgeExtractionPipeline:
         step: str,
         evidence_type: Optional[str] = None,
     ) -> Any:
+        """Run a single pipeline step (classify or edges)."""
         pdf_text = self._get_pdf_text(pdf_path)
 
         if step == "classify":
@@ -388,7 +397,13 @@ class EdgeExtractionPipeline:
         raise ValueError(f"Unknown step: {step}. Valid: classify, edges")
 
 
+# ===================================================================
+# Utility
+# ===================================================================
+
+
 def _save_json(path: Path, data: Any) -> None:
+    """Save data as formatted JSON."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     print(f"  -> Saved: {path}", file=sys.stderr)

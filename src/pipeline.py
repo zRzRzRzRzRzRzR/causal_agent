@@ -1,15 +1,18 @@
 """
-pipeline.py — Edge extraction pipeline with template-first filling.
+pipeline.py — Edge extraction pipeline aligned with new hpp_mapping_template.
 
-Key change from v1: Step 2 now uses a template-first approach:
-  1. Load annotated template (with _hint fields for every value)
-  2. Pre-fill deterministic fields (edge_id, provenance, known estimates)
-  3. Send annotated template + hints to LLM for filling
-  4. Merge LLM output back into the skeleton (skeleton is structural authority)
+Three-step pipeline:
+  Step 0: Classify paper type (interventional/causal/mechanistic/associational)
+  Step 1: Enumerate all X→Y statistical edges
+  Step 2: Fill each edge into the HPP template
+
+Step 2 uses a template-first approach:
+  1. Load template (hpp_mapping_template.json with // comments as hints)
+  2. Pre-fill deterministic fields (edge_id, literature_estimate partials)
+  3. Send template + // comments as inline hints to LLM
+  4. Merge LLM output into skeleton (skeleton is structural authority, but
+     extra keys like mapping_notes, composite_components are accepted)
   5. Auto-fix, validate, compute fill rate
-
-This guarantees output always matches the template schema exactly,
-regardless of what the LLM returns.
 """
 
 import json
@@ -19,13 +22,19 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .hpp_mapper import get_hpp_context
 from .llm_client import GLMClient
-from .template_utils import build_filled_edge, prepare_template_for_prompt
+from .template_utils import (
+    build_filled_edge,
+    load_template,
+    prepare_template_for_prompt,
+    prepare_template_with_comments,
+)
 
 _SRC_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _SRC_DIR.parent
 _PROMPTS_DIR = _PROJECT_DIR / "prompts"
 _TEMPLATES_DIR = _PROJECT_DIR / "templates"
 _DEFAULT_HPP_DICT = _TEMPLATES_DIR / "pheno_ai_data_dictionaries_simplified.json"
+_DEFAULT_TEMPLATE = _TEMPLATES_DIR / "hpp_mapping_template.json"
 
 
 def _load_prompt(name: str) -> str:
@@ -39,13 +48,6 @@ def _load_prompt(name: str) -> str:
         except UnicodeDecodeError:
             continue
     return raw.decode("utf-8", errors="replace")
-
-
-def _load_annotated_template() -> Dict:
-    """Load the annotated template (with _hint fields)."""
-    path = _TEMPLATES_DIR / "hpp_mapping_template.json"
-    assert path.exists(), f"Template not found: {path}"
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 # ===================================================================
@@ -75,7 +77,7 @@ def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
 def step1_enumerate_edges(
     client: GLMClient, pdf_text: str, evidence_type: str
 ) -> Dict[str, Any]:
-    """Extract all X->Y statistical edges from the paper."""
+    """Extract all X→Y statistical edges from the paper."""
     prompt_template = _load_prompt("step1_edges")
     prompt_template = prompt_template.replace("{evidence_type}", evidence_type)
     full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
@@ -128,9 +130,9 @@ def step1_enumerate_edges(
         file=sys.stderr,
     )
     for i, e in enumerate(edges):
-        sig = "\u2713" if e.get("significant") else "\u2717"
+        sig = "✓" if e.get("significant") else "✗"
         print(
-            f"  [{i+1}] {sig} {e.get('X', '?')[:40]} \u2192 {e.get('Y', '?')[:40]}"
+            f"  [{i+1}] {sig} {e.get('X', '?')[:40]} → {e.get('Y', '?')[:40]}"
             f"  ({e.get('source', '')})",
             file=sys.stderr,
         )
@@ -150,21 +152,29 @@ def step2_fill_one_edge(
     evidence_type: str,
     annotated_template: Dict,
     pdf_name: str,
+    template_path: Optional[str] = None,
     hpp_dict_path: Optional[str] = None,
 ) -> Dict:
     """
-    Fill one edge using the template-first approach:
-      1. Prepare annotated template (with _hint fields) for the prompt
-      2. Build prompt with edge info + HPP context + annotated template
-      3. Call LLM to fill the template
-      4. Merge LLM output into a clean skeleton (template is structural authority)
-      5. Auto-fix and validate
+    Fill one edge using the template-first approach.
+
+    The key insight: the new template has // comments that serve as
+    excellent inline hints for the LLM. We include the raw template
+    (with comments) in the prompt so the LLM reads the guidance,
+    and also provide the clean JSON skeleton as the output format.
     """
     prompt_template = _load_prompt("step2_fill_template")
 
-    # Prepare annotated template string for the prompt
-    # Keep _hint fields so the LLM sees inline guidance for each field
-    template_for_prompt = prepare_template_for_prompt(annotated_template)
+    # Prepare two versions of the template:
+    # 1. Clean JSON for output format reference
+    template_json = prepare_template_for_prompt(annotated_template)
+
+    # 2. Raw template with // comments for the LLM to read as hints
+    # (if template_path available)
+    if template_path:
+        template_with_hints = prepare_template_with_comments(template_path)
+    else:
+        template_with_hints = template_json
 
     # Build replacement values
     replacements = {
@@ -172,7 +182,7 @@ def step2_fill_one_edge(
         "{X}": str(edge.get("X", "")),
         "{C}": str(edge.get("C", "")),
         "{Y}": str(edge.get("Y", "")),
-        "{subgroup}": str(edge.get("subgroup", "\u603b\u4f53\u4eba\u7fa4")),
+        "{subgroup}": str(edge.get("subgroup", "总体人群")),
         "{outcome_type}": str(edge.get("outcome_type", "")),
         "{effect_scale}": str(edge.get("effect_scale", "")),
         "{estimate}": str(edge.get("estimate", "null")),
@@ -183,7 +193,7 @@ def step2_fill_one_edge(
         "{year}": str(paper_info.get("year", "")),
         "{doi}": str(paper_info.get("doi", "")),
         "{evidence_type}": evidence_type,
-        "{template_json}": template_for_prompt,
+        "{template_json}": template_with_hints,
     }
 
     # Retrieve HPP field context
@@ -244,12 +254,18 @@ class EdgeExtractionPipeline:
         ocr_dpi: int = 200,
         ocr_validate_pages: bool = True,
         hpp_dict_path: Optional[str] = None,
+        template_path: Optional[str] = None,
     ):
         self.client = client
         self.ocr_text_func = ocr_text_func
 
-        # Load the annotated template (with _hint fields)
-        self.annotated_template = _load_annotated_template()
+        # Load the template
+        self.template_path = template_path or str(_DEFAULT_TEMPLATE)
+        if Path(self.template_path).exists():
+            self.annotated_template = load_template(self.template_path)
+            print(f"[Pipeline] Template: {self.template_path}", file=sys.stderr)
+        else:
+            raise FileNotFoundError(f"Template not found: {self.template_path}")
 
         # Resolve HPP dictionary path
         if hpp_dict_path:
@@ -337,7 +353,7 @@ class EdgeExtractionPipeline:
             idx = edge.get("edge_index", i + 1)
             y_short = str(edge.get("Y", ""))[:50]
             print(
-                f"\n  [{idx}/{len(edges_list)}] Filling: \u2192 {y_short} ...",
+                f"\n  [{idx}/{len(edges_list)}] Filling: → {y_short} ...",
                 file=sys.stderr,
             )
 
@@ -349,6 +365,7 @@ class EdgeExtractionPipeline:
                 evidence_type=evidence_type,
                 annotated_template=self.annotated_template,
                 pdf_name=pdf_name,
+                template_path=self.template_path,
                 hpp_dict_path=self.hpp_dict_path,
             )
 

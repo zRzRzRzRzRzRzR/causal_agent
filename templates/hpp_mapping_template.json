@@ -1,331 +1,227 @@
 {
-  "_description": "PDF-derived initial input template. One JSON object per line when used as jsonl.",
-  "_equation_type_note": "Optional. Can be null and inferred downstream from equation_inference_hints + epsilon/modeling_directives.",
-  "_input_redundancy_policy": {
-    "auto_backfill_rules": [
-      "If equation_type is null, infer from hints: has_joint_intervention->E6; has_counterfactual_query->E5; has_mediator->E4; has_survival_outcome->E2; has_longitudinal_timepoints->E3; else E1.",
-      "If epsilon.rho.M missing and hpp_mapping.M has one element, backfill rho.M[0] from mapping.M[0].name.",
-      "If E5 context mapping missing, fallback to epsilon.rho.Z variable names.",
-      "If E6 rho.X1/X2 missing, backfill from epsilon.iota_1.core.name / epsilon.iota_2.core.name."
-    ],
-    "critical_fields_must_present": [
-      "schema_version",
-      "edge_id",
-      "epsilon",
-      "epsilon.o.type",
-      "epsilon.rho.X",
-      "epsilon.rho.Y",
-      "hpp_mapping.X.dataset",
-      "hpp_mapping.X.field",
-      "hpp_mapping.Y.dataset",
-      "hpp_mapping.Y.field"
-    ],
-    "fallback_priority": [
-      "explicit_field",
-      "modeling_directives",
-      "literature_estimate",
-      "equation_inference_hints",
-      "global_default"
-    ],
-    "max_missing_ratio": 0.3,
-    "missing_flag_prefix": "input_missing:",
-    "recommended_fields": [
-      "epsilon.tau.core.index",
-      "epsilon.tau.core.horizon",
-      "epsilon.rho.Z",
-      "literature_estimate.theta_hat",
-      "literature_estimate.ci",
-      "literature_estimate.design",
-      "literature_estimate.model"
-    ],
-    "target_fill_rate_min": 0.7
-  },
-  "_template_name": "HPP Unified Input Template (E1-E6, equation_type optional)",
-  "_template_version": "1.2.0",
-  "analysis_plan": {
-    "multiomics": [],
-    "sensitivity": {
-      "alternative_models": [
-        "iptw",
-        "ps_matching"
-      ],
-      "e_value": true,
-      "leave_one_out": true,
-      "run": true
+    "_comment": "由 LLM 从论文中提取的因果边信息，作为 HPP 验证管线输入",
+    // ─── 唯一边 ID ───
+    // 格式: EV-{发表年份}-{研究简称}#{边编号}
+    // 一篇论文可能有多条因果边（多个效应），用 #1, #2, #3... 区分
+    "edge_id": "EV-{YEAR}-{STUDY}#{EDGE_NUM}",
+    // ─── 论文元数据 ───
+    // 用于溯源和上下文理解（管线代码不直接通过这些字段运行，但对人类验证至关重要）
+    "paper_title": "论文完整标题",
+    "paper_abstract": "论文摘要文本...",
+    // ─── 方程类型 ───
+    // 从以下 6 种中选择一个，LLM 需根据论文的统计方法和研究设计判断：
+    //
+    // E1 — 静态原子方程 (Type I)
+    //   公式: g(E[Y|do(X=x),Z]) = α + β_X·T_X(x) + γᵀZ
+    //   效应: ΔY(x₁,x₀) = E[Y|do(x₁)] - E[Y|do(x₀)]
+    //   适用: logistic, linear, ANCOVA, Poisson, MR/IVW
+    //   参数: β_X (效应系数), γ (协变量系数), g (连接函数: identity/log/logit)
+    //
+    // E2 — 生存原子方程 (Type II)
+    //   公式: λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γᵀZ)
+    //   生存函数: S_x(t|Z) = exp(-∫₀ᵗ λ(s|do(x),Z) ds)
+    //   适用: Cox 比例风险模型, 参数生存模型, KM 衍生比较
+    //   参数: β_X (log-HR), λ₀(t) (基线风险函数)
+    //
+    // E3 — 纵向轨迹方程 (Type III)
+    //   公式: Y_it = (α+u₀ᵢ) + (β₀+u₁ᵢ)t + β_X·T_X(Xᵢ) + β_XT·T_X(Xᵢ)·t + γᵀZ_it + ε_it
+    //   效应: Δ(t) = β_X·ΔT_X + β_XT·ΔT_X·t,  Δ_slope = β_XT·ΔT_X
+    //   适用: LMM (线性混合效应), GEE, 重复测量 ANOVA
+    //   参数: β_X (截距效应), β_XT (斜率效应), u₀ᵢ/u₁ᵢ (随机效应)
+    //
+    // E4 — 中介方程系统 (Type IV)
+    //   公式: M = f_M(X, Z_M, ε_M),  Y = f_Y(X, M, Z_Y, ε_Y)
+    //   效应: TE = E[Y_{x₁,M_{x₁}} - Y_{x₀,M_{x₀}}]
+    //         NDE = E[Y_{x₁,M_{x₀}} - Y_{x₀,M_{x₀}}]
+    //         NIE = E[Y_{x₁,M_{x₁}} - Y_{x₁,M_{x₀}}]
+    //   适用: causal mediation, path analysis, 结构化中介模型
+    //   参数: β_XM (X→M 效应), β_MY (M→Y 效应), 需要额外的中介变量 M
+    //
+    // E5 — 个体反事实近似方程 (QCF 专用)
+    //   公式: Ŷᵢ(x) = m_θ(x, Hᵢ),  τ̂ᵢ = Ŷᵢ(x₁) - Ŷᵢ(x₀)
+    //   置信区间: CIᵢ = [Q_{α/2}(τ̂ᵢ^(b)), Q_{1-α/2}(τ̂ᵢ^(b))]
+    //   适用: 文中报告个体级处理效应 ITE, CATE
+    //   参数: 与 E1 相同（复用基线模型），但输出个体级 τ̂ᵢ 分布
+    //   注意: 必须附带不确定性区间与假设标记
+    //
+    // E6 — 联合干预方程 (QJOINT)
+    //   公式: η(X₁,X₂,Z) = α + β₁T₁ + β₂T₂ + β₁₂T₁T₂ + γᵀZ
+    //   效应: Δ_joint = β₁ΔT₁ + β₂ΔT₂ + β₁₂Δ(T₁T₂)
+    //   适用: 多个处理变量同时干预, 交互效应, factorial design
+    //   参数: β₁ (X₁ 主效应), β₂ (X₂ 主效应), β₁₂ (交互效应)
+    //   注意: 需要额外的第二处理变量 X₂
+    //
+    //
+    "equation_type": "E1/E2/E3/E4/E5/E6",
+    // ─── 方程公式 (新增) ───
+    // 请在此处明确写出论文中使用的具体统计模型公式
+    // 格式示例: "logit(P(Y=1)) = α + β*X + γ*Age + δ*Sex"
+    // 作用: 辅助人工校验 equation_type 选择是否正确
+    "equation_formula": "在此处填写具体的数学公式字符串",
+    "epsilon": {
+        // ─── Pi: 人群标签 ───
+        // 论文的纳入标准/目标人群，用于人群可比性分层
+        // 常见值: "cvd", "diabetes", "oncology", "adult_general", "pediatric"
+        "Pi": "cvd",
+        // ─── iota: 暴露/干预坐标 ───
+        // core.name: 暴露/干预的名称（从论文 exposure/intervention 提取）
+        // 例: "LDL-C", "Metformin", "Systolic Blood Pressure"
+        "iota": {
+            "core": {
+                "name": "暴露/干预变量名称"
+            },
+            "ext": {}
+        },
+        // ─── o: 结局坐标 ───
+        // name: 结局变量名称（从论文 outcome 提取）
+        // type: "binary" (有/无事件) | "continuous" (连续指标) | "survival" (时间到事件)
+        "o": {
+            "name": "结局变量名称",
+            "type": "binary"
+        },
+        // ─── tau: 时间坐标 ───
+        // core.index: 基线时点，通常 "baseline" 或 "enrollment"
+        // core.horizon: 随访时间，ISO 8601 格式
+        //   例: "P5Y"=5年, "P10Y"=10年, "P30D"=30天, "P12W"=12周
+        // core.tau_aligned: 时间对齐点（E3 纵向专用，其他设 null）
+        "tau": {
+            "core": {
+                "index": "baseline",
+                "horizon": "P5Y",
+                "tau_aligned": null
+            },
+            "ext": {}
+        },
+        // ─── mu: 度量坐标 ───
+        // core.family: "ratio" (HR/OR/RR) | "difference" (MD/BETA/RD)
+        // core.type: 效应指标名
+        //   ratio 类: "HR", "OR", "RR", "logHR", "logOR", "logRR"
+        //   difference 类: "MD", "BETA", "RD"
+        //   核心值 theta 应当与 scale 匹配
+        //   如 HR=1.5 → theta_hat=ln(1.5)=0.405 (scale="log")
+        //   如 MD=-3.2 → theta_hat=-3.2 (scale="identity")
+        "mu": {
+            "core": {
+                "family": "ratio",
+                "type": "logRR",
+                "scale": "log"
+            },
+            "ext": {}
+        },
+        // ─── alpha: 因果识别坐标 ───
+        // id_strategy: 识别策略
+        //   "rct" | "observational" | "MR" | "IV" | "pooled_estimates" | "other"
+        // assumptions: 因果假设列表
+        //   常见: "exchangeability", "positivity", "consistency",
+        //         "no_publication_bias", "sequential_ignorability" (E4)
+        // status: 识别状态
+        //   "identified" | "partially_identified" | "not_identified"
+        "alpha": {
+            "id_strategy": "rct",
+            "assumptions": [
+                "exchangeability"
+            ],
+            "status": "identified"
+        },
+        // ─── rho: 变量角色坐标 ───
+        // X: 暴露/处理变量名（与 iota.core.name 一致）
+        // Y: 结局变量名（与 o.name 一致）
+        // Z: 协变量/调整变量列表（论文 adjustment set）
+        // IV: 工具变量（仅孟德尔随机化需要，其他设 null）
+        // M: 中介变量名（仅 E4 需要，其他可省略）
+        "rho": {
+            "X": "暴露变量名称",
+            "Y": "结局变量名称",
+            "Z": [
+                "协变量1",
+                "协变量2"
+            ],
+            "IV": null
+        }
     },
-    "subgroup": []
-  },
-  "edge_id": "EV-YYYY-UNIQUE#N",
-  "epsilon": {
-    "Pi": "...",
-    "_iota_1_note": "Used by E6 only. Can stay null for non-E6 edges.",
-    "_iota_2_note": "Used by E6 only. Can stay null for non-E6 edges.",
-    "alpha": {
-      "assumption_required": [],
-      "assumptions": [],
-      "id_strategy": "...",
-      "status": "identified|partially_identified|not_identified"
-    },
-    "iota": {
-      "core": {
-        "name": "..."
-      },
-      "ext": {
-        "contrast_type": "category|per_unit|arm_vs_control|dose|binary|continuous",
-        "tx_encoding": "identity|log|one_hot|custom",
-        "unit": null,
-        "x0": null,
-        "x1": null
-      }
-    },
-    "iota_1": {
-      "core": {
-        "name": null
-      },
-      "ext": {
-        "contrast_type": null,
-        "unit": null,
-        "x0": null,
-        "x1": null
-      }
-    },
-    "iota_2": {
-      "core": {
-        "name": null
-      },
-      "ext": {
-        "contrast_type": null,
-        "unit": null,
-        "x0": null,
-        "x1": null
-      }
-    },
-    "mu": {
-      "core": {
-        "family": "difference|ratio",
-        "scale": "identity|log",
-        "type": "MD|logOR|logRR|logHR|RD|beta|SD"
-      },
-      "ext": {}
-    },
-    "o": {
-      "name": "...",
-      "type": "continuous|binary|survival"
-    },
-    "rho": {
-      "IV": null,
-      "M": [],
-      "X": "...",
-      "X1": null,
-      "X2": null,
-      "Y": "...",
-      "Z": [
-        "..."
-      ],
-      "_M_note": "E4 mediator role(s). Empty list for non-E4.",
-      "_X1_X2_note": "E6 joint intervention roles. null for non-E6."
-    },
-    "tau": {
-      "core": {
-        "horizon": "...",
-        "index": "...",
-        "tau_aligned": null
-      },
-      "ext": {
-        "baseline_window": null,
-        "follow_up_window": null,
-        "time_grid": null
-      }
-    },
-    "z_context": {
-      "individual": null,
-      "subgroup": null
-    }
-  },
-  "equation_inference_hints": {
-    "has_counterfactual_query": false,
-    "has_joint_intervention": false,
-    "has_longitudinal_timepoints": false,
-    "has_mediator": false,
-    "has_survival_outcome": false
-  },
-  "equation_type": null,
-  "equation_version": "1.0",
-  "hpp_mapping": {
-    "IV": null,
-    "M": [],
-    "X": {
-      "dataset": "...",
-      "field": "...",
-      "notes": "",
-      "status": "manual|auto_resolved"
-    },
-    "X1": null,
-    "X2": null,
-    "Y": {
-      "dataset": "...",
-      "field": "...",
-      "notes": "",
-      "status": "manual|auto_resolved"
-    },
-    "Z": [],
-    "_M_note": "E4 mediator mappings. Example item: {\"name\":\"CRP\",\"dataset\":\"016-blood_tests\",\"field\":\"bt__crp_float_value\",\"status\":\"manual\",\"notes\":\"\"}",
-    "_X1_X2_note": "E6 joint intervention mappings.",
-    "_context_note": "E5 individual context mappings. If empty, fallback to epsilon.rho.Z.",
-    "context": []
-  },
-  "literature_estimate": {
-    "_decomposed_effects_note": "Optional literature block for E4.",
-    "adjustment_set": [
-      "..."
-    ],
-    "ci": [
-      null,
-      null
-    ],
-    "ci_level": 0.95,
-    "decomposed_effects": {
-      "NDE": {
+    // ─── 文献报告的效应值 ───
+    "literature_estimate": {
+        // theta_hat: 效应估计值
+        //   ratio 类: 填 log 值（如 HR=1.5 → theta_hat=ln(1.5)≈0.405）
+        //   difference 类: 填原值（如 MD=-3.2 → theta_hat=-3.2）
+        "theta_hat": -0.223,
+        // ci: 95% 置信区间 [下界, 上界]
+        //   与 theta_hat 同 scale（log/identity）
+        //   如论文报告 HR 的 CI，需转为 log 值: [ln(CI_lower), ln(CI_upper)]
         "ci": [
-          null,
-          null
+            -0.30,
+            -0.15
         ],
-        "p_value": null,
-        "theta_hat": null
-      },
-      "NIE": {
-        "ci": [
-          null,
-          null
-        ],
-        "p_value": null,
-        "theta_hat": null
-      },
-      "TE": {
-        "ci": [
-          null,
-          null
-        ],
-        "p_value": null,
-        "theta_hat": null
-      }
-    },
-    "design": "RCT|cohort|cross-sectional|MR|registry|other",
-    "grade": "A|B|C",
-    "model": "...",
-    "n": null,
-    "p_value": null,
-    "ref": "...",
-    "theta_hat": null
-  },
-  "modeling_directives": {
-    "e1": {
-      "enabled": null,
-      "model_preference": [
-        "OLS",
-        "Logistic",
-        "Poisson"
-      ],
-      "target_parameter": "beta_X"
-    },
-    "e2": {
-      "censor_definition": null,
-      "enabled": null,
-      "event_definition": null,
-      "model_preference": [
-        "CoxPH",
-        "Logistic_survival_proxy"
-      ],
-      "target_parameter": "beta_X_logHR"
-    },
-    "e3": {
-      "enabled": null,
-      "model_preference": [
-        "LMM",
-        "GEE",
-        "OLS_fallback"
-      ],
-      "subject_id_variable": "participant_id",
-      "target_parameter": "beta_XT",
-      "time_variable": "time"
-    },
-    "e4": {
-      "decomposition_scale": "identity|log",
-      "enabled": null,
-      "mediator_model": "auto",
-      "outcome_model": "auto",
-      "primary_target": "TE",
-      "target_effects": [
-        "TE",
-        "NDE",
-        "NIE"
-      ],
-      "time_order": {
-        "m_time": null,
-        "rule": "t_X < t_M < t_Y",
-        "x_time": null,
-        "y_time": null
-      }
-    },
-    "e5": {
-      "assumption_required": [
-        "model_approximation_not_true_counterfactual"
-      ],
-      "context_window": {
-        "lookback": null,
-        "step": null
-      },
-      "counterfactual_contrast": {
-        "x0": null,
-        "x1": null
-      },
-      "enabled": null,
-      "estimand": "tau_i",
-      "model": {
-        "base_model": "linear|xgboost|lightgbm",
-        "type": "T_learner|S_learner|DR"
-      },
-      "uncertainty": {
+        // ci_level: 置信水平，默认 0.95
         "ci_level": 0.95,
-        "method": "bootstrap|posterior",
-        "n_bootstrap": 500
-      }
-    },
-    "e6": {
-      "assumption_required": [
-        "beta12_zero_if_additive_fallback"
-      ],
-      "enabled": null,
-      "fallback_additive_if_unidentifiable": true,
-      "interaction": {
-        "enabled": true,
-        "term": "X1*X2"
-      },
-      "joint_contrast": {
-        "x0": [
-          null,
-          null
-        ],
-        "x1": [
-          null,
-          null
+        // p_value: p 值，如论文报告（可为 null）
+        "p_value": 0.001,
+        // n: 总样本量
+        "n": 170000,
+        // design: 研究设计类型
+        //   "RCT" | "cohort" | "cross-sectional" | "case-control"
+        //   | "meta-analysis" | "registry" | "MR"
+        "design": "RCT",
+        // grade: 证据等级
+        //   "A" (高质量 RCT), "B" (中等), "C" (低等)
+        "grade": "A",
+        // model: 统计模型名称
+        //   与 equation_type 对应:
+        //   E1: "logistic", "linear", "poisson", "ANCOVA", "IVW"
+        //   E2: "Cox", "parametric_survival", "KM"
+        //   E3: "LMM", "GEE", "mixed"
+        //   E4: "mediation", "path_analysis"
+        //   E5: "counterfactual", "S-learner", "T-learner"
+        //   E6: "interaction_model", "factorial"
+        "model": "logistic",
+        // adjustment_set: 调整变量列表（应与 epsilon.rho.Z 一致）
+        "adjustment_set": [
+            "age",
+            "sex",
+            "BMI"
         ]
-      },
-      "primary_target": "beta_12"
+    },
+    // ─── HPP 数据集映射 ───
+    // 每个变量映射到 HPP 的 {dataset, field} 对
+    // 这是管线能否运行的关键！
+    "hpp_mapping": {
+        // X: 暴露/处理变量的 HPP 字段（所有方程类型必需）
+        // dataset: HPP 数据集编号（如 "016-blood_tests"）
+        // field: 具体字段名（如 "bt__ldl_cholesterol_float_value"）
+        // 注意: E6 中此字段对应第一处理变量 X₁
+        // status分为四类：
+        // exact: 字段含义与论文变量完全一致（例如：论文变量 "Age" -> 字段 age_at_research_stage）。
+        // close: 存在近似字段，但定义略有差异或为替代指标（例如：论文用的是“每日步数”，数据集只有“每日步行分钟数” activity_walking_minutes_daily）。
+        // tentative: 数据集中没有直接对应的字段，但可以通过现有字段计算得出（例如：BMI若未直接提供，需由身高体重计算）。，仅为猜测，不确定匹配是否正确。
+        // missing: 在提供的 JSON 文件中完全找不到相关数据集或字段。
+        "X": {
+            "dataset": "016-blood_tests",
+            "field": "bt__ldl_cholesterol_float_value",
+            "status": "manual",
+        },
+        // Y: 结局变量的 HPP 字段（所有方程类型必需）
+        "Y": {
+            "dataset": "021-medical_conditions",
+            "field": "icd11_code",
+            "status": "manual",
+        },
+        // ─── M: 中介变量（equation_type="E4" 时必需！）───
+        // 如果缺失，管线将产生 flag: "mediator_mapping_missing_for_E4"
+        // E4 估计器会验证 data["M"] 列存在
+        // "__required_when": "equation_type == E4"
+        "M": {
+            "dataset": "016-blood_tests",
+            "field": "bt__crp_float_value",
+            "status": "manual",
+        },
+        // ─── X2: 第二处理变量（equation_type="E6" 时必需！）───
+        // 如果缺失，管线将产生 flag: "x2_mapping_missing_for_E6"
+        // E6 估计器会验证 data["X2"] 列存在
+        // "__required_when": "equation_type == E6"
+        "X2": {
+            "dataset": "015-medications",
+            "field": "med__statin_use",
+            "status": "manual",
+        }
     }
-  },
-  "pi": {
-    "design": "...",
-    "grade": "...",
-    "n_literature": null,
-    "ref": "...",
-    "source": "pdf_extraction"
-  },
-  "provenance": {
-    "extractor": "manual|llm|hybrid",
-    "page": null,
-    "pdf_name": "...",
-    "table_or_figure": null
-  },
-  "schema_version": "1.1"
 }

@@ -1,111 +1,128 @@
 """
 template_utils.py — Template-first approach for edge filling.
 
-Instead of trusting the LLM to reproduce the full template structure,
-this module:
-  1. Builds a clean skeleton from the annotated template (strip _hint keys)
-  2. Pre-fills known values from edge/paper metadata before sending to LLM
-  3. Merges LLM output INTO the skeleton (skeleton is the authority on structure)
-  4. Validates critical fields and computes fill-rate
+Aligned with the new hpp_mapping_template.json which has a clean,
+flat structure:
+  edge_id, paper_title, paper_abstract, equation_type, equation_formula,
+  epsilon{Pi, iota, o, tau, mu, alpha, rho},
+  literature_estimate{theta_hat, ci, ...},
+  hpp_mapping{X, Y, M?, X2?}
 
-This guarantees every output matches the template schema exactly.
+Key changes from v1:
+  - Removed schema_version, equation_version, provenance, pi,
+    modeling_directives, equation_inference_hints (not in new template)
+  - Template comments (_comment) are stripped; no _hint/_meta system needed
+  - LLM output can add extra keys (mapping_notes, composite_components,
+    reported_HR, group_means, notes) — we merge them flexibly
+  - hpp_mapping uses underscore dataset IDs (e.g. "009_sleep")
+  - M and X2 in hpp_mapping are conditional on equation_type (E4/E6)
 """
 
 import copy
 import json
+import math
 import re
 import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any, Dict, List, Tuple
 
 # ---------------------------------------------------------------------------
-# 1. Strip hint / meta keys from the annotated template
+# 1. Load & clean the annotated template
 # ---------------------------------------------------------------------------
 
-def strip_hints(obj: Any) -> Any:
+
+def load_template(template_path: str) -> Dict:
     """
-    Recursively remove all keys starting with '_hint' or '_meta'
-    from dicts, producing a clean skeleton suitable for output.
+    Load hpp_mapping_template.json, stripping JS-style comments.
+    The template uses // comments which aren't valid JSON, so we strip them.
     """
+    with open(template_path, "r", encoding="utf-8") as f:
+        raw = f.read()
+    # Strip single-line // comments (but not inside strings)
+    lines = raw.split("\n")
+    cleaned = []
+    for line in lines:
+        # Simple approach: remove // comments not inside quotes
+        # Find // that's not inside a string value
+        in_string = False
+        escape_next = False
+        cut_pos = None
+        for i, ch in enumerate(line):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+            if not in_string and i < len(line) - 1 and line[i : i + 2] == "//":
+                cut_pos = i
+                break
+        if cut_pos is not None:
+            cleaned.append(line[:cut_pos])
+        else:
+            cleaned.append(line)
+    return json.loads("\n".join(cleaned))
+
+
+def strip_comments(obj: Any) -> Any:
+    """Remove _comment keys recursively."""
     if isinstance(obj, dict):
-        return {
-            k: strip_hints(v)
-            for k, v in obj.items()
-            if not k.startswith("_hint") and not k.startswith("_meta")
-        }
+        return {k: strip_comments(v) for k, v in obj.items() if k != "_comment"}
     elif isinstance(obj, list):
-        return [strip_hints(item) for item in obj]
+        return [strip_comments(item) for item in obj]
     return obj
 
 
-def strip_all_underscored(obj: Any) -> Any:
-    """
-    Recursively remove ALL keys starting with '_' (hints, notes, meta).
-    Used when preparing the template for the LLM prompt — keeps only real fields.
-    """
-    if isinstance(obj, dict):
-        return {
-            k: strip_all_underscored(v)
-            for k, v in obj.items()
-            if not k.startswith("_")
-        }
-    elif isinstance(obj, list):
-        return [strip_all_underscored(item) for item in obj]
-    return obj
+def get_clean_skeleton(template: Dict) -> Dict:
+    """Get a clean skeleton from the template, removing _comment keys."""
+    return strip_comments(copy.deepcopy(template))
 
 
 # ---------------------------------------------------------------------------
-# 2. Build a pre-filled skeleton from known edge + paper metadata
+# 2. Pre-fill deterministic fields from edge + paper metadata
 # ---------------------------------------------------------------------------
+
 
 def prefill_skeleton(
-    template: Dict,
+    skeleton: Dict,
     edge: Dict,
     paper_info: Dict,
     evidence_type: str,
     pdf_name: str,
 ) -> Dict:
     """
-    Deep-copy the template and pre-fill fields that are deterministic
-    (known from step1 output or paper metadata). This reduces the LLM's
-    burden and eliminates common copy errors.
+    Pre-fill fields that are deterministic (known from step1 output or
+    paper metadata). Reduces LLM burden and eliminates copy errors.
+
+    Fills: edge_id, paper_title (from pdf_name if not available),
+           literature_estimate partial values, epsilon.o.type
     """
-    skeleton = copy.deepcopy(template)
+    result = copy.deepcopy(skeleton)
 
     # ---- edge_id ----
     year = paper_info.get("year", "YYYY")
-    author = str(paper_info.get("first_author", "AUTHOR")).upper()
+    author = str(paper_info.get("first_author", "AUTHOR"))
+    # Capitalize first letter, keep rest as-is for readability
+    short_title = paper_info.get("short_title", "")
+    study_tag = f"{author}{short_title}".replace(" ", "")
     idx = edge.get("edge_index", 1)
-    skeleton["edge_id"] = f"EV_{year}_{author}#{idx}"
+    result["edge_id"] = f"EV_{year}_{study_tag}#{idx}"
 
-    # ---- schema / equation version (fixed) ----
-    skeleton["schema_version"] = "1.1"
-    skeleton["equation_version"] = "1.0"
-
-    # ---- provenance ----
-    skeleton["provenance"] = {
-        "pdf_name": pdf_name,
-        "page": None,
-        "table_or_figure": edge.get("source", None),
-        "extractor": "llm",
-    }
-
-    # ---- pi (paper-level, partially filled) ----
-    doi = paper_info.get("doi", "")
-    ref_str = f"{paper_info.get('first_author', '')} {year} DOI:{doi}" if doi else f"{paper_info.get('first_author', '')} {year}"
-    pi = skeleton.get("pi", {})
-    pi["ref"] = ref_str
-    pi["source"] = "pdf_extraction"
+    # ---- paper_title from paper_info if available ----
+    if paper_info.get("short_title"):
+        # Will be overwritten by LLM with full title
+        pass
 
     # ---- literature_estimate (from step1 edge) ----
-    lit = skeleton.get("literature_estimate", {})
+    lit = result.get("literature_estimate", {})
+
     estimate = edge.get("estimate")
     if estimate is not None:
         try:
             lit["theta_hat"] = float(estimate)
         except (ValueError, TypeError):
-            lit["theta_hat"] = None
+            pass
 
     ci = edge.get("ci")
     if isinstance(ci, list) and len(ci) == 2:
@@ -115,76 +132,111 @@ def prefill_skeleton(
                 parsed_ci.append(float(v) if v is not None else None)
             except (ValueError, TypeError):
                 parsed_ci.append(None)
-        lit["ci"] = parsed_ci
+        if any(v is not None for v in parsed_ci):
+            lit["ci"] = parsed_ci
 
     p_val = edge.get("p_value")
     if p_val is not None:
         lit["p_value"] = p_val
 
     # ---- outcome type -> epsilon.o.type ----
-    o = skeleton.get("epsilon", {}).get("o", {})
     otype = edge.get("outcome_type")
     if otype:
-        o["type"] = otype
+        result.setdefault("epsilon", {}).setdefault("o", {})["type"] = otype
 
-    return skeleton
+    # ---- alpha.id_strategy from evidence_type ----
+    alpha = result.setdefault("epsilon", {}).setdefault("alpha", {})
+    if evidence_type == "interventional":
+        alpha["id_strategy"] = "rct"
+    elif evidence_type == "causal":
+        alpha["id_strategy"] = "observational"
+    elif evidence_type == "associational":
+        alpha["id_strategy"] = "observational"
+
+    # ---- literature_estimate.design from evidence_type ----
+    if evidence_type == "interventional":
+        lit.setdefault("design", "RCT")
+
+    return result
 
 
 # ---------------------------------------------------------------------------
-# 3. Deep-merge LLM output into the skeleton
+# 3. Deep-merge LLM output into the skeleton (flexible merge)
 # ---------------------------------------------------------------------------
+
 
 def merge_with_template(skeleton: Dict, llm_output: Dict) -> Dict:
     """
     Recursively merge llm_output INTO skeleton.
 
-    Rules:
-      - skeleton defines the structure (all keys preserved)
-      - llm_output values overwrite skeleton values if present
-      - Extra keys in llm_output that are NOT in skeleton are ignored
-      - Keys starting with '_' in skeleton are preserved as-is (no overwrite)
-      - List values: if llm_output provides a non-empty list, use it;
-        otherwise keep skeleton's default
+    Rules (updated for new template):
+      - skeleton defines the base structure (all keys preserved)
+      - llm_output values overwrite skeleton values if present & meaningful
+      - Extra keys in llm_output ARE allowed (e.g., mapping_notes,
+        composite_components, reported_HR, group_means, notes)
+      - This is more permissive than v1 — we accept LLM extensions
+      - Placeholder strings from the template are overwritten
     """
     result = copy.deepcopy(skeleton)
     _recursive_merge(result, llm_output)
     return result
 
 
+def _is_placeholder(val: Any) -> bool:
+    """Check if a value is a template placeholder."""
+    if val is None:
+        return False
+    if isinstance(val, str):
+        return (
+            val in ("...", "")
+            or val.startswith("在此处")
+            or val.startswith("论文")
+            or val.startswith("暴露")
+            or val.startswith("结局")
+            or val.startswith("协变量")
+            or "E1/E2" in val
+        )
+    return False
+
+
 def _recursive_merge(target: Dict, source: Dict) -> None:
-    """In-place recursive merge of source into target."""
+    """
+    In-place recursive merge of source into target.
+    Allows extra keys from source (LLM can add mapping_notes, etc.)
+    """
     if not isinstance(source, dict):
         return
 
-    for key in target:
-        # Skip internal/hint keys — don't let LLM overwrite them
+    # First: update existing keys
+    for key in list(target.keys()):
         if key.startswith("_"):
             continue
-
         if key not in source:
             continue
 
         src_val = source[key]
         tgt_val = target[key]
 
-        # Both dicts: recurse
         if isinstance(tgt_val, dict) and isinstance(src_val, dict):
             _recursive_merge(tgt_val, src_val)
-
-        # Target is list: replace if source provides non-empty content
         elif isinstance(tgt_val, list):
             if isinstance(src_val, list) and len(src_val) > 0:
-                # Don't accept lists that are just ["..."] (unfilled placeholder)
                 if not (len(src_val) == 1 and src_val[0] == "..."):
                     target[key] = src_val
-
-        # Scalar: replace if source provides a meaningful value
         else:
-            if src_val is not None and src_val != "...":
+            # Replace if source provides meaningful value, or if target is placeholder
+            if src_val is not None and not _is_placeholder(src_val):
                 target[key] = src_val
-            # Allow explicit null from LLM (e.g., theta_hat = null when unknown)
-            elif src_val is None and tgt_val == "...":
+            elif src_val is None and _is_placeholder(tgt_val):
                 target[key] = None
+
+    # Second: add extra keys from source that aren't in target
+    # This allows LLM to add mapping_notes, composite_components, reported_HR, etc.
+    for key in source:
+        if key.startswith("_"):
+            continue
+        if key not in target:
+            target[key] = copy.deepcopy(source[key])
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +244,16 @@ def _recursive_merge(target: Dict, source: Dict) -> None:
 # ---------------------------------------------------------------------------
 
 _CRITICAL_FIELDS = [
-    "schema_version",
     "edge_id",
     "equation_type",
     ("epsilon", "o", "type"),
+    ("epsilon", "o", "name"),
     ("epsilon", "rho", "X"),
     ("epsilon", "rho", "Y"),
+    ("epsilon", "iota", "core", "name"),
+    ("epsilon", "mu", "core", "family"),
+    ("epsilon", "mu", "core", "type"),
+    ("epsilon", "alpha", "id_strategy"),
     ("hpp_mapping", "X", "dataset"),
     ("hpp_mapping", "X", "field"),
     ("hpp_mapping", "Y", "dataset"),
@@ -230,39 +286,62 @@ def validate_filled_edge(edge_json: Dict) -> Tuple[bool, List[str]]:
 
         if val is None:
             issues.append(f"MISSING: {path_str} is null")
-        elif val == "...":
-            issues.append(f"UNFILLED: {path_str} still has placeholder '...'")
-        elif isinstance(val, str) and val.startswith(".."):
-            issues.append(f"UNFILLED: {path_str} = '{val}'")
+        elif _is_placeholder(val):
+            issues.append(f"UNFILLED: {path_str} still has placeholder")
 
-    # Check naming consistency: rho.X == iota.core.name
+    # Check equation_type is valid
+    eq_type = edge_json.get("equation_type")
+    if eq_type and eq_type not in ("E1", "E2", "E3", "E4", "E5", "E6"):
+        issues.append(f"INVALID: equation_type='{eq_type}' not in E1-E6")
+
+    # Check naming consistency: rho.X should relate to iota.core.name
     rho_x = _get_nested(edge_json, ("epsilon", "rho", "X"))
     iota_name = _get_nested(edge_json, ("epsilon", "iota", "core", "name"))
-    if rho_x and iota_name and rho_x != iota_name:
-        issues.append(
-            f"INCONSISTENCY: rho.X='{rho_x}' != iota.core.name='{iota_name}'"
-        )
+    if rho_x and iota_name:
+        # Allow some flexibility — iota.core.name may be more descriptive
+        # Just warn if they're completely unrelated
+        rho_tokens = set(re.split(r"[_\-/\s.()]+", str(rho_x).lower()))
+        iota_tokens = set(re.split(r"[_\-/\s.()]+", str(iota_name).lower()))
+        overlap = rho_tokens & iota_tokens
+        if len(overlap) < 1 and len(rho_tokens) > 1:
+            issues.append(f"WARNING: rho.X and iota.core.name may be inconsistent")
 
     # Check rho.Y == o.name
     rho_y = _get_nested(edge_json, ("epsilon", "rho", "Y"))
     o_name = _get_nested(edge_json, ("epsilon", "o", "name"))
     if rho_y and o_name and rho_y != o_name:
-        issues.append(
-            f"INCONSISTENCY: rho.Y='{rho_y}' != o.name='{o_name}'"
-        )
+        # Soft warning — allow minor differences
+        if rho_y.lower().replace("_", " ") != o_name.lower().replace("_", " "):
+            issues.append(f"WARNING: rho.Y='{rho_y}' != o.name='{o_name}'")
 
     # Check theta_hat is numeric (not string)
     theta = _get_nested(edge_json, ("literature_estimate", "theta_hat"))
     if theta is not None and not isinstance(theta, (int, float)):
-        issues.append(f"TYPE_ERROR: theta_hat should be numeric, got {type(theta).__name__}: '{theta}'")
+        issues.append(
+            f"TYPE_ERROR: theta_hat should be numeric, got {type(theta).__name__}"
+        )
 
-    is_valid = len(issues) == 0
+    # E4 requires M mapping
+    if eq_type == "E4":
+        m_ds = _get_nested(edge_json, ("hpp_mapping", "M", "dataset"))
+        if not m_ds or m_ds == "N/A":
+            issues.append("WARNING: E4 equation but hpp_mapping.M is missing")
+
+    # E6 requires X2 mapping
+    if eq_type == "E6":
+        x2_ds = _get_nested(edge_json, ("hpp_mapping", "X2", "dataset"))
+        if not x2_ds or x2_ds == "N/A":
+            issues.append("WARNING: E6 equation but hpp_mapping.X2 is missing")
+
+    # Separate hard errors from warnings
+    hard_errors = [i for i in issues if not i.startswith("WARNING")]
+    is_valid = len(hard_errors) == 0
     return is_valid, issues
 
 
 def compute_fill_rate(edge_json: Dict) -> float:
     """
-    Compute what fraction of leaf values are filled (not '...', not None).
+    Compute what fraction of leaf values are filled (not placeholder, not None).
     Ignores keys starting with '_'.
     """
     total, filled = _count_leaves(edge_json)
@@ -284,13 +363,9 @@ def _count_leaves(obj: Any) -> Tuple[int, int]:
     elif isinstance(obj, list):
         if len(obj) == 0:
             return 1, 0
-        if len(obj) == 1 and obj[0] == "...":
-            return 1, 0
-        # Non-empty meaningful list counts as filled
         return 1, 1
     else:
-        # Leaf scalar
-        is_filled = obj is not None and obj != "..." and obj != ""
+        is_filled = obj is not None and not _is_placeholder(obj) and obj != ""
         return 1, (1 if is_filled else 0)
 
 
@@ -298,84 +373,19 @@ def _count_leaves(obj: Any) -> Tuple[int, int]:
 # 5. Auto-fix common LLM mistakes
 # ---------------------------------------------------------------------------
 
+
 def auto_fix(edge_json: Dict) -> Dict:
     """
     Apply deterministic fixes for common LLM output issues:
-      - Enforce naming consistency (rho.X -> iota.core.name, rho.Y -> o.name)
-      - Replace spaces with underscores in variable names
-      - Fix hpp_mapping missing status -> dataset/field = 'N/A'
-      - Infer equation_type from hints if missing
-      - Set correct enabled flags in modeling_directives
-      - Ensure schema_version and equation_version are present
+      - Normalize dataset IDs: replace '-' with '_' (template uses '-', examples use '_')
+      - Ensure theta_hat is numeric
+      - Fix hpp_mapping status=missing -> dataset/field = 'N/A'
+      - Remove conditional fields (M, X2) if not needed by equation_type
+      - Infer mu.core.scale from mu.core.type if inconsistent
     """
-    # --- Underscores in variable names ---
-    rho = edge_json.get("epsilon", {}).get("rho", {})
-    for key in ["X", "Y", "X1", "X2"]:
-        val = rho.get(key)
-        if isinstance(val, str):
-            rho[key] = val.replace(" ", "_")
-
-    iota = edge_json.get("epsilon", {}).get("iota", {})
-    iota_name = iota.get("core", {}).get("name")
-    if isinstance(iota_name, str):
-        iota["core"]["name"] = iota_name.replace(" ", "_")
-
-    o = edge_json.get("epsilon", {}).get("o", {})
-    o_name = o.get("name")
-    if isinstance(o_name, str):
-        o["name"] = o_name.replace(" ", "_")
-
-    # --- Naming consistency: rho.X -> iota.core.name ---
-    rho_x = rho.get("X")
-    iota_core_name = iota.get("core", {}).get("name")
-    if rho_x and iota_core_name and rho_x != iota_core_name:
-        # Prefer rho.X as the canonical name
-        iota["core"]["name"] = rho_x
-
-    # --- Naming consistency: rho.Y -> o.name ---
-    rho_y = rho.get("Y")
-    o_name = o.get("name")
-    if rho_y and o_name and rho_y != o_name:
-        o["name"] = rho_y
-
-    # --- Equation type inference ---
-    hints = edge_json.get("equation_inference_hints", {})
-    eq_type = edge_json.get("equation_type")
-
-    if not eq_type:
-        if hints.get("has_joint_intervention"):
-            eq_type = "E6"
-        elif hints.get("has_counterfactual_query"):
-            eq_type = "E5"
-        elif hints.get("has_mediator"):
-            eq_type = "E4"
-        elif hints.get("has_survival_outcome"):
-            eq_type = "E2"
-        elif hints.get("has_longitudinal_timepoints"):
-            eq_type = "E3"
-        else:
-            eq_type = "E1"
-        edge_json["equation_type"] = eq_type
-
-    # --- Modeling directives: set enabled flags ---
-    md = edge_json.get("modeling_directives", {})
-    eq_num = eq_type.replace("E", "e") if eq_type else "e1"
-    for key in ["e1", "e2", "e3", "e4", "e5", "e6"]:
-        if key in md and isinstance(md[key], dict):
-            md[key]["enabled"] = (key == eq_num)
-
-    # --- HPP mapping: missing -> N/A ---
+    # --- Normalize dataset IDs in hpp_mapping: replace '-' with '_' ---
     hm = edge_json.get("hpp_mapping", {})
-    for role in ["X", "Y", "X1", "X2"]:
-        role_data = hm.get(role)
-        if isinstance(role_data, dict) and role_data.get("status") == "missing":
-            for fld in ["dataset", "field"]:
-                if role_data.get(fld) in ("missing", "...", "", None):
-                    role_data[fld] = "N/A"
-
-    # --- Fixed fields ---
-    edge_json.setdefault("schema_version", "1.1")
-    edge_json.setdefault("equation_version", "1.0")
+    _normalize_dataset_ids(hm)
 
     # --- theta_hat: try to coerce string to number ---
     lit = edge_json.get("literature_estimate", {})
@@ -386,12 +396,131 @@ def auto_fix(edge_json: Dict) -> Dict:
         except (ValueError, TypeError):
             lit["theta_hat"] = None
 
+    # --- Auto-compute theta_hat from reported ratio if on log scale ---
+    mu = edge_json.get("epsilon", {}).get("mu", {}).get("core", {})
+    if mu.get("scale") == "log" and mu.get("family") == "ratio":
+        # If LLM provided theta_hat as the raw ratio, convert to log
+        theta = lit.get("theta_hat")
+        reported_ratio = (
+            lit.get("reported_HR") or lit.get("reported_OR") or lit.get("reported_RR")
+        )
+        if theta is not None and reported_ratio is not None:
+            # Check if theta looks like a raw ratio (> 0.01 and matches reported)
+            try:
+                if abs(float(theta) - float(reported_ratio)) < 0.01:
+                    # theta_hat was given as the ratio, not log — convert
+                    lit["theta_hat"] = round(math.log(float(reported_ratio)), 4)
+            except (ValueError, TypeError, ZeroDivisionError):
+                pass
+        elif theta is None and reported_ratio is not None:
+            try:
+                lit["theta_hat"] = round(math.log(float(reported_ratio)), 4)
+            except (ValueError, TypeError, ZeroDivisionError):
+                pass
+
+    # --- CI: auto-convert to log scale if needed ---
+    if mu.get("scale") == "log" and mu.get("family") == "ratio":
+        reported_ci = (
+            lit.get("reported_CI_HR")
+            or lit.get("reported_CI_OR")
+            or lit.get("reported_CI_RR")
+        )
+        ci = lit.get("ci")
+        if reported_ci and isinstance(reported_ci, list) and len(reported_ci) == 2:
+            # If ci matches reported_ci (ratio scale), convert to log
+            if ci and isinstance(ci, list) and len(ci) == 2:
+                try:
+                    if ci[0] is not None and abs(ci[0] - reported_ci[0]) < 0.01:
+                        lit["ci"] = [
+                            (
+                                round(math.log(reported_ci[0]), 4)
+                                if reported_ci[0] and reported_ci[0] > 0
+                                else None
+                            ),
+                            (
+                                round(math.log(reported_ci[1]), 4)
+                                if reported_ci[1] and reported_ci[1] > 0
+                                else None
+                            ),
+                        ]
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
+            elif ci is None:
+                try:
+                    lit["ci"] = [
+                        (
+                            round(math.log(reported_ci[0]), 4)
+                            if reported_ci[0] and reported_ci[0] > 0
+                            else None
+                        ),
+                        (
+                            round(math.log(reported_ci[1]), 4)
+                            if reported_ci[1] and reported_ci[1] > 0
+                            else None
+                        ),
+                    ]
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
+
+    # --- Remove M/X2 from hpp_mapping if not needed ---
+    eq_type = edge_json.get("equation_type", "")
+    if eq_type != "E4" and "M" in hm:
+        del hm["M"]
+    if eq_type != "E6" and "X2" in hm:
+        del hm["X2"]
+
+    # --- Infer mu scale from type ---
+    mu_type = mu.get("type", "")
+    if mu_type in ("HR", "OR", "RR", "logHR", "logOR", "logRR"):
+        mu["family"] = "ratio"
+        mu["scale"] = "log"
+    elif mu_type in ("MD", "BETA", "RD", "SMD"):
+        mu["family"] = "difference"
+        mu["scale"] = "identity"
+
     return edge_json
 
 
+def _normalize_dataset_ids(mapping: Dict) -> None:
+    """Replace '-' with '_' in all dataset IDs within hpp_mapping."""
+    for key, val in mapping.items():
+        if isinstance(val, dict):
+            if "dataset" in val and isinstance(val["dataset"], str):
+                val["dataset"] = val["dataset"].replace("-", "_")
+            # Recurse for composite_components etc.
+            _normalize_dataset_ids(val)
+
+
 # ---------------------------------------------------------------------------
-# 6. Full pipeline: skeleton -> prefill -> merge -> fix -> validate
+# 6. Prepare template for LLM prompt
 # ---------------------------------------------------------------------------
+
+
+def prepare_template_for_prompt(template: Dict) -> str:
+    """
+    Prepare the template for inclusion in the LLM prompt.
+    The new template has // comments in the JSON file which serve as hints.
+    We include them as-is for the LLM to read (they're excellent guidance),
+    but we also provide a clean JSON version the LLM should output.
+    """
+    # For the prompt, we show the clean JSON skeleton (no comments)
+    clean = strip_comments(template)
+    return json.dumps(clean, indent=2, ensure_ascii=False)
+
+
+def prepare_template_with_comments(template_path: str) -> str:
+    """
+    Read the raw template file including // comments for the LLM prompt.
+    The comments serve as inline hints explaining each field.
+    """
+    with open(template_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+# ---------------------------------------------------------------------------
+# 7. Full pipeline: skeleton -> prefill -> merge -> fix -> validate
+# ---------------------------------------------------------------------------
+
 
 def build_filled_edge(
     annotated_template: Dict,
@@ -403,24 +532,24 @@ def build_filled_edge(
 ) -> Tuple[Dict, bool, List[str], float]:
     """
     Full template-first pipeline:
-      1. Strip hints from annotated template to get clean skeleton
+      1. Get clean skeleton from template (strip _comment)
       2. Pre-fill deterministic fields from edge/paper metadata
-      3. Merge LLM output into the skeleton
+      3. Merge LLM output into the skeleton (allows extra keys)
       4. Auto-fix common mistakes
       5. Validate and compute fill rate
 
     Returns:
       (filled_edge, is_valid, issues, fill_rate)
     """
-    # Step 1: clean skeleton (no _hint keys)
-    clean_skeleton = strip_hints(annotated_template)
+    # Step 1: clean skeleton
+    clean_skeleton = get_clean_skeleton(annotated_template)
 
     # Step 2: pre-fill known values
     prefilled = prefill_skeleton(
         clean_skeleton, edge, paper_info, evidence_type, pdf_name
     )
 
-    # Step 3: merge LLM output (skeleton is authority on structure)
+    # Step 3: merge LLM output (flexible — allows extra keys)
     merged = merge_with_template(prefilled, llm_output)
 
     # Step 4: auto-fix common issues
@@ -431,23 +560,19 @@ def build_filled_edge(
     fill_rate = compute_fill_rate(fixed)
 
     if issues:
-        print(f"  [Validate] {len(issues)} issues found:", file=sys.stderr)
-        for iss in issues[:5]:
-            print(f"    - {iss}", file=sys.stderr)
+        hard = [i for i in issues if not i.startswith("WARNING")]
+        warns = [i for i in issues if i.startswith("WARNING")]
+        if hard:
+            print(f"  [Validate] {len(hard)} errors:", file=sys.stderr)
+            for iss in hard[:5]:
+                print(f"    ✗ {iss}", file=sys.stderr)
+        if warns:
+            print(f"  [Validate] {len(warns)} warnings:", file=sys.stderr)
+            for w in warns[:3]:
+                print(f"    ⚠ {w}", file=sys.stderr)
     print(
         f"  [Validate] fill_rate={fill_rate:.1%}, valid={is_valid}",
         file=sys.stderr,
     )
 
     return fixed, is_valid, issues, fill_rate
-
-
-def prepare_template_for_prompt(annotated_template: Dict) -> str:
-    """
-    Prepare the annotated template for inclusion in the LLM prompt.
-    Keeps _hint fields (they guide the LLM) but strips _meta.
-    """
-    cleaned = copy.deepcopy(annotated_template)
-    # Remove _meta (internal docs) but keep _hint (LLM guidance)
-    cleaned.pop("_meta", None)
-    return json.dumps(cleaned, indent=2, ensure_ascii=False)

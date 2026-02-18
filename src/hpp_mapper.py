@@ -1,10 +1,29 @@
+"""
+hpp_mapper.py — Map paper variables to HPP (Human Phenotype Project) fields.
+
+Given an edge's X, Y, Z variables, search the HPP data dictionary for
+the best matching dataset+field pairs. Uses:
+  1. Inverted token index over all fields
+  2. Synonym expansion for medical/clinical terms
+  3. Rule-based dataset forcing (e.g., disease outcomes → 021-medical_conditions)
+  4. Context-aware ranking (direct hits weighted higher than synonyms)
+
+Output format matches the new template:
+  hpp_mapping.X = {dataset: "009_sleep", field: "total_sleep_time"}
+  hpp_mapping.Y = {dataset: "002_anthropometrics", field: "bmi"}
+"""
+
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Set, Tuple
 
+# ---------------------------------------------------------------------------
+# Synonym map — used for query expansion during field search
+# ---------------------------------------------------------------------------
+
 SYNONYM_MAP: Dict[str, Set[str]] = {
-    # 人体测量
+    # Anthropometrics
     "bmi": {
         "body",
         "mass",
@@ -14,12 +33,22 @@ SYNONYM_MAP: Dict[str, Set[str]] = {
         "obesity",
         "overweight",
     },
-    "weight": {"bmi", "obesity", "overweight", "body", "anthropometrics"},
-    "height": {"stature", "anthropometrics"},
+    "weight": {"bmi", "obesity", "overweight", "body", "anthropometrics", "kg"},
+    "height": {"stature", "anthropometrics", "cm"},
     "waist": {"circumference", "abdominal", "anthropometrics"},
-    # 生活方式
-    "smoking": {"tobacco", "smoke", "cigarette", "smoker", "nicotine"},
-    "alcohol": {"drinking", "ethanol", "drink", "beer", "wine", "spirits"},
+    "hip": {"circumference", "anthropometrics"},
+    "obesity": {"bmi", "overweight", "body", "mass", "weight", "adiposity"},
+    # Lifestyle
+    "smoking": {
+        "tobacco",
+        "smoke",
+        "cigarette",
+        "smoker",
+        "nicotine",
+        "current",
+        "status",
+    },
+    "alcohol": {"drinking", "ethanol", "drink", "beer", "wine", "spirits", "frequency"},
     "diet": {
         "dietary",
         "food",
@@ -29,6 +58,7 @@ SYNONYM_MAP: Dict[str, Set[str]] = {
         "meat",
         "grain",
         "fish",
+        "intake",
     },
     "exercise": {
         "physical",
@@ -40,11 +70,27 @@ SYNONYM_MAP: Dict[str, Set[str]] = {
         "moderate",
     },
     "physical": {"exercise", "activity", "sport", "fitness"},
-    "activity": {"exercise", "physical", "sport", "walking"},
-    "lifestyle": {"smoking", "alcohol", "diet", "exercise", "physical", "activity"},
-    # 心血管
-    "hypertension": {"blood", "pressure", "systolic", "diastolic"},
-    "blood": {"pressure", "hypertension", "tests"},
+    "activity": {
+        "exercise",
+        "physical",
+        "sport",
+        "walking",
+        "moderate",
+        "vigorous",
+        "days",
+    },
+    "lifestyle": {
+        "smoking",
+        "alcohol",
+        "diet",
+        "exercise",
+        "physical",
+        "activity",
+        "environment",
+    },
+    # Cardiovascular
+    "hypertension": {"blood", "pressure", "systolic", "diastolic", "bp"},
+    "blood": {"pressure", "hypertension", "tests", "serum", "hematology"},
     "heart": {
         "cardiac",
         "cardiovascular",
@@ -54,22 +100,25 @@ SYNONYM_MAP: Dict[str, Set[str]] = {
         "failure",
     },
     "cardiac": {"heart", "cardiovascular", "ecg"},
-    "ischemic": {"coronary", "heart", "angina"},
-    "arrhythmia": {"atrial", "fibrillation", "rhythm", "ecg"},
+    "ischemic": {"coronary", "heart", "angina", "ischemia"},
+    "arrhythmia": {"atrial", "fibrillation", "rhythm", "ecg", "arrhythmias"},
     "stroke": {"cerebrovascular", "ischemic", "hemorrhagic"},
     "cerebrovascular": {"stroke", "brain", "vascular"},
     "thrombosis": {"embolism", "clot", "dvt", "venous"},
     "arteriosclerosis": {"atherosclerosis", "plaque", "vascular", "carotid"},
-    # 代谢
-    "diabetes": {"glucose", "insulin", "hba1c", "glycated", "metabolic"},
+    # Metabolic
+    "diabetes": {"glucose", "insulin", "hba1c", "glycated", "metabolic", "type"},
+    "glucose": {"diabetes", "blood", "sugar", "glycemic", "cgm"},
     "gout": {"uric", "acid", "urate"},
     "liver": {"hepatic", "hepato", "fatty", "cirrhosis", "ultrasound"},
-    # 肾脏
-    "kidney": {"renal", "nephro", "creatinine", "gfr"},
-    "renal": {"kidney", "nephro"},
-    # 呼吸
-    "asthma": {"respiratory", "bronchial", "wheeze", "lung"},
-    # 肿瘤
+    "cholesterol": {"ldl", "hdl", "lipid", "lipidomics", "triglyceride"},
+    # Renal
+    "kidney": {"renal", "nephro", "creatinine", "gfr", "failure"},
+    "renal": {"kidney", "nephro", "failure"},
+    # Respiratory
+    "asthma": {"respiratory", "bronchial", "wheeze", "lung", "pulmonary"},
+    "pulmonary": {"lung", "respiratory", "asthma"},
+    # Oncology
     "cancer": {"tumor", "carcinoma", "adenocarcinoma", "malignant", "neoplasm"},
     "colorectal": {"colon", "rectum", "bowel"},
     "breast": {"mammary"},
@@ -77,26 +126,51 @@ SYNONYM_MAP: Dict[str, Set[str]] = {
     "ovarian": {"ovary"},
     "esophageal": {"esophagus", "oesophageal"},
     "pancreatic": {"pancreas"},
-    # 骨骼
+    # Musculoskeletal
     "osteoarthritis": {"arthritis", "joint", "bone", "musculoskeletal"},
-    # 精神
+    # Psychological
     "mood": {"depression", "anxiety", "mental", "psychological", "depressive"},
-    "depression": {"mood", "depressive", "mental"},
-    "anxiety": {"mood", "anxious", "mental"},
-    "sleep": {"insomnia", "apnea", "circadian", "rest", "duration", "bedtime"},
-    # 感染
-    "infection": {"bacterial", "viral", "pathogen", "sepsis"},
-    # 人口学
+    "depression": {"mood", "depressive", "mental", "psychological"},
+    "anxiety": {"mood", "anxious", "mental", "psychological"},
+    # Sleep
+    "sleep": {
+        "insomnia",
+        "apnea",
+        "circadian",
+        "rest",
+        "duration",
+        "bedtime",
+        "nap",
+        "wake",
+        "total",
+    },
+    "insomnia": {"sleep", "circadian", "wake"},
+    # Infection
+    "infection": {"bacterial", "viral", "pathogen", "sepsis", "infections"},
+    # Demographics
     "age": {"years", "born", "birth"},
     "sex": {"gender", "male", "female"},
     "ethnicity": {"race", "ethnic", "country", "birth", "origin"},
     "deprivation": {"socioeconomic", "townsend", "income", "poverty"},
     "socioeconomic": {"deprivation", "townsend", "income", "education"},
-    # 结局
-    "mortality": {"death", "survival", "died", "fatal"},
+    # Outcomes
+    "mortality": {"death", "survival", "died", "fatal", "cause"},
     "death": {"mortality", "survival", "fatal"},
     "incidence": {"onset", "diagnosis", "incident"},
+    # Blood tests
+    "crp": {"inflammation", "reactive", "protein", "inflammatory"},
+    "ldl": {"cholesterol", "lipid", "lipoprotein"},
+    "hdl": {"cholesterol", "lipid", "lipoprotein"},
+    "hba1c": {"glycated", "hemoglobin", "diabetes", "glucose"},
+    # Medications
+    "medication": {"drug", "treatment", "prescription", "statin", "medications"},
+    "statin": {"medication", "cholesterol", "lipid"},
 }
+
+
+# ---------------------------------------------------------------------------
+# Field search index
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -108,6 +182,8 @@ class FieldCandidate:
 
 
 class HPPFieldIndex:
+    """Inverted token index over HPP data dictionary fields."""
+
     def __init__(self, raw_dict: Dict[str, Any]):
         self.raw_dict = raw_dict
         self.inverted_index: Dict[str, List[Tuple[str, str]]] = {}
@@ -132,9 +208,10 @@ class HPPFieldIndex:
 
     @staticmethod
     def _tokenize(text: str) -> Set[str]:
+        """Tokenize a string into lowercase tokens, stripping numeric prefixes."""
         text = re.sub(r"^\d+[-_]", "", text)
         parts = re.split(r"[_\-/\s.()]+", text.lower())
-        return {p for p in parts if len(p) > 2}
+        return {p for p in parts if len(p) > 1}  # Allow 2-char tokens (e.g. "bp", "hr")
 
     @staticmethod
     def _expand_synonyms(tokens: Set[str]) -> Set[str]:
@@ -145,6 +222,7 @@ class HPPFieldIndex:
         return expanded
 
     def search(self, query: str, top_k: int = 30) -> List[FieldCandidate]:
+        """Search for HPP fields matching the query string."""
         query_tokens = self._tokenize(query)
         expanded_tokens = self._expand_synonyms(query_tokens)
 
@@ -162,6 +240,7 @@ class HPPFieldIndex:
             info = self.field_registry[key]
             direct_hits = hit_tokens[key] & query_tokens
             synonym_hits = hit_tokens[key] - query_tokens
+            # Score: direct matches count 2x, synonym matches count 1x
             score = (len(direct_hits) * 2 + len(synonym_hits)) / max(
                 len(expanded_tokens), 1
             )
@@ -178,7 +257,15 @@ class HPPFieldIndex:
         return candidates[:top_k]
 
 
+# ---------------------------------------------------------------------------
+# HPP Mapper — main class
+# ---------------------------------------------------------------------------
+
+
 class HPPMapper:
+    """Map edge variables to HPP dataset+field pairs."""
+
+    # Keywords that indicate a disease/condition outcome
     _DISEASE_KEYWORDS = {
         "diabetes",
         "hypertension",
@@ -187,6 +274,7 @@ class HPPMapper:
         "failure",
         "stroke",
         "arrhythmia",
+        "arrhythmias",
         "asthma",
         "liver",
         "kidney",
@@ -199,6 +287,7 @@ class HPPMapper:
         "depression",
         "anxiety",
         "infection",
+        "infections",
         "thrombosis",
         "embolism",
         "cerebrovascular",
@@ -210,8 +299,17 @@ class HPPMapper:
         "death",
         "incidence",
         "pulmonary",
+        "colorectal",
+        "breast",
+        "pancreatic",
+        "esophageal",
+        "ovarian",
+        "endometrial",
+        "obesity",
+        "copd",
     }
 
+    # Rules for force-including datasets based on variable content
     _FORCE_INCLUDE_RULES = {
         "021-medical_conditions": lambda queries: any(
             HPPMapper._has_disease_keyword(q)
@@ -235,6 +333,7 @@ class HPPMapper:
                     "physical activity",
                     "tobacco",
                     "drinking",
+                    "healthy",
                 ]
             )
             for q in queries.values()
@@ -252,6 +351,7 @@ class HPPMapper:
                     "anthropo",
                     "height",
                     "waist",
+                    "hip",
                 ]
             )
             for q in queries.values()
@@ -268,6 +368,40 @@ class HPPMapper:
                     "wake",
                     "rest",
                     "nap",
+                    "duration",
+                ]
+            )
+            for q in queries.values()
+        ),
+        "016-blood_tests": lambda queries: any(
+            any(
+                kw in q.lower()
+                for kw in [
+                    "cholesterol",
+                    "ldl",
+                    "hdl",
+                    "glucose",
+                    "hba1c",
+                    "crp",
+                    "creatinine",
+                    "hemoglobin",
+                    "blood test",
+                    "serum",
+                    "triglyceride",
+                    "uric acid",
+                ]
+            )
+            for q in queries.values()
+        ),
+        "007-blood_pressure": lambda queries: any(
+            any(
+                kw in q.lower()
+                for kw in [
+                    "blood pressure",
+                    "systolic",
+                    "diastolic",
+                    "hypertension",
+                    "bp",
                 ]
             )
             for q in queries.values()
@@ -287,8 +421,14 @@ class HPPMapper:
         self,
         edge: Dict,
         max_datasets: int = 10,
-        max_fields_per_dataset: int = 20,
+        max_fields_per_dataset: int = 25,
     ) -> str:
+        """
+        Build a context string for the LLM prompt showing:
+          1. Relevant HPP datasets and their fields
+          2. Per-role mapping suggestions (X, Y, Z.*)
+          3. All available dataset IDs
+        """
         queries = self._extract_mapping_queries(edge)
         relevant_datasets: Dict[str, float] = {}
         role_suggestions: Dict[str, List[FieldCandidate]] = {}
@@ -304,6 +444,7 @@ class HPPMapper:
                         relevant_datasets[c.dataset_id], c.score
                     )
 
+        # Force-include datasets based on rules
         for ds_id, rule_fn in self._FORCE_INCLUDE_RULES.items():
             if ds_id in self.raw_dict and rule_fn(queries):
                 if ds_id not in relevant_datasets:
@@ -319,7 +460,9 @@ class HPPMapper:
         for ds_id, _ in sorted_datasets:
             fields = self.raw_dict.get(ds_id, {}).get("tabular_field_name", [])
             shown = fields[:max_fields_per_dataset]
-            parts.append(f"\n**`{ds_id}`** ({len(fields)} fields)")
+            # Normalize dataset ID for display (use underscore format)
+            display_id = ds_id.replace("-", "_")
+            parts.append(f"\n**`{display_id}`** ({len(fields)} fields)")
             parts.append("```")
             parts.append(", ".join(shown))
             if len(fields) > max_fields_per_dataset:
@@ -333,17 +476,21 @@ class HPPMapper:
                 continue
             suggestions = []
             for c in candidates[:3]:
+                ds_display = c.dataset_id.replace("-", "_")
                 suggestions.append(
-                    f"`{c.dataset_id}` → `{c.field_name}` (score={c.score:.2f})"
+                    f"`{ds_display}` → `{c.field_name}` (score={c.score:.2f})"
                 )
             parts.append(f"- **{role}**: {' | '.join(suggestions)}")
 
         parts.append("\n#### 所有可用数据集 ID\n")
-        parts.append(", ".join(f"`{k}`" for k in sorted(self.raw_dict.keys())))
+        parts.append(
+            ", ".join(f"`{k.replace('-', '_')}`" for k in sorted(self.raw_dict.keys()))
+        )
 
         return "\n".join(parts)
 
     def _extract_mapping_queries(self, edge: Dict) -> Dict[str, str]:
+        """Extract search queries from edge for each variable role."""
         queries = {}
         for key in ["X", "Y"]:
             val = edge.get(key, "")
@@ -366,10 +513,15 @@ class HPPMapper:
         return queries
 
 
+# ---------------------------------------------------------------------------
+# Module-level cache and convenience function
+# ---------------------------------------------------------------------------
+
 _mapper_cache: Dict[str, HPPMapper] = {}
 
 
 def get_hpp_context(edge: Dict, dict_path: str, max_datasets: int = 10) -> str:
+    """Get HPP field context for an edge, using a cached mapper."""
     if dict_path not in _mapper_cache:
         with open(dict_path, "r", encoding="utf-8") as f:
             raw_dict = json.load(f)

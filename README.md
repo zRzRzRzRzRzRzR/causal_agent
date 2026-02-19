@@ -136,16 +136,16 @@ python batch_run.py --type interventional
 
 ### 常用参数
 
-| 参数                    | 说明                              |
-|-----------------------|---------------------------------|
-| `--model`             | 覆盖默认 LLM 模型名                    |
-| `--api-key`           | 覆盖环境变量中的 API Key                |
-| `--base-url`          | 覆盖环境变量中的 Base URL               |
-| `--hpp-dict`          | HPP 数据字典 JSON 路径（启用 RAG + Rerank）|
-| `--max-retries`       | 语义验证失败时最大重试次数（默认 2，设 0 关闭）   |
-| `--ocr-dir`           | OCR 缓存目录（默认 `./cache_ocr`）      |
-| `--dpi`               | PDF 转图片 DPI（默认 200）             |
-| `--no-validate-pages` | 跳过 OCR 尾页过滤                     |
+| 参数                    | 说明                                |
+|-----------------------|-----------------------------------|
+| `--model`             | 覆盖默认 LLM 模型名                      |
+| `--api-key`           | 覆盖环境变量中的 API Key                  |
+| `--base-url`          | 覆盖环境变量中的 Base URL                 |
+| `--hpp-dict`          | HPP 数据字典 JSON 路径（启用 RAG + Rerank） |
+| `--max-retries`       | 语义验证失败时最大重试次数（默认 2，设 0 关闭）        |
+| `--ocr-dir`           | OCR 缓存目录（默认 `./cache_ocr`）        |
+| `--dpi`               | PDF 转图片 DPI（默认 200）               |
+| `--no-validate-pages` | 跳过 OCR 尾页过滤                       |
 
 ---
 

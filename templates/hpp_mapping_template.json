@@ -52,10 +52,32 @@
     //
     //
     "equation_type": "E1/E2/E3/E4/E5/E6",
-    // 请在此处明确写出论文中使用的具体统计模型公式
-    // 格式示例: "logit(P(Y=1)) = α + β*X + γ*Age + δ*Sex"
-    // 作用: 辅助人工校验 equation_type 选择是否正确
-    "equation_formula": "在此处填写具体的数学公式字符串",
+    // ─── 本地构建方程（基于 E1-6 框架）───
+    // 根据论文的统计方法，选择对应的 E1-6 方程模板，填入具体变量
+    // 格式示例: "λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γ₁·Age + γ₂·Sex)"
+    // 作用: 管线执行时使用此方程
+    "equation_formula": "基于E1-6框架构建的数学公式字符串",
+    // ─── 论文原文报告的方程 ───
+    // 用于与 equation_formula (E1-6 框架方程) 进行双重校验 (dual-check)
+    // 此方程独立于 E1-6 框架，不必与 E1-6 模板格式相同
+    //
+    // ⚠ 强制约束:
+    //   1. 此字段 **绝对不允许为 null**，必须始终填写
+    //   2. 值必须是 **数学方程字符串**（含变量符号、运算符、函数），
+    //      **禁止填写文字描述**（如 "使用了 Cox 回归" 是不合规的）
+    //
+    // 填写规则:
+    //   情况 1: 论文中有明确的数学方程
+    //     → 直接从 Methods / Statistical Analysis 等章节中摘录原始方程
+    //     → 例: "h(t|X) = h₀(t)exp(β₁·LifestyleScore + β₂·Age + β₃·Sex + β₄·TDI)"
+    //
+    //   情况 2: 论文未给出明确方程，但描述了统计方法
+    //     → 根据论文中对模型类型、因变量、自变量、调整变量等描述，
+    //       自行重构出一个等价的数学方程（不必套用 E1-6 模板）
+    //     → 例: 论文描述 "We used Cox proportional hazards model adjusting for age and sex"
+    //       → 重构为: "h(t) = h₀(t)·exp(β·X + γ₁·age + γ₂·sex)"
+    //     → 注意: 重构结果必须是方程形式，不能是文字总结
+    "equation_formula_reported": "论文中报告或从文献方法描述重构的数学方程字符串（不允许为null）",
     "epsilon": {
         // ─── Pi: 人群标签 ───
         // 论文的纳入标准/目标人群，用于人群可比性分层
@@ -179,6 +201,7 @@
     // ─── HPP 数据集映射 ───
     // 每个变量映射到 HPP 的 {dataset, field} 对
     // 这是管线能否运行的关键！
+    // 不要添加任何文字note!!
     "hpp_mapping": {
         // X: 暴露/处理变量的 HPP 字段（所有方程类型必需）
         // dataset: HPP 数据集编号（如 "016-blood_tests"）
@@ -200,6 +223,29 @@
             "field": "icd11_code",
             "status": "exact"
         },
+        // ─── Z: 协变量/调整变量的 HPP 字段映射 ───
+        // 对应 epsilon.rho.Z 和 literature_estimate.adjustment_set 中列出的每个变量
+        // 结构与 X/Y 保持一致: {dataset, field, status}
+        // 管线在执行 adjustment 时会验证这些字段存在于 HPP 数据集中
+        // 注意: epsilon.rho.Z、literature_estimate.adjustment_set、hpp_mapping.Z
+        //       三处列表必须保持一致，否则管线应产生 warning flag
+        "Z": [
+            {
+                "dataset": "001-demographics",
+                "field": "age_at_research_stage",
+                "status": "exact"
+            },
+            {
+                "dataset": "001-demographics",
+                "field": "sex",
+                "status": "exact"
+            },
+            {
+                "dataset": "002-anthropometrics",
+                "field": "bmi",
+                "status": "exact"
+            }
+        ],
         // ─── M: 中介变量（equation_type="E4" 时必需！）───
         // 如果缺失，管线将产生 flag: "mediator_mapping_missing_for_E4"
         // E4 估计器会验证 data["M"] 列存在

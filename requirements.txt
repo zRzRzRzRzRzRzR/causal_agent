@@ -1,5 +1,6 @@
 openai>=2.16.0
 python-dotenv>=1.0.0
-pydantic>=2.0.0
 zai>=0.2.2
-pre_commit>=4.5.1
+pre-commit>=4.5.1
+json5>=0.13.0
+glm-ocr>=0.1.1 # install guide check http://github.com/zai-org/GLM-OCR

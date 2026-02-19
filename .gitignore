@@ -4,7 +4,7 @@ glm-ocr
 .DS_Store
 /build
 evidence_card*
-output
+output*
 card
 venv
 .env

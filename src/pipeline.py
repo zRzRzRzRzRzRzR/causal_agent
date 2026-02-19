@@ -1,25 +1,40 @@
 """
 pipeline.py — Edge extraction pipeline aligned with new hpp_mapping_template.
 
-Three-step pipeline:
+Four-step pipeline:
   Step 0: Classify paper type (interventional/causal/mechanistic/associational)
   Step 1: Enumerate all X→Y statistical edges
   Step 2: Fill each edge into the HPP template
+  Step 3: Review, rerank, consistency check, spot-check, quality report
 
 Step 2 uses a template-first approach:
   1. Load template (hpp_mapping_template.json with // comments as hints)
   2. Pre-fill deterministic fields (edge_id, literature_estimate partials)
   3. Send template + // comments as inline hints to LLM
-  4. Merge LLM output into skeleton (skeleton is structural authority, but
-     extra keys like mapping_notes, composite_components are accepted)
+  4. Merge LLM output into skeleton
   5. Auto-fix, validate, compute fill rate
+
+Step 3 post-processes all edges together:
+  3a. LLM rerank of HPP field mappings
+  3b. Cross-edge consistency checks
+  3c. LLM spot-check of extracted numeric values
+  3d. Quality report with actionable items
 """
 
+import json
 import sys
+from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .hpp_mapper import get_hpp_context
+from review import (
+    check_cross_edge_consistency,
+    generate_quality_report,
+    rerank_hpp_mapping,
+    spot_check_values,
+)
+
+from .hpp_mapper import HPPMapper, get_hpp_context
 from .llm_client import GLMClient
 from .template_utils import (
     build_filled_edge,
@@ -180,7 +195,6 @@ def step2_fill_one_edge(
         )
     replacements["{hpp_context}"] = hpp_context
 
-    # Apply replacements
     for placeholder, value in replacements.items():
         prompt_template = prompt_template.replace(placeholder, value)
 
@@ -198,12 +212,86 @@ def step2_fill_one_edge(
     return filled
 
 
+def step3_review(
+    edges: List[Dict],
+    pdf_text: str,
+    client: GLMClient,
+    hpp_dict_path: Optional[str] = None,
+    enable_rerank: bool = True,
+    enable_spot_check: bool = True,
+    spot_check_sample: int = 5,
+) -> Tuple[List[Dict], Dict]:
+    print(f"\n[Step 3] Reviewing {len(edges)} edges ...", file=sys.stderr)
+
+    all_rerank_changes: List[Dict] = []
+    if enable_rerank and hpp_dict_path:
+        print("  [3a] Reranking HPP mappings ...", file=sys.stderr)
+        with open(hpp_dict_path, "r", encoding="utf-8") as f:
+            raw_dict = json.load(f)
+        mapper = HPPMapper(raw_dict)
+
+        for i, edge in enumerate(edges):
+            changes = rerank_hpp_mapping(edge, mapper, client)
+            all_rerank_changes.append(changes)
+            if changes:
+                print(
+                    f"    Edge #{i + 1}: reranked {list(changes.keys())}",
+                    file=sys.stderr,
+                )
+        n = sum(len(c) for c in all_rerank_changes)
+        print(f"    {n} mapping(s) updated", file=sys.stderr)
+    else:
+        print("  [3a] Rerank skipped", file=sys.stderr)
+
+    print("  [3b] Cross-edge consistency ...", file=sys.stderr)
+    consistency_issues = check_cross_edge_consistency(edges)
+    ne = sum(1 for x in consistency_issues if x.get("severity") == "error")
+    nw = sum(1 for x in consistency_issues if x.get("severity") == "warning")
+    print(f"    {ne} errors, {nw} warnings", file=sys.stderr)
+
+    # 3c. Spot-check
+    spot_checks: List[Dict] = []
+    if enable_spot_check:
+        ns = min(spot_check_sample, len(edges))
+        print(f"  [3c] Spot-checking {ns} edges ...", file=sys.stderr)
+        spot_checks = spot_check_values(
+            edges, pdf_text, client, sample_size=spot_check_sample
+        )
+        verdicts = Counter(c.get("verdict", "?") for c in spot_checks)
+        print(f"    Results: {dict(verdicts)}", file=sys.stderr)
+    else:
+        print("  [3c] Spot-check skipped", file=sys.stderr)
+
+    print("  [3d] Generating quality report ...", file=sys.stderr)
+    report = generate_quality_report(
+        edges, consistency_issues, spot_checks, all_rerank_changes
+    )
+
+    s = report["summary"]
+    print(
+        f"\n  [Step 3 Summary]\n"
+        f"    Valid: {s['valid_edges']}/{s['total_edges']}\n"
+        f"    Avg fill: {s['avg_fill_rate']:.1%}\n"
+        f"    Errors: {s['validation_errors']}, "
+        f"Warnings: {s['validation_warnings']}\n"
+        f"    Consistency: {s['consistency_issues']}\n"
+        f"    Spot-check: {s['spot_check_verdicts']}\n"
+        f"    Rerank: {s['rerank_changes']}",
+        file=sys.stderr,
+    )
+    for action in report.get("action_items", []):
+        print(f"    {action}", file=sys.stderr)
+
+    return edges, report
+
+
 class EdgeExtractionPipeline:
     """
-    Three-step pipeline:
+    Four-step pipeline:
       Step 0: Classify paper type
       Step 1: Enumerate all statistical edges
       Step 2: Fill each edge into the HPP template
+      Step 3: Review, rerank, consistency check, spot-check, quality report
     """
 
     def __init__(
@@ -216,6 +304,11 @@ class EdgeExtractionPipeline:
         ocr_validate_pages: bool = True,
         hpp_dict_path: Optional[str] = None,
         template_path: Optional[str] = None,
+        # Step 3 options
+        enable_step3: bool = True,
+        enable_rerank: bool = True,
+        enable_spot_check: bool = True,
+        spot_check_sample: int = 5,
     ):
         self.client = client
         self.ocr_text_func = ocr_text_func
@@ -229,8 +322,13 @@ class EdgeExtractionPipeline:
             self.hpp_dict_path = str(_DEFAULT_HPP_DICT)
         else:
             self.hpp_dict_path = None
-
         print(f"[Pipeline] HPP dict: {self.hpp_dict_path}", file=sys.stderr)
+
+        # Step 3 flags
+        self.enable_step3 = enable_step3
+        self.enable_rerank = enable_rerank
+        self.enable_spot_check = enable_spot_check
+        self.spot_check_sample = spot_check_sample
 
         if ocr_init_func is not None:
             ocr_init_func(
@@ -265,6 +363,7 @@ class EdgeExtractionPipeline:
 
         pdf_text = self._get_pdf_text(pdf_path)
 
+        # ── Step 0: Classify ──
         if force_type:
             evidence_type = force_type
             classification = {"primary_category": force_type, "forced": True}
@@ -274,14 +373,18 @@ class EdgeExtractionPipeline:
             classification = step0_classify(self.client, pdf_text)
             evidence_type = classification.get("primary_category", "associational")
 
-        save_json(pdf_dir / "step0_classification.json", classification)
+        if pdf_dir:
+            save_json(pdf_dir / "step0_classification.json", classification)
 
+        # ── Step 1: Enumerate edges ──
         print("\n[Step 1] Enumerating edges ...", file=sys.stderr)
         step1_result = step1_enumerate_edges(self.client, pdf_text, evidence_type)
         edges_list = step1_result.get("edges", [])
         paper_info = step1_result.get("paper_info", {})
-        save_json(pdf_dir / "step1_edges.json", step1_result)
+        if pdf_dir:
+            save_json(pdf_dir / "step1_edges.json", step1_result)
 
+        # ── Step 2: Fill templates ──
         print(
             f"\n[Step 2] Filling templates for {len(edges_list)} edges ...",
             file=sys.stderr,
@@ -314,18 +417,43 @@ class EdgeExtractionPipeline:
             eq = filled.get("equation_type", "?")
             print(f"         Done: {eid} (equation_type={eq})", file=sys.stderr)
 
-        output_file = pdf_dir / "edges.json"
-        save_json(output_file, all_filled_edges)
-        print(
-            f"\n[Pipeline] Saved {len(all_filled_edges)} edges to: {output_file}",
-            file=sys.stderr,
-        )
+        # ── Step 3: Review & Quality Assessment ──
+        quality_report = None
+        if self.enable_step3 and all_filled_edges:
+            all_filled_edges, quality_report = step3_review(
+                edges=all_filled_edges,
+                pdf_text=pdf_text,
+                client=self.client,
+                hpp_dict_path=self.hpp_dict_path,
+                enable_rerank=self.enable_rerank,
+                enable_spot_check=self.enable_spot_check,
+                spot_check_sample=self.spot_check_sample,
+            )
+            if pdf_dir:
+                save_json(pdf_dir / "step3_review.json", quality_report)
 
+        # ── Save final edges (potentially updated by rerank) ──
+        if pdf_dir:
+            output_file = pdf_dir / "edges.json"
+            save_json(output_file, all_filled_edges)
+            print(
+                f"\n[Pipeline] Saved {len(all_filled_edges)} edges to: {output_file}",
+                file=sys.stderr,
+            )
+
+        # ── Summary ──
         print(f"\n{'='*60}", file=sys.stderr)
         print(
             f"[Pipeline] Complete: {len(all_filled_edges)} edges extracted",
             file=sys.stderr,
         )
+        if quality_report:
+            s = quality_report["summary"]
+            print(
+                f"  Quality: {s['valid_edges']}/{s['total_edges']} valid, "
+                f"avg fill {s['avg_fill_rate']:.0%}",
+                file=sys.stderr,
+            )
         print(f"{'='*60}\n", file=sys.stderr)
 
         return all_filled_edges
@@ -335,8 +463,9 @@ class EdgeExtractionPipeline:
         pdf_path: str,
         step: str,
         evidence_type: Optional[str] = None,
+        output_dir: Optional[str] = None,
     ) -> Any:
-        """Run a single pipeline step (classify or edges)."""
+        """Run a single pipeline step (classify, edges, or review)."""
         pdf_text = self._get_pdf_text(pdf_path)
 
         if step == "classify":
@@ -348,4 +477,27 @@ class EdgeExtractionPipeline:
                 evidence_type = classification["primary_category"]
             return step1_enumerate_edges(self.client, pdf_text, evidence_type)
 
-        raise ValueError(f"Unknown step: {step}. Valid: classify, edges")
+        if step == "review":
+            pdf_name = Path(pdf_path).stem
+            base = Path(output_dir or ".")
+            edges_path = base / pdf_name / "edges.json"
+            if not edges_path.exists():
+                raise FileNotFoundError(f"Run 'full' first. Not found: {edges_path}")
+            with open(edges_path, "r", encoding="utf-8") as f:
+                edges = json.load(f)
+
+            updated, report = step3_review(
+                edges=edges,
+                pdf_text=pdf_text,
+                client=self.client,
+                hpp_dict_path=self.hpp_dict_path,
+                enable_rerank=self.enable_rerank,
+                enable_spot_check=self.enable_spot_check,
+                spot_check_sample=self.spot_check_sample,
+            )
+
+            save_json(edges_path, updated)
+            save_json(base / pdf_name / "step3_review.json", report)
+            return report
+
+        raise ValueError(f"Unknown step: {step}. Valid: classify, edges, review")

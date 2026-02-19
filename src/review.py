@@ -1,16 +1,20 @@
 """
-step3_review.py — Post-extraction review, rerank, and quality assessment.
+review.py -- Post-extraction review, rerank, and quality assessment.
 
 Step 3 runs AFTER Step 2 produces all filled edges. It operates on the
 complete set of edges for one paper and performs:
 
-  3a. HPP Mapping Rerank   — LLM re-evaluates top HPP candidates per edge
-  3b. Cross-Edge Consistency — detect duplicates, contradictions, scale errors
-  3c. Content Spot-Check    — LLM verifies key numeric values against paper
-  3d. Quality Report        — aggregate stats, per-edge scores, actionable flags
+  3a. HPP Mapping Rerank   -- LLM re-evaluates top HPP candidates per edge
+  3b. Cross-Edge Consistency -- detect duplicates, contradictions, scale errors
+  3b+. Fuzzy Duplicate Detection -- token-overlap-based near-duplicate detection
+  3c. Content Spot-Check    -- LLM verifies key numeric values against paper
+  3d. Quality Report        -- aggregate stats, per-edge scores, actionable flags
+
+Changes from original:
+  - generate_quality_report now includes per-edge semantic validation results
+  - _generate_action_items flags semantic errors alongside format errors
 """
 
-import sys
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Set, Tuple
 
@@ -27,7 +31,7 @@ def rerank_hpp_mapping(
 ) -> Dict[str, Any]:
     """
     For each role (X, Y), ask the LLM to pick the best HPP field from
-    the top-6 RAG candidates.  Updates edge['hpp_mapping'] **in place**.
+    the top-6 RAG candidates.  Updates edge['hpp_mapping'] in place.
 
     Returns a dict of changes: {role: {before, after, status, reason}}
     """
@@ -56,51 +60,47 @@ def rerank_hpp_mapping(
         current_field = current.get("field", "N/A")
 
         prompt = (
-            f'论文变量: "{query}" (角色: {role})\n'
-            f"当前映射: {current_ds} / {current_field}\n\n"
-            f"以下是 HPP 数据字典中的候选字段，请选择最佳匹配:\n"
+            f'Paper variable: "{query}" (role: {role})\n'
+            f"Current mapping: {current_ds} / {current_field}\n\n"
+            f"Candidate HPP fields from data dictionary:\n"
             + "\n".join(candidate_lines)
             + "\n\n"
-            f"请用 JSON 回答:\n"
-            f'{{"best": 序号(1-{len(candidates[:6])}), '
+            f"Reply in JSON:\n"
+            f'{{"best": index(1-{len(candidates[:6])}), '
             f'"status": "exact|close|tentative|missing", '
-            f'"reason": "简短理由"}}\n'
-            f"如果当前映射已经是最佳选择，best 填 0。"
+            f'"reason": "brief reason"}}\n'
+            f"If current mapping is already best, set best=0."
         )
 
-        try:
-            result = client.call_json(prompt, max_tokens=256)
-            best_idx = result.get("best", 0)
-            reason = result.get("reason", "")
-            new_status = result.get("status", current.get("status", "tentative"))
+        result = client.call_json(prompt, max_tokens=256)
+        best_idx = result.get("best", 0)
+        reason = result.get("reason", "")
+        new_status = result.get("status", current.get("status", "tentative"))
 
-            if 0 < best_idx <= len(candidates[:6]):
-                chosen = candidates[best_idx - 1]
-                new_ds = chosen.dataset_id.replace("-", "_")
-                new_field = chosen.field_name
+        if 0 < best_idx <= len(candidates[:6]):
+            chosen = candidates[best_idx - 1]
+            new_ds = chosen.dataset_id.replace("-", "_")
+            new_field = chosen.field_name
 
-                if new_ds != current_ds or new_field != current_field:
-                    changes[role] = {
-                        "before": f"{current_ds}/{current_field}",
-                        "after": f"{new_ds}/{new_field}",
-                        "status": new_status,
-                        "reason": reason,
-                    }
-                    hm[role] = {
-                        "dataset": new_ds,
-                        "field": new_field,
-                        "status": new_status,
-                    }
-            elif best_idx == 0 and new_status != current.get("status"):
-                hm.setdefault(role, {})["status"] = new_status
+            if new_ds != current_ds or new_field != current_field:
                 changes[role] = {
-                    "before_status": current.get("status"),
-                    "after_status": new_status,
-                    "reason": f"status updated: {reason}",
+                    "before": f"{current_ds}/{current_field}",
+                    "after": f"{new_ds}/{new_field}",
+                    "status": new_status,
+                    "reason": reason,
                 }
-
-        except Exception as e:
-            print(f"  [Rerank] {role} failed: {e}", file=sys.stderr)
+                hm[role] = {
+                    "dataset": new_ds,
+                    "field": new_field,
+                    "status": new_status,
+                }
+        elif best_idx == 0 and new_status != current.get("status"):
+            hm.setdefault(role, {})["status"] = new_status
+            changes[role] = {
+                "before_status": current.get("status"),
+                "after_status": new_status,
+                "reason": f"status updated: {reason}",
+            }
 
     return changes
 
@@ -132,6 +132,7 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
     if not edges:
         return issues
 
+    # -- Exact duplicate detection (original) --
     edge_sigs: List[Tuple[int, Tuple[str, str, str]]] = []
     for i, e in enumerate(edges):
         rho = e.get("epsilon", {}).get("rho", {})
@@ -156,6 +157,7 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
                 }
             )
 
+    # -- Metadata consistency --
     titles: Set[str] = set()
     for e in edges:
         t = e.get("paper_title", "")
@@ -170,6 +172,7 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
             }
         )
 
+    # -- Model <-> equation_type consistency across edges --
     model_eq: Dict[str, Set[str]] = defaultdict(set)
     for e in edges:
         m = e.get("literature_estimate", {}).get("model", "")
@@ -188,6 +191,7 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
                 }
             )
 
+    # -- Adjustment set variation --
     adj_sets: List[frozenset] = []
     for e in edges:
         adj = e.get("literature_estimate", {}).get("adjustment_set", [])
@@ -205,6 +209,7 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
             }
         )
 
+    # -- Theta scale and sign checks --
     for i, e in enumerate(edges):
         mu = e.get("epsilon", {}).get("mu", {}).get("core", {})
         lit = e.get("literature_estimate", {})
@@ -250,7 +255,7 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
                         "severity": "error",
                         "message": (
                             f"Edge #{i + 1}: theta_hat={theta} but "
-                            f"reported_ratio={reported} → expected "
+                            f"reported_ratio={reported} -> expected "
                             f"{'negative' if expected_neg else 'positive'}"
                         ),
                         "edge_indices": [i],
@@ -297,33 +302,29 @@ def spot_check_values(
         effect_label = mu_type.replace("log", "")
 
         check_items.append(
-            f"{idx + 1}. {rho.get('X', '?')} → {rho.get('Y', '?')}\n"
-            f"   亚组: {sub}\n"
-            f"   提取值: {effect_label}={reported}, 95% CI={ci}\n"
+            f"{idx + 1}. {rho.get('X', '?')} -> {rho.get('Y', '?')}\n"
+            f"   Subgroup: {sub}\n"
+            f"   Extracted: {effect_label}={reported}, 95% CI={ci}\n"
         )
 
     prompt = (
-        "请根据以下论文内容，核实每条提取结果是否正确。\n"
-        "对每条回答: correct / incorrect（给出正确值）/ not_found\n\n"
+        "Verify each extracted result against the paper content below.\n"
+        "For each item reply: correct / incorrect (give correct value) / not_found\n\n"
         + "".join(check_items)
-        + "\n以 JSON 回答:\n"
-        '{"checks": [{"item": 序号, "verdict": "correct/incorrect/not_found", '
-        '"correct_value": null或正确值, "note": ""}]}\n\n'
-        f"--- 论文内容 ---\n{pdf_text[:30000]}"
+        + "\nReply in JSON:\n"
+        '{"checks": [{"item": index, "verdict": "correct/incorrect/not_found", '
+        '"correct_value": null_or_correct_value, "note": ""}]}\n\n'
+        f"--- Paper content ---\n{pdf_text[:30000]}"
     )
 
-    try:
-        result = client.call_json(prompt, max_tokens=2048)
-        checks = result.get("checks", [])
-        for check in checks:
-            item_idx = check.get("item", 0) - 1
-            if 0 <= item_idx < len(to_check):
-                check["edge_index"] = to_check[item_idx][0]
-                check["edge_id"] = to_check[item_idx][1].get("edge_id", "?")
-        return checks
-    except Exception as e:
-        print(f"  [SpotCheck] Failed: {e}", file=sys.stderr)
-        return [{"status": "error", "reason": str(e)}]
+    result = client.call_json(prompt, max_tokens=2048)
+    checks = result.get("checks", [])
+    for check in checks:
+        item_idx = check.get("item", 0) - 1
+        if 0 <= item_idx < len(to_check):
+            check["edge_index"] = to_check[item_idx][0]
+            check["edge_id"] = to_check[item_idx][1].get("edge_id", "?")
+    return checks
 
 
 def generate_quality_report(
@@ -332,10 +333,15 @@ def generate_quality_report(
     spot_checks: List[Dict],
     rerank_changes: List[Dict],
 ) -> Dict:
-    """Aggregate all Step 3 results into a quality report."""
+    """
+    Aggregate all Step 3 results into a quality report.
+    Now also includes per-edge semantic validation results
+    from the _validation metadata attached during Step 2.
+    """
     edge_reports: List[Dict] = []
     total_valid = 0
     total_fill = 0.0
+    total_semantic_pass = 0
     all_issues: List[str] = []
 
     for i, e in enumerate(edges):
@@ -353,6 +359,22 @@ def generate_quality_report(
                 mapping_statuses[role] = m.get("status", "unknown")
 
         rho = e.get("epsilon", {}).get("rho", {})
+
+        # Extract semantic validation results from _validation metadata
+        validation_meta = e.get("_validation", {})
+        semantic_issues = validation_meta.get("semantic_issues", [])
+        is_sem_valid = validation_meta.get("is_semantically_valid", True)
+        retries_used = validation_meta.get("retries_used", 0)
+        if is_sem_valid:
+            total_semantic_pass += 1
+
+        semantic_error_checks = [
+            iss["check"] for iss in semantic_issues if iss.get("severity") == "error"
+        ]
+        semantic_warning_checks = [
+            iss["check"] for iss in semantic_issues if iss.get("severity") == "warning"
+        ]
+
         edge_reports.append(
             {
                 "edge_index": i + 1,
@@ -361,8 +383,12 @@ def generate_quality_report(
                 "Y": rho.get("Y", "?"),
                 "equation_type": e.get("equation_type", "?"),
                 "is_valid": is_valid,
+                "is_semantically_valid": is_sem_valid,
                 "fill_rate": round(fill_rate, 3),
                 "issues": issues,
+                "semantic_errors": semantic_error_checks,
+                "semantic_warnings": semantic_warning_checks,
+                "retries_used": retries_used,
                 "mapping_statuses": mapping_statuses,
             }
         )
@@ -380,6 +406,7 @@ def generate_quality_report(
         "summary": {
             "total_edges": len(edges),
             "valid_edges": total_valid,
+            "semantically_valid_edges": total_semantic_pass,
             "avg_fill_rate": round(total_fill / max(len(edges), 1), 3),
             "validation_errors": error_count,
             "validation_warnings": warning_count,
@@ -405,16 +432,31 @@ def _generate_action_items(
 ) -> List[str]:
     actions: List[str] = []
 
+    # Format validation failures
     invalid = [e for e in edge_reports if not e["is_valid"]]
     if invalid:
         ids = [e["edge_id"] for e in invalid]
-        actions.append(f"🔴 {len(invalid)} edge(s) failed validation: {ids}.")
+        actions.append(
+            f"[FORMAT_ERROR] {len(invalid)} edge(s) failed validation: {ids}."
+        )
 
+    # Semantic validation failures
+    sem_invalid = [e for e in edge_reports if not e.get("is_semantically_valid", True)]
+    if sem_invalid:
+        for e in sem_invalid:
+            errs = e.get("semantic_errors", [])
+            actions.append(
+                f"[SEMANTIC_ERROR] Edge {e['edge_id']}: "
+                f"{len(errs)} unresolved semantic error(s) after retry: {errs}"
+            )
+
+    # Low fill rate
     low_fill = [e for e in edge_reports if e["fill_rate"] < 0.6]
     if low_fill:
         ids = [e["edge_id"] for e in low_fill]
-        actions.append(f"🟡 {len(low_fill)} edge(s) low fill rate (<60%): {ids}.")
+        actions.append(f"[LOW_FILL] {len(low_fill)} edge(s) fill rate <60%: {ids}.")
 
+    # Missing HPP mappings
     missing_maps = [
         e
         for e in edge_reports
@@ -422,20 +464,36 @@ def _generate_action_items(
     ]
     if missing_maps:
         ids = [e["edge_id"] for e in missing_maps]
-        actions.append(f"🟡 {len(missing_maps)} edge(s) missing HPP mappings: {ids}.")
+        actions.append(
+            f"[MISSING_MAP] {len(missing_maps)} edge(s) missing HPP mappings: {ids}."
+        )
 
+    # Consistency errors
     for err in consistency_issues:
         if err.get("severity") == "error":
-            actions.append(f"🔴 {err['type']}: {err['message']}")
+            actions.append(f"[CONSISTENCY] {err['type']}: {err['message']}")
 
+    # Fuzzy duplicates
+    fuzzy_dups = [
+        err for err in consistency_issues if err.get("type") == "fuzzy_duplicate_edge"
+    ]
+    if fuzzy_dups:
+        actions.append(
+            f"[DUPLICATE] {len(fuzzy_dups)} fuzzy duplicate pair(s) detected. "
+            f"Review and remove redundant edges."
+        )
+
+    # Spot check failures
     for c in spot_checks:
         if c.get("verdict") == "incorrect":
             actions.append(
-                f"🔴 Spot check failed: {c.get('edge_id', '?')} "
+                f"[SPOT_CHECK] Failed: {c.get('edge_id', '?')} "
                 f"correct_value={c.get('correct_value')}"
             )
 
     if not actions:
-        actions.append("✅ All edges passed. Review before use as GT.")
+        actions.append(
+            "[OK] All edges passed format, semantic, and consistency checks."
+        )
 
     return actions

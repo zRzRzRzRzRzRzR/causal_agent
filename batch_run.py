@@ -63,6 +63,17 @@ def main():
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--max-workers", type=int, default=1)
+    parser.add_argument(
+        "--hpp-dict",
+        default=None,
+        help="Path to HPP data dictionary JSON",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="Max retries per edge when semantic validation fails (default: 2)",
+    )
 
     args = parser.parse_args()
 
@@ -77,6 +88,7 @@ def main():
     print(f"  Output: {output_dir.resolve()}", file=sys.stderr)
     print(f"  Type:   {args.type or 'auto-classify'}", file=sys.stderr)
     print(f"  Workers: {args.max_workers}", file=sys.stderr)
+    print(f"  Max retries: {args.max_retries}", file=sys.stderr)
     print(f"{'='*60}\n", file=sys.stderr)
 
     client = GLMClient(api_key=args.api_key, base_url=args.base_url, model=args.model)
@@ -88,6 +100,8 @@ def main():
         ocr_output_dir=args.ocr_dir,
         ocr_dpi=args.dpi,
         ocr_validate_pages=not args.no_validate_pages,
+        hpp_dict_path=args.hpp_dict,
+        max_retries=args.max_retries,
     )
 
     results = []
@@ -95,7 +109,7 @@ def main():
 
     if args.max_workers <= 1:
         for idx, pdf_path in enumerate(pdf_files, 1):
-            print(f"\n{'─'*50}", file=sys.stderr)
+            print(f"\n{'-'*50}", file=sys.stderr)
             print(f"[{idx}/{len(pdf_files)}] {pdf_path.name}", file=sys.stderr)
             summary = process_single_pdf(pdf_path, pipeline, output_dir, args.type)
             results.append(summary)

@@ -1,5 +1,4 @@
 {
-    "_comment": "由 LLM 从论文中提取的因果边信息，作为 HPP 验证管线输入",
     // ─── 唯一边 ID ───
     // 格式: EV-{发表年份}-{研究简称}#{边编号}
     // 一篇论文可能有多条因果边（多个效应），用 #1, #2, #3... 区分
@@ -53,7 +52,6 @@
     //
     //
     "equation_type": "E1/E2/E3/E4/E5/E6",
-    // ─── 方程公式 (新增) ───
     // 请在此处明确写出论文中使用的具体统计模型公式
     // 格式示例: "logit(P(Y=1)) = α + β*X + γ*Age + δ*Sex"
     // 作用: 辅助人工校验 equation_type 选择是否正确
@@ -69,8 +67,7 @@
         "iota": {
             "core": {
                 "name": "暴露/干预变量名称"
-            },
-            "ext": {}
+            }
         },
         // ─── o: 结局坐标 ───
         // name: 结局变量名称（从论文 outcome 提取）
@@ -89,8 +86,7 @@
                 "index": "baseline",
                 "horizon": "P5Y",
                 "tau_aligned": null
-            },
-            "ext": {}
+            }
         },
         // ─── mu: 度量坐标 ───
         // core.family: "ratio" (HR/OR/RR) | "difference" (MD/BETA/RD)
@@ -105,8 +101,7 @@
                 "family": "ratio",
                 "type": "logRR",
                 "scale": "log"
-            },
-            "ext": {}
+            }
         },
         // ─── alpha: 因果识别坐标 ───
         // id_strategy: 识别策略
@@ -197,13 +192,13 @@
         "X": {
             "dataset": "016-blood_tests",
             "field": "bt__ldl_cholesterol_float_value",
-            "status": "manual",
+            "status": "exact"
         },
         // Y: 结局变量的 HPP 字段（所有方程类型必需）
         "Y": {
             "dataset": "021-medical_conditions",
             "field": "icd11_code",
-            "status": "manual",
+            "status": "exact"
         },
         // ─── M: 中介变量（equation_type="E4" 时必需！）───
         // 如果缺失，管线将产生 flag: "mediator_mapping_missing_for_E4"
@@ -212,7 +207,7 @@
         "M": {
             "dataset": "016-blood_tests",
             "field": "bt__crp_float_value",
-            "status": "manual",
+            "status": "exact"
         },
         // ─── X2: 第二处理变量（equation_type="E6" 时必需！）───
         // 如果缺失，管线将产生 flag: "x2_mapping_missing_for_E6"
@@ -221,7 +216,7 @@
         "X2": {
             "dataset": "015-medications",
             "field": "med__statin_use",
-            "status": "manual",
+            "status": "exact"
         }
     }
 }

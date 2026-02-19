@@ -1,13 +1,3 @@
-"""
-Batch Evidence Edge Extraction Script
-
-Usage:
-  python batch_run.py                              # Default: ./evidence_card -> ./output
-  python batch_run.py -i ./pdfs -o ./results        # Custom input/output directories
-  python batch_run.py --type interventional          # Force document type (skip classification)
-  python batch_run.py --max-workers 3                # Concurrency (default 1, sequential)
-"""
-
 import argparse
 import json
 import sys
@@ -28,7 +18,6 @@ def process_single_pdf(
     output_dir: Path,
     force_type: str = None,
 ) -> dict:
-    """Process a single PDF and return a result summary."""
     t0 = time.time()
     status = "success"
     error_msg = None
@@ -79,12 +68,7 @@ def main():
 
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
-
-    assert input_dir.exists(), f"Input directory does not exist: {input_dir}"
-
     pdf_files = sorted(input_dir.glob("*.pdf"))
-    assert pdf_files, f"No PDF files found in: {input_dir}"
-
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"{'='*60}", file=sys.stderr)

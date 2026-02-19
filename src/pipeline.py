@@ -72,7 +72,7 @@ def _load_prompt(name: str) -> str:
 def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
     """Classify paper into: interventional / causal / mechanistic / associational."""
     prompt_template = _load_prompt("step0_classify")
-    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
+    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text}"
     result = client.call_json(full_prompt)
 
     print(
@@ -123,7 +123,7 @@ def step1_enumerate_edges(
     """Extract all X->Y statistical edges from the paper, then deduplicate."""
     prompt_template = _load_prompt("step1_edges")
     prompt_template = prompt_template.replace("{evidence_type}", evidence_type)
-    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
+    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text}"
 
     result = client.call_json(full_prompt, max_tokens=32768)
 
@@ -164,7 +164,7 @@ def step1_enumerate_edges(
     for i, e in enumerate(unique_edges):
         sig = "+" if e.get("significant") else "-"
         print(
-            f"  [{i+1}] {sig} {e.get('X', '?')[:40]} -> {e.get('Y', '?')[:40]}"
+            f"  [{i+1}] {sig} {e.get('X', '?')} -> {e.get('Y', '?')}"
             f"  ({e.get('source', '')})",
             file=sys.stderr,
         )
@@ -206,7 +206,7 @@ def _build_correction_prompt(
 
     lines.append("## Your previous output (to be corrected):\n")
     lines.append("```json")
-    lines.append(json.dumps(original_json, ensure_ascii=False, indent=2)[:8000])
+    lines.append(json.dumps(original_json, ensure_ascii=False, indent=2))
     lines.append("```\n")
 
     lines.append(
@@ -278,7 +278,7 @@ def step2_fill_one_edge(
     for placeholder, value in replacements.items():
         prompt_template = prompt_template.replace(placeholder, value)
 
-    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text[:500000]}"
+    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text}"
 
     # --- Initial LLM call ---
     llm_output = client.call_json(full_prompt, max_tokens=32768)
@@ -301,11 +301,9 @@ def step2_fill_one_edge(
             f"  [Semantic] {n_err} errors, {n_warn} warnings",
             file=sys.stderr,
         )
-        for iss in semantic_issues[:5]:
+        for iss in semantic_issues:
             level = "X" if iss["severity"] == "error" else "!"
-            print(
-                f"    [{level}] {iss['check']}: {iss['message'][:100]}", file=sys.stderr
-            )
+            print(f"    [{level}] {iss['check']}: {iss['message']}", file=sys.stderr)
 
     # --- Retry loop if blocking errors exist ---
     attempt = 0
@@ -324,8 +322,7 @@ def step2_fill_one_edge(
 
         # Append paper text for context (truncated to leave room for correction)
         correction_full = (
-            f"{correction_prompt}\n\n---\n\n**Paper (for reference)**\n\n"
-            f"{pdf_text[:300000]}"
+            f"{correction_prompt}\n\n---\n\n**Paper (for reference)**\n\n" f"{pdf_text}"
         )
 
         llm_output_retry = client.call_json(correction_full, max_tokens=32768)
@@ -411,7 +408,7 @@ def step3_review(
             file=sys.stderr,
         )
         for dup in fuzzy_dups:
-            print(f"      {dup['message'][:100]}", file=sys.stderr)
+            print(f"      {dup['message']}", file=sys.stderr)
     consistency_issues.extend(fuzzy_dups)
 
     ne = sum(1 for x in consistency_issues if x.get("severity") == "error")
@@ -524,6 +521,7 @@ class EdgeExtractionPipeline:
         pdf_path: str,
         force_type: Optional[str] = None,
         output_dir: Optional[str] = None,
+        resume: bool = False,
     ) -> List[Dict]:
         pdf_name = Path(pdf_path).stem
         base_dir = Path(output_dir) if output_dir else None
@@ -537,12 +535,23 @@ class EdgeExtractionPipeline:
         print(f"[Pipeline] Processing: {pdf_name}", file=sys.stderr)
         if pdf_dir:
             print(f"[Pipeline] Output folder: {pdf_dir}", file=sys.stderr)
+        if resume:
+            print(f"[Pipeline] Resume mode: will skip completed steps", file=sys.stderr)
         print(f"{'='*60}", file=sys.stderr)
 
         pdf_text = self._get_pdf_text(pdf_path)
 
-        # -- Step 0: Classify --
-        if force_type:
+        # -- Step 0: Classify (skip if cached) --
+        step0_cached = False
+        if resume and pdf_dir and (pdf_dir / "step0_classification.json").exists():
+            with open(
+                pdf_dir / "step0_classification.json", "r", encoding="utf-8"
+            ) as f:
+                classification = json.load(f)
+            evidence_type = classification.get("primary_category", "associational")
+            print(f"[Step 0] CACHED: {evidence_type}", file=sys.stderr)
+            step0_cached = True
+        elif force_type:
             evidence_type = force_type
             classification = {"primary_category": force_type, "forced": True}
             print(f"[Step 0] Forced type: {evidence_type}", file=sys.stderr)
@@ -551,16 +560,29 @@ class EdgeExtractionPipeline:
             classification = step0_classify(self.client, pdf_text)
             evidence_type = classification.get("primary_category", "associational")
 
-        if pdf_dir:
+        if pdf_dir and not step0_cached:
             save_json(pdf_dir / "step0_classification.json", classification)
 
-        # -- Step 1: Enumerate edges (with dedup) --
-        print("\n[Step 1] Enumerating edges ...", file=sys.stderr)
-        step1_result = step1_enumerate_edges(self.client, pdf_text, evidence_type)
-        edges_list = step1_result.get("edges", [])
-        paper_info = step1_result.get("paper_info", {})
-        if pdf_dir:
-            save_json(pdf_dir / "step1_edges.json", step1_result)
+        # -- Step 1: Enumerate edges (skip if cached) --
+        step1_cached = False
+        if resume and pdf_dir and (pdf_dir / "step1_edges.json").exists():
+            with open(pdf_dir / "step1_edges.json", "r", encoding="utf-8") as f:
+                step1_result = json.load(f)
+            edges_list = step1_result.get("edges", [])
+            paper_info = step1_result.get("paper_info", {})
+            print(
+                f"[Step 1] CACHED: {len(edges_list)} edges from "
+                f"{paper_info.get('first_author', '?')} {paper_info.get('year', '?')}",
+                file=sys.stderr,
+            )
+            step1_cached = True
+        else:
+            print("\n[Step 1] Enumerating edges ...", file=sys.stderr)
+            step1_result = step1_enumerate_edges(self.client, pdf_text, evidence_type)
+            edges_list = step1_result.get("edges", [])
+            paper_info = step1_result.get("paper_info", {})
+            if pdf_dir:
+                save_json(pdf_dir / "step1_edges.json", step1_result)
 
         # -- Step 2: Fill templates (with semantic validation + retry) --
         print(
@@ -572,7 +594,7 @@ class EdgeExtractionPipeline:
 
         for i, edge in enumerate(edges_list):
             idx = edge.get("edge_index", i + 1)
-            y_short = str(edge.get("Y", ""))[:50]
+            y_short = str(edge.get("Y", ""))
             print(
                 f"\n  [{idx}/{len(edges_list)}] Filling: -> {y_short} ...",
                 file=sys.stderr,

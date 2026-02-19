@@ -29,6 +29,9 @@ class GLMClient:
         self.base_url = base_url or _BASE_URL
         self.model = model or _DEFAULT_MODEL
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        print(
+            f"[LLM] Initialized GLMClient with model={self.model}, base_url={self.base_url}"
+        )
 
     def call(
         self,

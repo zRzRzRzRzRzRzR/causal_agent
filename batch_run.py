@@ -17,6 +17,7 @@ def process_single_pdf(
     pipeline: EdgeExtractionPipeline,
     output_dir: Path,
     force_type: str = None,
+    resume: bool = False,
 ) -> dict:
     t0 = time.time()
     status = "success"
@@ -28,6 +29,7 @@ def process_single_pdf(
             pdf_path=str(pdf_path),
             force_type=force_type,
             output_dir=str(output_dir),
+            resume=resume,
         )
         n_edges = len(edges) if edges else 0
 
@@ -74,6 +76,11 @@ def main():
         default=2,
         help="Max retries per edge when semantic validation fails (default: 2)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip steps whose output already exists (step0/step1 cache)",
+    )
 
     args = parser.parse_args()
 
@@ -88,6 +95,7 @@ def main():
     print(f"  Output: {output_dir.resolve()}", file=sys.stderr)
     print(f"  Type:   {args.type or 'auto-classify'}", file=sys.stderr)
     print(f"  Workers: {args.max_workers}", file=sys.stderr)
+    print(f"  Resume:  {args.resume}", file=sys.stderr)
     print(f"  Max retries: {args.max_retries}", file=sys.stderr)
     print(f"{'='*60}\n", file=sys.stderr)
 
@@ -109,9 +117,11 @@ def main():
 
     if args.max_workers <= 1:
         for idx, pdf_path in enumerate(pdf_files, 1):
-            print(f"\n{'-'*50}", file=sys.stderr)
+            print(f"\n{'─'*50}", file=sys.stderr)
             print(f"[{idx}/{len(pdf_files)}] {pdf_path.name}", file=sys.stderr)
-            summary = process_single_pdf(pdf_path, pipeline, output_dir, args.type)
+            summary = process_single_pdf(
+                pdf_path, pipeline, output_dir, args.type, args.resume
+            )
             results.append(summary)
             tag = "OK" if summary["status"] == "success" else "FAIL"
             print(
@@ -122,7 +132,7 @@ def main():
         with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
             future_to_pdf = {
                 executor.submit(
-                    process_single_pdf, p, pipeline, output_dir, args.type
+                    process_single_pdf, p, pipeline, output_dir, args.type, args.resume
                 ): p
                 for p in pdf_files
             }

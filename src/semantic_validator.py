@@ -19,7 +19,6 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-
 # ---------------------------------------------------------------------------
 # 1. Canonical mapping tables (from step2_fill_template.md prompt)
 # ---------------------------------------------------------------------------
@@ -195,31 +194,35 @@ def _check_model_equation_type(eq_type: str, model: str) -> List[Dict]:
             break
 
     if model_lookup is None:
-        return [{
-            "check": "model_unknown",
-            "severity": "warning",
-            "message": (
-                f"literature_estimate.model='{model}' is not in the "
-                f"canonical model list. Cannot verify equation_type match."
-            ),
-            "field": "literature_estimate.model",
-            "expected": sorted(EQUATION_TYPE_TO_MODELS.get(eq_type, set())),
-            "actual": model,
-        }]
+        return [
+            {
+                "check": "model_unknown",
+                "severity": "warning",
+                "message": (
+                    f"literature_estimate.model='{model}' is not in the "
+                    f"canonical model list. Cannot verify equation_type match."
+                ),
+                "field": "literature_estimate.model",
+                "expected": sorted(EQUATION_TYPE_TO_MODELS.get(eq_type, set())),
+                "actual": model,
+            }
+        ]
 
     allowed_eqs = MODEL_TO_EQUATION_TYPE.get(model_lookup, set())
     if eq_type not in allowed_eqs:
-        return [{
-            "check": "model_eq_type_mismatch",
-            "severity": "error",
-            "message": (
-                f"model='{model}' requires equation_type in {sorted(allowed_eqs)}, "
-                f"but got equation_type='{eq_type}'."
-            ),
-            "field": "equation_type",
-            "expected": sorted(allowed_eqs),
-            "actual": eq_type,
-        }]
+        return [
+            {
+                "check": "model_eq_type_mismatch",
+                "severity": "error",
+                "message": (
+                    f"model='{model}' requires equation_type in {sorted(allowed_eqs)}, "
+                    f"but got equation_type='{eq_type}'."
+                ),
+                "field": "equation_type",
+                "expected": sorted(allowed_eqs),
+                "actual": eq_type,
+            }
+        ]
 
     return []
 
@@ -235,18 +238,20 @@ def _check_formula_keywords(eq_type: str, formula: str) -> List[Dict]:
 
     matched = any(re.search(p, formula, re.IGNORECASE) for p in patterns)
     if not matched:
-        return [{
-            "check": "formula_missing_keywords",
-            "severity": "warning",
-            "message": (
-                f"equation_formula does not contain expected keywords for "
-                f"equation_type='{eq_type}'. Expected patterns like: "
-                f"{patterns[:3]}. Got formula: '{formula[:120]}...'"
-            ),
-            "field": "equation_formula",
-            "expected": patterns[:3],
-            "actual": formula[:120],
-        }]
+        return [
+            {
+                "check": "formula_missing_keywords",
+                "severity": "warning",
+                "message": (
+                    f"equation_formula does not contain expected keywords for "
+                    f"equation_type='{eq_type}'. Expected patterns like: "
+                    f"{patterns[:3]}. Got formula: '{formula[:120]}...'"
+                ),
+                "field": "equation_formula",
+                "expected": patterns[:3],
+                "actual": formula[:120],
+            }
+        ]
 
     return []
 
@@ -266,18 +271,20 @@ def _check_formula_contradictions(eq_type: str, formula: str) -> List[Dict]:
             found.append(p)
 
     if found:
-        return [{
-            "check": "formula_contradicts_eq_type",
-            "severity": "error",
-            "message": (
-                f"equation_formula contains patterns contradictory to "
-                f"equation_type='{eq_type}': {found}. "
-                f"Formula: '{formula[:120]}...'"
-            ),
-            "field": "equation_formula",
-            "expected": f"No {found} patterns for {eq_type}",
-            "actual": formula[:120],
-        }]
+        return [
+            {
+                "check": "formula_contradicts_eq_type",
+                "severity": "error",
+                "message": (
+                    f"equation_formula contains patterns contradictory to "
+                    f"equation_type='{eq_type}': {found}. "
+                    f"Formula: '{formula[:120]}...'"
+                ),
+                "field": "equation_formula",
+                "expected": f"No {found} patterns for {eq_type}",
+                "actual": formula[:120],
+            }
+        ]
 
     return []
 
@@ -297,39 +304,47 @@ def _check_formula_structure(eq_type: str, formula: str) -> List[Dict]:
 
     if eq_type == "E2":
         # Cox model: formula must contain time-dependent hazard structure
-        has_time = bool(re.search(r"\(t[|\s,)]|λ₀|h_0|baseline", formula, re.IGNORECASE))
+        has_time = bool(
+            re.search(r"\(t[|\s,)]|λ₀|h_0|baseline", formula, re.IGNORECASE)
+        )
         has_exp = bool(re.search(r"exp\s*\(", formula, re.IGNORECASE))
         if not has_time and not has_exp:
-            issues.append({
-                "check": "formula_e2_missing_hazard",
-                "severity": "error",
-                "message": (
-                    "E2 (Cox/survival) formula should contain time-dependent "
-                    "hazard structure like λ(t|...) or exp(β·X). "
-                    f"Got: '{formula[:120]}'"
-                ),
-                "field": "equation_formula",
-                "expected": "λ(t) = λ₀(t) · exp(β·X + ...) or equivalent",
-                "actual": formula[:120],
-            })
+            issues.append(
+                {
+                    "check": "formula_e2_missing_hazard",
+                    "severity": "error",
+                    "message": (
+                        "E2 (Cox/survival) formula should contain time-dependent "
+                        "hazard structure like λ(t|...) or exp(β·X). "
+                        f"Got: '{formula[:120]}'"
+                    ),
+                    "field": "equation_formula",
+                    "expected": "λ(t) = λ₀(t) · exp(β·X + ...) or equivalent",
+                    "actual": formula[:120],
+                }
+            )
 
     if eq_type == "E4":
         # Mediation: formula must reference a mediator (M or indirect/direct paths)
         has_mediator = bool(
-            re.search(r"\bM\b|mediator|indirect|direct|ACME|ADE", formula, re.IGNORECASE)
+            re.search(
+                r"\bM\b|mediator|indirect|direct|ACME|ADE", formula, re.IGNORECASE
+            )
         )
         if not has_mediator:
-            issues.append({
-                "check": "formula_e4_missing_mediator",
-                "severity": "error",
-                "message": (
-                    "E4 (mediation) formula should reference a mediator "
-                    f"variable M. Got: '{formula[:120]}'"
-                ),
-                "field": "equation_formula",
-                "expected": "Formula with M (mediator) variable",
-                "actual": formula[:120],
-            })
+            issues.append(
+                {
+                    "check": "formula_e4_missing_mediator",
+                    "severity": "error",
+                    "message": (
+                        "E4 (mediation) formula should reference a mediator "
+                        f"variable M. Got: '{formula[:120]}'"
+                    ),
+                    "field": "equation_formula",
+                    "expected": "Formula with M (mediator) variable",
+                    "actual": formula[:120],
+                }
+            )
 
     if eq_type == "E6":
         # Interaction: formula must have an interaction term (X1*X2 or X1:X2)
@@ -337,17 +352,19 @@ def _check_formula_structure(eq_type: str, formula: str) -> List[Dict]:
             re.search(r"[*×:]|\\times|interact", formula, re.IGNORECASE)
         )
         if not has_interaction:
-            issues.append({
-                "check": "formula_e6_missing_interaction",
-                "severity": "error",
-                "message": (
-                    "E6 (interaction) formula should contain an interaction "
-                    f"term (X1*X2 or X1×X2). Got: '{formula[:120]}'"
-                ),
-                "field": "equation_formula",
-                "expected": "Formula with interaction term X1*X2",
-                "actual": formula[:120],
-            })
+            issues.append(
+                {
+                    "check": "formula_e6_missing_interaction",
+                    "severity": "error",
+                    "message": (
+                        "E6 (interaction) formula should contain an interaction "
+                        f"term (X1*X2 or X1×X2). Got: '{formula[:120]}'"
+                    ),
+                    "field": "equation_formula",
+                    "expected": "Formula with interaction term X1*X2",
+                    "actual": formula[:120],
+                }
+            )
 
     if eq_type == "E1":
         # Regression: should look like Y = ... or logit(P(Y)) = ... or E[Y|X] = ...
@@ -359,17 +376,19 @@ def _check_formula_structure(eq_type: str, formula: str) -> List[Dict]:
             )
         )
         if not has_regression:
-            issues.append({
-                "check": "formula_e1_missing_regression",
-                "severity": "warning",
-                "message": (
-                    "E1 (static regression) formula should have regression "
-                    f"form. Got: '{formula[:120]}'"
-                ),
-                "field": "equation_formula",
-                "expected": "logit(P(Y=1)) = α + β*X + ... or E[Y] = α + β*X + ...",
-                "actual": formula[:120],
-            })
+            issues.append(
+                {
+                    "check": "formula_e1_missing_regression",
+                    "severity": "warning",
+                    "message": (
+                        "E1 (static regression) formula should have regression "
+                        f"form. Got: '{formula[:120]}'"
+                    ),
+                    "field": "equation_formula",
+                    "expected": "logit(P(Y=1)) = α + β*X + ... or E[Y] = α + β*X + ...",
+                    "actual": formula[:120],
+                }
+            )
 
     return issues
 
@@ -384,25 +403,29 @@ def _check_mu_equation_type(eq_type: str, mu: Dict) -> List[Dict]:
         return []
 
     # Normalize: strip 'log' prefix for matching
-    normalized_type = mu_type.replace("log", "") if mu_type.startswith("log") else mu_type
+    normalized_type = (
+        mu_type.replace("log", "") if mu_type.startswith("log") else mu_type
+    )
 
     allowed = EQUATION_TYPE_TO_MU_TYPES.get(eq_type, set())
     if not allowed:
         return []
 
     if normalized_type not in allowed:
-        return [{
-            "check": "mu_type_eq_type_mismatch",
-            "severity": "error",
-            "message": (
-                f"mu.core.type='{mu_type}' (normalized: '{normalized_type}') "
-                f"is not compatible with equation_type='{eq_type}'. "
-                f"Expected one of: {sorted(allowed)}"
-            ),
-            "field": "epsilon.mu.core.type",
-            "expected": sorted(allowed),
-            "actual": mu_type,
-        }]
+        return [
+            {
+                "check": "mu_type_eq_type_mismatch",
+                "severity": "error",
+                "message": (
+                    f"mu.core.type='{mu_type}' (normalized: '{normalized_type}') "
+                    f"is not compatible with equation_type='{eq_type}'. "
+                    f"Expected one of: {sorted(allowed)}"
+                ),
+                "field": "epsilon.mu.core.type",
+                "expected": sorted(allowed),
+                "actual": mu_type,
+            }
+        ]
 
     return []
 
@@ -426,30 +449,34 @@ def _check_mu_internal(mu: Dict) -> List[Dict]:
     issues = []
 
     if family and family != expected_family:
-        issues.append({
-            "check": "mu_family_mismatch",
-            "severity": "error",
-            "message": (
-                f"mu.core.type='{mu_type}' requires family='{expected_family}', "
-                f"but got family='{family}'"
-            ),
-            "field": "epsilon.mu.core.family",
-            "expected": expected_family,
-            "actual": family,
-        })
+        issues.append(
+            {
+                "check": "mu_family_mismatch",
+                "severity": "error",
+                "message": (
+                    f"mu.core.type='{mu_type}' requires family='{expected_family}', "
+                    f"but got family='{family}'"
+                ),
+                "field": "epsilon.mu.core.family",
+                "expected": expected_family,
+                "actual": family,
+            }
+        )
 
     if scale and scale != expected_scale:
-        issues.append({
-            "check": "mu_scale_mismatch",
-            "severity": "error",
-            "message": (
-                f"mu.core.type='{mu_type}' requires scale='{expected_scale}', "
-                f"but got scale='{scale}'"
-            ),
-            "field": "epsilon.mu.core.scale",
-            "expected": expected_scale,
-            "actual": scale,
-        })
+        issues.append(
+            {
+                "check": "mu_scale_mismatch",
+                "severity": "error",
+                "message": (
+                    f"mu.core.type='{mu_type}' requires scale='{expected_scale}', "
+                    f"but got scale='{scale}'"
+                ),
+                "field": "epsilon.mu.core.scale",
+                "expected": expected_scale,
+                "actual": scale,
+            }
+        )
 
     return issues
 
@@ -471,18 +498,20 @@ def _check_theta_plausibility(mu: Dict, lit: Dict) -> List[Dict]:
     if family == "ratio" and scale == "log":
         # On log scale, |theta| > 3 is suspicious (corresponds to ratio > 20 or < 0.05)
         if abs(theta) > 3:
-            issues.append({
-                "check": "theta_log_scale_suspect",
-                "severity": "error",
-                "message": (
-                    f"theta_hat={theta} on log scale is suspiciously large "
-                    f"(exp({theta})={math.exp(min(theta, 10)):.2f}). "
-                    f"The LLM may have forgotten the log transform."
-                ),
-                "field": "literature_estimate.theta_hat",
-                "expected": "ln(reported_ratio), typically in [-2, 2]",
-                "actual": theta,
-            })
+            issues.append(
+                {
+                    "check": "theta_log_scale_suspect",
+                    "severity": "error",
+                    "message": (
+                        f"theta_hat={theta} on log scale is suspiciously large "
+                        f"(exp({theta})={math.exp(min(theta, 10)):.2f}). "
+                        f"The LLM may have forgotten the log transform."
+                    ),
+                    "field": "literature_estimate.theta_hat",
+                    "expected": "ln(reported_ratio), typically in [-2, 2]",
+                    "actual": theta,
+                }
+            )
 
         # Positive theta > 0.01 that looks like a raw ratio (0.5-20 range)
         # while reported_ratio is close to theta -> forgot log
@@ -496,18 +525,20 @@ def _check_theta_plausibility(mu: Dict, lit: Dict) -> List[Dict]:
             and abs(theta - reported) < 0.01
             and reported != 1.0
         ):
-            issues.append({
-                "check": "theta_not_log_transformed",
-                "severity": "error",
-                "message": (
-                    f"theta_hat={theta} equals reported_ratio={reported}. "
-                    f"For ratio family with log scale, theta_hat should be "
-                    f"ln({reported})={math.log(reported):.4f}"
-                ),
-                "field": "literature_estimate.theta_hat",
-                "expected": round(math.log(reported), 4),
-                "actual": theta,
-            })
+            issues.append(
+                {
+                    "check": "theta_not_log_transformed",
+                    "severity": "error",
+                    "message": (
+                        f"theta_hat={theta} equals reported_ratio={reported}. "
+                        f"For ratio family with log scale, theta_hat should be "
+                        f"ln({reported})={math.log(reported):.4f}"
+                    ),
+                    "field": "literature_estimate.theta_hat",
+                    "expected": round(math.log(reported), 4),
+                    "actual": theta,
+                }
+            )
 
     if family == "difference" and scale == "identity":
         # Difference measures: theta should not be a typical ratio value
@@ -520,17 +551,19 @@ def _check_theta_plausibility(mu: Dict, lit: Dict) -> List[Dict]:
                 or lit.get("reported_RR")
             )
             if reported is not None and abs(theta - reported) < 0.01:
-                issues.append({
-                    "check": "theta_scale_confusion",
-                    "severity": "warning",
-                    "message": (
-                        f"mu family='difference' but theta_hat={theta} matches "
-                        f"reported_ratio={reported}. Possible scale confusion."
-                    ),
-                    "field": "literature_estimate.theta_hat",
-                    "expected": "A mean difference or beta coefficient",
-                    "actual": theta,
-                })
+                issues.append(
+                    {
+                        "check": "theta_scale_confusion",
+                        "severity": "warning",
+                        "message": (
+                            f"mu family='difference' but theta_hat={theta} matches "
+                            f"reported_ratio={reported}. Possible scale confusion."
+                        ),
+                        "field": "literature_estimate.theta_hat",
+                        "expected": "A mean difference or beta coefficient",
+                        "actual": theta,
+                    }
+                )
 
     return issues
 
@@ -548,57 +581,75 @@ def _check_conditional_fields(eq_type: str, hm: Dict) -> List[Dict]:
 
     # M field checks
     if eq_type == "E4":
-        if m_mapping is None or (isinstance(m_mapping, dict) and not m_mapping.get("field")):
-            issues.append({
-                "check": "e4_missing_mediator",
+        if m_mapping is None or (
+            isinstance(m_mapping, dict) and not m_mapping.get("field")
+        ):
+            issues.append(
+                {
+                    "check": "e4_missing_mediator",
+                    "severity": "error",
+                    "message": (
+                        "equation_type='E4' (mediation) requires hpp_mapping.M "
+                        "to be filled with the mediator variable mapping."
+                    ),
+                    "field": "hpp_mapping.M",
+                    "expected": "Non-null mediator mapping",
+                    "actual": m_mapping,
+                }
+            )
+    elif (
+        m_mapping is not None and isinstance(m_mapping, dict) and m_mapping.get("field")
+    ):
+        issues.append(
+            {
+                "check": "non_e4_has_mediator",
                 "severity": "error",
                 "message": (
-                    "equation_type='E4' (mediation) requires hpp_mapping.M "
-                    "to be filled with the mediator variable mapping."
+                    f"equation_type='{eq_type}' should not have hpp_mapping.M. "
+                    f"M is only valid for E4 (mediation)."
                 ),
                 "field": "hpp_mapping.M",
-                "expected": "Non-null mediator mapping",
+                "expected": "null",
                 "actual": m_mapping,
-            })
-    elif m_mapping is not None and isinstance(m_mapping, dict) and m_mapping.get("field"):
-        issues.append({
-            "check": "non_e4_has_mediator",
-            "severity": "error",
-            "message": (
-                f"equation_type='{eq_type}' should not have hpp_mapping.M. "
-                f"M is only valid for E4 (mediation)."
-            ),
-            "field": "hpp_mapping.M",
-            "expected": "null",
-            "actual": m_mapping,
-        })
+            }
+        )
 
     # X2 field checks
     if eq_type == "E6":
-        if x2_mapping is None or (isinstance(x2_mapping, dict) and not x2_mapping.get("field")):
-            issues.append({
-                "check": "e6_missing_x2",
+        if x2_mapping is None or (
+            isinstance(x2_mapping, dict) and not x2_mapping.get("field")
+        ):
+            issues.append(
+                {
+                    "check": "e6_missing_x2",
+                    "severity": "error",
+                    "message": (
+                        "equation_type='E6' (interaction) requires hpp_mapping.X2 "
+                        "to be filled with the second treatment variable mapping."
+                    ),
+                    "field": "hpp_mapping.X2",
+                    "expected": "Non-null X2 mapping",
+                    "actual": x2_mapping,
+                }
+            )
+    elif (
+        x2_mapping is not None
+        and isinstance(x2_mapping, dict)
+        and x2_mapping.get("field")
+    ):
+        issues.append(
+            {
+                "check": "non_e6_has_x2",
                 "severity": "error",
                 "message": (
-                    "equation_type='E6' (interaction) requires hpp_mapping.X2 "
-                    "to be filled with the second treatment variable mapping."
+                    f"equation_type='{eq_type}' should not have hpp_mapping.X2. "
+                    f"X2 is only valid for E6 (interaction)."
                 ),
                 "field": "hpp_mapping.X2",
-                "expected": "Non-null X2 mapping",
+                "expected": "null",
                 "actual": x2_mapping,
-            })
-    elif x2_mapping is not None and isinstance(x2_mapping, dict) and x2_mapping.get("field"):
-        issues.append({
-            "check": "non_e6_has_x2",
-            "severity": "error",
-            "message": (
-                f"equation_type='{eq_type}' should not have hpp_mapping.X2. "
-                f"X2 is only valid for E6 (interaction)."
-            ),
-            "field": "hpp_mapping.X2",
-            "expected": "null",
-            "actual": x2_mapping,
-        })
+            }
+        )
 
     return issues
 
@@ -611,31 +662,35 @@ def _check_alpha_evidence_type(alpha: Dict, evidence_type: str) -> List[Dict]:
 
     allowed_evidence = ID_STRATEGY_TO_EVIDENCE.get(strategy)
     if allowed_evidence is None:
-        return [{
-            "check": "id_strategy_unknown",
-            "severity": "warning",
-            "message": (
-                f"alpha.id_strategy='{strategy}' is not in the canonical list: "
-                f"{sorted(ID_STRATEGY_TO_EVIDENCE.keys())}"
-            ),
-            "field": "epsilon.alpha.id_strategy",
-            "expected": sorted(ID_STRATEGY_TO_EVIDENCE.keys()),
-            "actual": strategy,
-        }]
+        return [
+            {
+                "check": "id_strategy_unknown",
+                "severity": "warning",
+                "message": (
+                    f"alpha.id_strategy='{strategy}' is not in the canonical list: "
+                    f"{sorted(ID_STRATEGY_TO_EVIDENCE.keys())}"
+                ),
+                "field": "epsilon.alpha.id_strategy",
+                "expected": sorted(ID_STRATEGY_TO_EVIDENCE.keys()),
+                "actual": strategy,
+            }
+        ]
 
     if evidence_type not in allowed_evidence:
-        return [{
-            "check": "alpha_evidence_type_mismatch",
-            "severity": "error",
-            "message": (
-                f"alpha.id_strategy='{strategy}' expects evidence_type in "
-                f"{sorted(allowed_evidence)}, but paper is classified as "
-                f"'{evidence_type}'."
-            ),
-            "field": "epsilon.alpha.id_strategy",
-            "expected": sorted(allowed_evidence),
-            "actual": f"{strategy} vs {evidence_type}",
-        }]
+        return [
+            {
+                "check": "alpha_evidence_type_mismatch",
+                "severity": "error",
+                "message": (
+                    f"alpha.id_strategy='{strategy}' expects evidence_type in "
+                    f"{sorted(allowed_evidence)}, but paper is classified as "
+                    f"'{evidence_type}'."
+                ),
+                "field": "epsilon.alpha.id_strategy",
+                "expected": sorted(allowed_evidence),
+                "actual": f"{strategy} vs {evidence_type}",
+            }
+        ]
 
     return []
 
@@ -664,18 +719,20 @@ def _check_rho_z_adjustment(rho: Dict, lit: Dict) -> List[Dict]:
         only_in_rho = rho_set - adj_set_normalized
         only_in_adj = adj_set_normalized - rho_set
         if only_in_rho or only_in_adj:
-            return [{
-                "check": "rho_z_adjustment_mismatch",
-                "severity": "warning",
-                "message": (
-                    f"rho.Z and adjustment_set differ. "
-                    f"Only in rho.Z: {sorted(only_in_rho) if only_in_rho else 'none'}. "
-                    f"Only in adjustment_set: {sorted(only_in_adj) if only_in_adj else 'none'}."
-                ),
-                "field": "epsilon.rho.Z",
-                "expected": "rho.Z == adjustment_set",
-                "actual": f"rho.Z={sorted(rho_set)}, adj={sorted(adj_set_normalized)}",
-            }]
+            return [
+                {
+                    "check": "rho_z_adjustment_mismatch",
+                    "severity": "warning",
+                    "message": (
+                        f"rho.Z and adjustment_set differ. "
+                        f"Only in rho.Z: {sorted(only_in_rho) if only_in_rho else 'none'}. "
+                        f"Only in adjustment_set: {sorted(only_in_adj) if only_in_adj else 'none'}."
+                    ),
+                    "field": "epsilon.rho.Z",
+                    "expected": "rho.Z == adjustment_set",
+                    "actual": f"rho.Z={sorted(rho_set)}, adj={sorted(adj_set_normalized)}",
+                }
+            ]
 
     return []
 
@@ -715,9 +772,7 @@ def format_issues_for_prompt(issues: List[Dict]) -> str:
     if warnings:
         lines.append(f"\n=== {len(warnings)} WARNINGS (should fix if possible) ===")
         for i, w in enumerate(warnings, 1):
-            lines.append(
-                f"{i}. [{w['check']}] {w['message']}"
-            )
+            lines.append(f"{i}. [{w['check']}] {w['message']}")
 
     return "\n".join(lines)
 
@@ -805,7 +860,12 @@ def deduplicate_step1_edges(
             same_scale = sigs[i][3] == sigs[j][3]
             same_c = _token_overlap_ratio(sigs[i][4], sigs[j][4]) > 0.5
 
-            if x_sim >= similarity_threshold and y_sim >= similarity_threshold and same_sub and (same_scale or same_c):
+            if (
+                x_sim >= similarity_threshold
+                and y_sim >= similarity_threshold
+                and same_sub
+                and (same_scale or same_c)
+            ):
                 # Determine which to keep: prefer the one with numeric estimate
                 e_i = edges[i]
                 e_j = edges[j]
@@ -821,28 +881,32 @@ def deduplicate_step1_edges(
                 if j_has_est and not i_has_est:
                     # Keep j, remove i
                     keep_mask[i] = False
-                    removed.append({
-                        "removed_index": i,
-                        "kept_index": j,
-                        "reason": (
-                            f"Duplicate of edge {j+1}: "
-                            f"X_sim={x_sim:.2f}, Y_sim={y_sim:.2f}"
-                        ),
-                        "removed_edge": e_i,
-                    })
+                    removed.append(
+                        {
+                            "removed_index": i,
+                            "kept_index": j,
+                            "reason": (
+                                f"Duplicate of edge {j+1}: "
+                                f"X_sim={x_sim:.2f}, Y_sim={y_sim:.2f}"
+                            ),
+                            "removed_edge": e_i,
+                        }
+                    )
                     break
                 else:
                     # Keep i, remove j
                     keep_mask[j] = False
-                    removed.append({
-                        "removed_index": j,
-                        "kept_index": i,
-                        "reason": (
-                            f"Duplicate of edge {i+1}: "
-                            f"X_sim={x_sim:.2f}, Y_sim={y_sim:.2f}"
-                        ),
-                        "removed_edge": e_j,
-                    })
+                    removed.append(
+                        {
+                            "removed_index": j,
+                            "kept_index": i,
+                            "reason": (
+                                f"Duplicate of edge {i+1}: "
+                                f"X_sim={x_sim:.2f}, Y_sim={y_sim:.2f}"
+                            ),
+                            "removed_edge": e_j,
+                        }
+                    )
 
     unique = [e for e, keep in zip(edges, keep_mask) if keep]
 
@@ -889,16 +953,23 @@ def detect_fuzzy_duplicates_step3(
             same_sub = sigs[i][2] == sigs[j][2]
             same_mu = sigs[i][3] == sigs[j][3]
 
-            if x_sim >= similarity_threshold and y_sim >= similarity_threshold and same_sub and same_mu:
-                issues.append({
-                    "type": "fuzzy_duplicate_edge",
-                    "severity": "warning",
-                    "message": (
-                        f"Edges #{i+1} and #{j+1} are likely duplicates: "
-                        f"X_similarity={x_sim:.2f}, Y_similarity={y_sim:.2f}, "
-                        f"same_subgroup={same_sub}, same_mu_type={same_mu}"
-                    ),
-                    "edge_indices": [i, j],
-                })
+            if (
+                x_sim >= similarity_threshold
+                and y_sim >= similarity_threshold
+                and same_sub
+                and same_mu
+            ):
+                issues.append(
+                    {
+                        "type": "fuzzy_duplicate_edge",
+                        "severity": "warning",
+                        "message": (
+                            f"Edges #{i+1} and #{j+1} are likely duplicates: "
+                            f"X_similarity={x_sim:.2f}, Y_similarity={y_sim:.2f}, "
+                            f"same_subgroup={same_sub}, same_mu_type={same_mu}"
+                        ),
+                        "edge_indices": [i, j],
+                    }
+                )
 
     return issues

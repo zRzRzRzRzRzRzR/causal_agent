@@ -35,12 +35,9 @@ def load_template(template_path: str) -> Dict:
     """
     with open(template_path, "r", encoding="utf-8") as f:
         raw = f.read()
-    # Strip single-line // comments (but not inside strings)
     lines = raw.split("\n")
     cleaned = []
     for line in lines:
-        # Simple approach: remove // comments not inside quotes
-        # Find // that's not inside a string value
         in_string = False
         escape_next = False
         cut_pos = None
@@ -96,18 +93,13 @@ def prefill_skeleton(
     # ---- edge_id ----
     year = paper_info.get("year", "YYYY")
     author = str(paper_info.get("first_author", "AUTHOR"))
-    # Capitalize first letter, keep rest as-is for readability
     short_title = paper_info.get("short_title", "")
     study_tag = f"{author}{short_title}".replace(" ", "")
     idx = edge.get("edge_index", 1)
     result["edge_id"] = f"EV_{year}_{study_tag}#{idx}"
-
-    # ---- paper_title from paper_info if available ----
     if paper_info.get("short_title"):
-        # Will be overwritten by LLM with full title
         pass
 
-    # ---- literature_estimate (from step1 edge) ----
     lit = result.get("literature_estimate", {})
 
     estimate = edge.get("estimate")
@@ -176,7 +168,6 @@ def merge_with_template(skeleton: Dict, llm_output: Dict) -> Dict:
 
 
 def _is_placeholder(val: Any) -> bool:
-    """Check if a value is a template placeholder."""
     if val is None:
         return False
     if isinstance(val, str):
@@ -193,10 +184,6 @@ def _is_placeholder(val: Any) -> bool:
 
 
 def _recursive_merge(target: Dict, source: Dict) -> None:
-    """
-    In-place recursive merge of source into target.
-    Allows extra keys from source (LLM can add mapping_notes, etc.)
-    """
     if not isinstance(source, dict):
         return
 
@@ -217,14 +204,11 @@ def _recursive_merge(target: Dict, source: Dict) -> None:
                 if not (len(src_val) == 1 and src_val[0] == "..."):
                     target[key] = src_val
         else:
-            # Replace if source provides meaningful value, or if target is placeholder
             if src_val is not None and not _is_placeholder(src_val):
                 target[key] = src_val
             elif src_val is None and _is_placeholder(tgt_val):
                 target[key] = None
 
-    # Second: add extra keys from source that aren't in target
-    # This allows LLM to add mapping_notes, composite_components, reported_HR, etc.
     for key in source:
         if key.startswith("_"):
             continue

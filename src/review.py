@@ -10,7 +10,6 @@ complete set of edges for one paper and performs:
   3d. Quality Report        — aggregate stats, per-edge scores, actionable flags
 """
 
-
 import sys
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Set, Tuple
@@ -18,6 +17,7 @@ from typing import Any, Dict, List, Set, Tuple
 from .hpp_mapper import HPPMapper
 from .llm_client import GLMClient
 from .template_utils import compute_fill_rate, validate_filled_edge
+
 
 def rerank_hpp_mapping(
     edge: Dict,
@@ -72,9 +72,7 @@ def rerank_hpp_mapping(
             result = client.call_json(prompt, max_tokens=256)
             best_idx = result.get("best", 0)
             reason = result.get("reason", "")
-            new_status = result.get(
-                "status", current.get("status", "tentative")
-            )
+            new_status = result.get("status", current.get("status", "tentative"))
 
             if 0 < best_idx <= len(candidates[:6]):
                 chosen = candidates[best_idx - 1]
@@ -139,9 +137,7 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
         rho = e.get("epsilon", {}).get("rho", {})
         x = str(rho.get("X", "")).lower().strip()
         y = str(rho.get("Y", "")).lower().strip()
-        sub = str(
-            e.get("literature_estimate", {}).get("subgroup", "")
-        ).lower().strip()
+        sub = str(e.get("literature_estimate", {}).get("subgroup", "")).lower().strip()
         edge_sigs.append((i, (x, y, sub)))
 
     sig_counter = Counter(sig for _, sig in edge_sigs)
@@ -187,8 +183,7 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
                     "type": "equation_type_inconsistency",
                     "severity": "warning",
                     "message": (
-                        f"Model '{model}' maps to multiple "
-                        f"equation_types: {eqs}"
+                        f"Model '{model}' maps to multiple " f"equation_types: {eqs}"
                     ),
                 }
             )
@@ -221,9 +216,7 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
             continue
 
         reported = (
-            lit.get("reported_HR")
-            or lit.get("reported_OR")
-            or lit.get("reported_RR")
+            lit.get("reported_HR") or lit.get("reported_OR") or lit.get("reported_RR")
         )
 
         # |theta| > 3 on log scale is suspicious
@@ -280,9 +273,7 @@ def spot_check_values(
     for i, e in enumerate(edges):
         lit = e.get("literature_estimate", {})
         reported = (
-            lit.get("reported_HR")
-            or lit.get("reported_OR")
-            or lit.get("reported_RR")
+            lit.get("reported_HR") or lit.get("reported_OR") or lit.get("reported_RR")
         )
         if reported is not None and isinstance(reported, (int, float)):
             checkable.append((i, e, reported))
@@ -302,9 +293,7 @@ def spot_check_values(
             or lit.get("reported_CI_RR")
             or lit.get("ci")
         )
-        mu_type = (
-            e.get("epsilon", {}).get("mu", {}).get("core", {}).get("type", "HR")
-        )
+        mu_type = e.get("epsilon", {}).get("mu", {}).get("core", {}).get("type", "HR")
         effect_label = mu_type.replace("log", "")
 
         check_items.append(
@@ -317,7 +306,7 @@ def spot_check_values(
         "请根据以下论文内容，核实每条提取结果是否正确。\n"
         "对每条回答: correct / incorrect（给出正确值）/ not_found\n\n"
         + "".join(check_items)
-        + '\n以 JSON 回答:\n'
+        + "\n以 JSON 回答:\n"
         '{"checks": [{"item": 序号, "verdict": "correct/incorrect/not_found", '
         '"correct_value": null或正确值, "note": ""}]}\n\n'
         f"--- 论文内容 ---\n{pdf_text[:30000]}"
@@ -419,16 +408,12 @@ def _generate_action_items(
     invalid = [e for e in edge_reports if not e["is_valid"]]
     if invalid:
         ids = [e["edge_id"] for e in invalid]
-        actions.append(
-            f"🔴 {len(invalid)} edge(s) failed validation: {ids}."
-        )
+        actions.append(f"🔴 {len(invalid)} edge(s) failed validation: {ids}.")
 
     low_fill = [e for e in edge_reports if e["fill_rate"] < 0.6]
     if low_fill:
         ids = [e["edge_id"] for e in low_fill]
-        actions.append(
-            f"🟡 {len(low_fill)} edge(s) low fill rate (<60%): {ids}."
-        )
+        actions.append(f"🟡 {len(low_fill)} edge(s) low fill rate (<60%): {ids}.")
 
     missing_maps = [
         e
@@ -437,9 +422,7 @@ def _generate_action_items(
     ]
     if missing_maps:
         ids = [e["edge_id"] for e in missing_maps]
-        actions.append(
-            f"🟡 {len(missing_maps)} edge(s) missing HPP mappings: {ids}."
-        )
+        actions.append(f"🟡 {len(missing_maps)} edge(s) missing HPP mappings: {ids}.")
 
     for err in consistency_issues:
         if err.get("severity") == "error":

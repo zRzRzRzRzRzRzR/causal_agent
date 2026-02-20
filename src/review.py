@@ -15,6 +15,7 @@ Changes from original:
   - _generate_action_items flags semantic errors alongside format errors
 """
 
+import json
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Set, Tuple
 
@@ -72,7 +73,7 @@ def rerank_hpp_mapping(
             f"If current mapping is already best, set best=0."
         )
 
-        result = client.call_json(prompt, max_tokens=256)
+        result = client.call_json(prompt, max_tokens=32678)
         best_idx = result.get("best", 0)
         reason = result.get("reason", "")
         new_status = result.get("status", current.get("status", "tentative"))
@@ -317,7 +318,28 @@ def spot_check_values(
         f"--- Paper content ---\n{pdf_text[:30000]}"
     )
 
-    result = client.call_json(prompt, max_tokens=2048)
+    try:
+        result = client.call_json(prompt, max_tokens=2048)
+    except Exception:
+        # Retry with explicit JSON instruction
+        try:
+            raw = client.call(
+                "Reply ONLY with valid JSON.\n\n" + prompt,
+                system_prompt="Output valid JSON only.",
+                max_tokens=2048,
+            )
+            import re as _re
+
+            # Try to extract JSON from response
+            raw = raw.strip()
+            if raw.startswith("```"):
+                match = _re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", raw, _re.DOTALL)
+                if match:
+                    raw = match.group(1)
+            result = json.loads(raw)
+        except Exception:
+            return [{"status": "error", "reason": "LLM returned invalid JSON"}]
+
     checks = result.get("checks", [])
     for check in checks:
         item_idx = check.get("item", 0) - 1

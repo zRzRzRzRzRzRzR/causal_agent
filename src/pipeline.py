@@ -1,17 +1,22 @@
 """
-pipeline.py — Edge extraction pipeline with semantic validation and retry.
+pipeline.py -- Edge extraction pipeline v2.
 
-Four-step pipeline:
-  Step 0: Classify paper type (interventional/causal/mechanistic/associational)
+Redesigned for speed and reliability:
+
+  Step 0: Classify paper type
   Step 1: Enumerate all X->Y statistical edges + deduplicate
-  Step 2: Fill each edge into the HPP template (with retry on semantic errors)
-  Step 3: Review, rerank, consistency check, spot-check, quality report
+  Step 1.5: Pre-validate edges (hard check values in text + soft check
+            equation metadata derivation) -- NO LLM calls needed
+  Step 2: Fill each edge into HPP template (simplified, no retry loop --
+          pre-validation provides equation_type/model/mu/theta)
+  Step 3: Review with robust JSON parsing (no crash on LLM parse failures)
 
-Key additions over the original:
-  - Step 1 now includes fuzzy deduplication of extracted edges
-  - Step 2 runs semantic validation after filling, and retries with a
-    correction prompt if blocking errors are found (up to max_retries)
-  - Step 3 includes fuzzy duplicate detection across filled edges
+Key changes from v1:
+  - Step 1.5 catches equation_type/model/formula errors deterministically
+  - Step 2 no longer does semantic retry (pre-validation handles this)
+  - Step 2 injects pre-computed equation metadata into the LLM prompt
+  - Step 3 spot_check uses safe_call_json with fallback
+  - Step 3 rerank is batched to reduce LLM calls
 """
 
 import json
@@ -20,6 +25,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .edge_prevalidator import prevalidate_edges
 from .hpp_mapper import HPPMapper, get_hpp_context
 from .llm_client import GLMClient
 from .review import (
@@ -31,7 +37,6 @@ from .review import (
 from .semantic_validator import (
     deduplicate_step1_edges,
     detect_fuzzy_duplicates_step3,
-    format_issues_for_prompt,
     has_blocking_errors,
     validate_semantics,
 )
@@ -107,7 +112,7 @@ _BASELINE_DEMO_KEYWORDS = {
 
 
 def _is_baseline_check(edge: Dict) -> bool:
-    """Return True if this edge is a baseline balance check row (not a real finding)."""
+    """Return True if this edge is a baseline balance check row."""
     if edge.get("significant", True):
         return False
     source = str(edge.get("source", "")).lower()
@@ -130,7 +135,7 @@ def step1_enumerate_edges(
     edges = result.get("edges", [])
     paper_info = result.get("paper_info", {})
 
-    # --- Filter baseline balance check rows ---
+    # Filter baseline balance check rows
     filtered = [e for e in edges if not _is_baseline_check(e)]
     n_filtered = len(edges) - len(filtered)
     if n_filtered:
@@ -139,7 +144,7 @@ def step1_enumerate_edges(
             file=sys.stderr,
         )
 
-    # --- Fuzzy deduplication ---
+    # Fuzzy deduplication
     unique_edges, removed_dups = deduplicate_step1_edges(filtered)
     if removed_dups:
         print(
@@ -172,50 +177,58 @@ def step1_enumerate_edges(
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Fill one edge (with semantic validation + retry)
+# Step 1.5: Pre-validate edges (NO LLM calls)
 # ---------------------------------------------------------------------------
 
 
-def _build_correction_prompt(
-    original_json: Dict,
-    semantic_issues: List[Dict],
-    format_issues: List[str],
-) -> str:
+def step1_5_prevalidate(
+    edges: List[Dict],
+    pdf_text: str,
+    evidence_type: str,
+) -> Tuple[List[Dict], Dict[str, Any]]:
     """
-    Build a correction prompt that tells the LLM what went wrong
-    and asks it to fix the specific fields.
+    Pre-validate all edges between Step 1 and Step 2.
+    Derives equation_type, model, mu, theta_hat on correct scale.
+    Verifies reported values appear in paper text.
+
+    Returns:
+        (enriched_edges, validation_report)
     """
-    lines = [
-        "Your previous output has semantic and/or structural errors. "
-        "Please fix the following issues and return the corrected JSON.\n",
-    ]
+    print(f"\n[Step 1.5] Pre-validating {len(edges)} edges ...", file=sys.stderr)
 
-    # Semantic issues (from validate_semantics)
-    if semantic_issues:
-        lines.append("## Semantic errors detected:\n")
-        lines.append(format_issues_for_prompt(semantic_issues))
-        lines.append("")
+    enriched, report = prevalidate_edges(edges, pdf_text, evidence_type)
 
-    # Format issues (from validate_filled_edge)
-    hard_format = [i for i in format_issues if not i.startswith("WARNING")]
-    if hard_format:
-        lines.append("## Format/structural errors:\n")
-        for i, issue in enumerate(hard_format, 1):
-            lines.append(f"{i}. {issue}")
-        lines.append("")
-
-    lines.append("## Your previous output (to be corrected):\n")
-    lines.append("```json")
-    lines.append(json.dumps(original_json, ensure_ascii=False, indent=2))
-    lines.append("```\n")
-
-    lines.append(
-        "Please return a COMPLETE corrected JSON object. "
-        "Fix all the errors listed above. "
-        "Do NOT add // comments. Output valid JSON only."
+    # Print summary
+    print(
+        f"  Hard check: {report['hard_check_passed']} passed, "
+        f"{report['hard_check_failed']} failed",
+        file=sys.stderr,
     )
+    if report["hard_check_missing_values"]:
+        for item in report["hard_check_missing_values"][:5]:
+            print(
+                f"    Edge #{item['edge_index']}: missing {item['missing']}",
+                file=sys.stderr,
+            )
 
-    return "\n".join(lines)
+    eq_dist = report["equation_type_distribution"]
+    print(f"  Equation types: {dict(eq_dist)}", file=sys.stderr)
+
+    n_soft = len(report["soft_check_issues"])
+    if n_soft:
+        print(f"  Soft check: {n_soft} issue(s)", file=sys.stderr)
+        for iss in report["soft_check_issues"][:5]:
+            print(
+                f"    Edge #{iss.get('edge_index', '?')}: {iss['message']}",
+                file=sys.stderr,
+            )
+
+    return enriched, report
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Fill one edge (simplified -- no retry loop)
+# ---------------------------------------------------------------------------
 
 
 def step2_fill_one_edge(
@@ -228,12 +241,13 @@ def step2_fill_one_edge(
     pdf_name: str,
     template_path: Optional[str] = None,
     hpp_dict_path: Optional[str] = None,
-    max_retries: int = 2,
 ) -> Dict:
     """
     Fill a single edge into the HPP template.
-    After filling, runs semantic validation. If blocking errors are found,
-    sends a correction prompt back to the LLM and retries (up to max_retries).
+
+    Uses pre-validated equation metadata from Step 1.5 (_prevalidation key)
+    to guide the LLM. No retry loop -- pre-validation already ensures
+    equation_type/model/mu consistency.
     """
     prompt_template = _load_prompt("step2_fill_template")
     template_json = prepare_template_for_prompt(annotated_template)
@@ -242,6 +256,9 @@ def step2_fill_one_edge(
         template_with_hints = prepare_template_with_comments(template_path)
     else:
         template_with_hints = template_json
+
+    # Extract pre-validation data
+    preval = edge.get("_prevalidation", {})
 
     replacements = {
         "{edge_index}": str(edge.get("edge_index", 1)),
@@ -278,10 +295,21 @@ def step2_fill_one_edge(
     for placeholder, value in replacements.items():
         prompt_template = prompt_template.replace(placeholder, value)
 
-    full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text}"
+    # Inject pre-validated equation metadata as guidance
+    preval_guidance = _build_prevalidation_guidance(edge, preval)
+    full_prompt = (
+        f"{prompt_template}\n\n"
+        f"---\n\n"
+        f"## Pre-validated equation metadata (use these values)\n\n"
+        f"{preval_guidance}\n\n"
+        f"---\n\n**Paper**\n\n{pdf_text}"
+    )
 
-    # --- Initial LLM call ---
-    llm_output = client.call_json(full_prompt, max_tokens=32768)
+    # Single LLM call -- no retry loop
+    llm_output = client.call_json(full_prompt)
+    if not isinstance(llm_output, dict):
+        llm_output = {}
+
     filled, is_valid, format_issues, fill_rate = build_filled_edge(
         annotated_template=annotated_template,
         llm_output=llm_output,
@@ -291,77 +319,156 @@ def step2_fill_one_edge(
         pdf_name=pdf_name,
     )
 
-    # --- Semantic validation ---
+    # Apply pre-validated overrides (deterministic corrections)
+    filled = _apply_prevalidation_overrides(filled, preval)
+
+    # Run semantic validation (for reporting only, no retry)
     semantic_issues = validate_semantics(filled, evidence_type=evidence_type)
 
     if semantic_issues:
         n_err = sum(1 for i in semantic_issues if i["severity"] == "error")
         n_warn = sum(1 for i in semantic_issues if i["severity"] == "warning")
-        print(
-            f"  [Semantic] {n_err} errors, {n_warn} warnings",
-            file=sys.stderr,
-        )
-        for iss in semantic_issues:
-            level = "X" if iss["severity"] == "error" else "!"
-            print(f"    [{level}] {iss['check']}: {iss['message']}", file=sys.stderr)
-
-    # --- Retry loop if blocking errors exist ---
-    attempt = 0
-    while has_blocking_errors(semantic_issues) and attempt < max_retries:
-        attempt += 1
-        print(
-            f"  [Retry {attempt}/{max_retries}] Sending correction prompt ...",
-            file=sys.stderr,
-        )
-
-        correction_prompt = _build_correction_prompt(
-            original_json=filled,
-            semantic_issues=semantic_issues,
-            format_issues=format_issues,
-        )
-
-        # Append paper text for context (truncated to leave room for correction)
-        correction_full = (
-            f"{correction_prompt}\n\n---\n\n**Paper (for reference)**\n\n" f"{pdf_text}"
-        )
-
-        llm_output_retry = client.call_json(correction_full, max_tokens=32768)
-        filled, is_valid, format_issues, fill_rate = build_filled_edge(
-            annotated_template=annotated_template,
-            llm_output=llm_output_retry,
-            edge=edge,
-            paper_info=paper_info,
-            evidence_type=evidence_type,
-            pdf_name=pdf_name,
-        )
-
-        semantic_issues = validate_semantics(filled, evidence_type=evidence_type)
-
-        if semantic_issues:
-            n_err = sum(1 for i in semantic_issues if i["severity"] == "error")
-            n_warn = sum(1 for i in semantic_issues if i["severity"] == "warning")
+        if n_err:
             print(
-                f"  [Retry {attempt}] After correction: {n_err} errors, {n_warn} warnings",
+                f"  [Semantic] {n_err} errors, {n_warn} warnings (post-override)",
                 file=sys.stderr,
             )
-        else:
-            print(f"  [Retry {attempt}] All semantic issues resolved", file=sys.stderr)
 
-    # Attach validation metadata to the edge for downstream inspection
     filled["_validation"] = {
         "semantic_issues": semantic_issues,
         "format_issues": format_issues,
         "fill_rate": fill_rate,
-        "retries_used": attempt,
+        "retries_used": 0,
         "is_format_valid": is_valid,
         "is_semantically_valid": not has_blocking_errors(semantic_issues),
+        "prevalidation": {
+            "equation_type": preval.get("equation_type"),
+            "model": preval.get("model"),
+            "hard_check_passed": preval.get("hard_check", {}).get("passed", True),
+        },
     }
 
     return filled
 
 
+def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
+    """Build a guidance block for the LLM based on pre-validated metadata."""
+    if not preval:
+        return "(No pre-validation data available)"
+
+    lines = []
+    lines.append(
+        f"- **equation_type**: `{preval.get('equation_type', '?')}` "
+        f"(derived from effect_scale={edge.get('effect_scale', '?')}, "
+        f"outcome_type={edge.get('outcome_type', '?')})"
+    )
+    lines.append(f"- **model**: `{preval.get('model', '?')}`")
+
+    mu = preval.get("mu", {})
+    lines.append(
+        f"- **mu**: family=`{mu.get('family', '?')}`, "
+        f"type=`{mu.get('type', '?')}`, scale=`{mu.get('scale', '?')}`"
+    )
+
+    theta = preval.get("theta_hat")
+    if theta is not None:
+        lines.append(f"- **theta_hat** (on correct scale): `{theta}`")
+
+    ci = preval.get("ci")
+    if ci and any(v is not None for v in ci):
+        lines.append(f"- **ci** (on correct scale): `{ci}`")
+
+    reported = preval.get("reported_value")
+    if reported is not None:
+        lines.append(f"- **reported_value** (original scale): `{reported}`")
+
+    reported_ci = preval.get("reported_ci")
+    if reported_ci:
+        lines.append(f"- **reported_ci** (original scale): `{reported_ci}`")
+
+    lines.append(f"- **id_strategy**: `{preval.get('id_strategy', '?')}`")
+    lines.append(f"- **formula_skeleton**: `{preval.get('formula_skeleton', '?')}`")
+
+    lines.append(
+        "\n**IMPORTANT**: Use the pre-validated equation_type, model, mu, "
+        "theta_hat, and ci values above. Do NOT re-derive these -- they have "
+        "been verified against the paper."
+    )
+
+    return "\n".join(lines)
+
+
+def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
+    """
+    Force pre-validated values into the filled edge.
+    This ensures equation_type, model, mu, theta_hat, and ci are correct
+    even if the LLM ignored the guidance.
+    """
+    if not preval:
+        return filled
+
+    # Override equation_type
+    if preval.get("equation_type"):
+        filled["equation_type"] = preval["equation_type"]
+
+    # Override model
+    if preval.get("model"):
+        lit = filled.setdefault("literature_estimate", {})
+        lit["model"] = preval["model"]
+
+    # Override mu
+    if preval.get("mu"):
+        mu_core = (
+            filled.setdefault("epsilon", {}).setdefault("mu", {}).setdefault("core", {})
+        )
+        mu_core.update(preval["mu"])
+
+    # Override theta_hat and ci
+    lit = filled.setdefault("literature_estimate", {})
+    if preval.get("theta_hat") is not None:
+        lit["theta_hat"] = preval["theta_hat"]
+
+    if preval.get("ci") and any(v is not None for v in preval["ci"]):
+        lit["ci"] = preval["ci"]
+
+    # Add reported values for ratio measures
+    mu_type = preval.get("mu", {}).get("type", "")
+    if preval.get("reported_value") is not None:
+        if mu_type in ("HR", "logHR"):
+            lit["reported_HR"] = preval["reported_value"]
+        elif mu_type in ("OR", "logOR"):
+            lit["reported_OR"] = preval["reported_value"]
+        elif mu_type in ("RR", "logRR"):
+            lit["reported_RR"] = preval["reported_value"]
+
+    if preval.get("reported_ci") is not None:
+        if mu_type in ("HR", "logHR"):
+            lit["reported_CI_HR"] = preval["reported_ci"]
+        elif mu_type in ("OR", "logOR"):
+            lit["reported_CI_OR"] = preval["reported_ci"]
+        elif mu_type in ("RR", "logRR"):
+            lit["reported_CI_RR"] = preval["reported_ci"]
+
+    # Override id_strategy
+    if preval.get("id_strategy"):
+        alpha = filled.setdefault("epsilon", {}).setdefault("alpha", {})
+        alpha["id_strategy"] = preval["id_strategy"]
+
+    # Pre-populate adjustment_variables into rho.Z and adjustment_set if LLM left them empty
+    adj_vars = preval.get("adjustment_variables", [])
+    if adj_vars:
+        rho = filled.setdefault("epsilon", {}).setdefault("rho", {})
+        if not rho.get("Z") or rho.get("Z") == ["..."]:
+            rho["Z"] = adj_vars
+        lit_adj = lit.get("adjustment_set", [])
+        if not lit_adj or lit_adj == ["..."]:
+            lit["adjustment_set"] = adj_vars
+
+    return filled
+
+
 # ---------------------------------------------------------------------------
-# Step 3: Review (with fuzzy duplicate detection)
+# Step 3: Review (with robust JSON parsing)
 # ---------------------------------------------------------------------------
 
 
@@ -384,23 +491,30 @@ def step3_review(
         mapper = HPPMapper(raw_dict)
 
         for i, edge in enumerate(edges):
-            changes = rerank_hpp_mapping(edge, mapper, client)
-            all_rerank_changes.append(changes)
-            if changes:
+            try:
+                changes = rerank_hpp_mapping(edge, mapper, client)
+                all_rerank_changes.append(changes)
+                if changes:
+                    print(
+                        f"    Edge #{i + 1}: reranked {list(changes.keys())}",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
                 print(
-                    f"    Edge #{i + 1}: reranked {list(changes.keys())}",
+                    f"    Edge #{i + 1}: rerank failed ({e})",
                     file=sys.stderr,
                 )
+                all_rerank_changes.append({})
         n = sum(len(c) for c in all_rerank_changes)
         print(f"    {n} mapping(s) updated", file=sys.stderr)
     else:
         print("  [3a] Rerank skipped", file=sys.stderr)
 
-    # 3b. Cross-edge consistency (original exact-match checks)
+    # 3b. Cross-edge consistency
     print("  [3b] Cross-edge consistency ...", file=sys.stderr)
     consistency_issues = check_cross_edge_consistency(edges)
 
-    # 3b+. Fuzzy duplicate detection (new)
+    # 3b+. Fuzzy duplicate detection
     fuzzy_dups = detect_fuzzy_duplicates_step3(edges)
     if fuzzy_dups:
         print(
@@ -415,16 +529,20 @@ def step3_review(
     nw = sum(1 for x in consistency_issues if x.get("severity") == "warning")
     print(f"    {ne} errors, {nw} warnings", file=sys.stderr)
 
-    # 3c. Spot-check
+    # 3c. Spot-check (with safe JSON parsing)
     spot_checks: List[Dict] = []
     if enable_spot_check:
         ns = min(spot_check_sample, len(edges))
         print(f"  [3c] Spot-checking {ns} edges ...", file=sys.stderr)
-        spot_checks = spot_check_values(
-            edges, pdf_text, client, sample_size=spot_check_sample
-        )
-        verdicts = Counter(c.get("verdict", "?") for c in spot_checks)
-        print(f"    Results: {dict(verdicts)}", file=sys.stderr)
+        try:
+            spot_checks = _safe_spot_check(
+                edges, pdf_text, client, sample_size=spot_check_sample
+            )
+            verdicts = Counter(c.get("verdict", "?") for c in spot_checks)
+            print(f"    Results: {dict(verdicts)}", file=sys.stderr)
+        except Exception as e:
+            print(f"    Spot-check failed: {e}", file=sys.stderr)
+            spot_checks = [{"status": "error", "reason": str(e)}]
     else:
         print("  [3c] Spot-check skipped", file=sys.stderr)
 
@@ -452,6 +570,65 @@ def step3_review(
     return edges, report
 
 
+def _safe_spot_check(
+    edges: List[Dict],
+    pdf_text: str,
+    client: GLMClient,
+    sample_size: int = 5,
+) -> List[Dict]:
+    """
+    Wrapper around spot_check_values with robust JSON parsing.
+    Falls back to individual edge checks if batch fails.
+    """
+    try:
+        return spot_check_values(edges, pdf_text, client, sample_size=sample_size)
+    except json.JSONDecodeError:
+        print(
+            "    [WARN] Batch spot-check JSON parse failed. Trying individual ...",
+            file=sys.stderr,
+        )
+        # Fallback: check edges one at a time
+        results = []
+        checkable = []
+        for i, e in enumerate(edges):
+            lit = e.get("literature_estimate", {})
+            reported = (
+                lit.get("reported_HR")
+                or lit.get("reported_OR")
+                or lit.get("reported_RR")
+            )
+            if reported is not None and isinstance(reported, (int, float)):
+                checkable.append((i, e, reported))
+
+        for idx, (i, e, reported) in enumerate(checkable[:sample_size]):
+            rho = e.get("epsilon", {}).get("rho", {})
+            try:
+                prompt = (
+                    f"Verify: {rho.get('X', '?')} -> {rho.get('Y', '?')}\n"
+                    f"Extracted value: {reported}\n"
+                    f'Reply JSON: {{"verdict": "correct/incorrect/not_found", '
+                    f'"correct_value": null}}\n\n'
+                    f"Paper (first 15000 chars):\n{pdf_text[:15000]}"
+                )
+                result = client.call_json(prompt)
+                result["edge_index"] = i
+                result["edge_id"] = e.get("edge_id", "?")
+                results.append(result)
+            except Exception as ex:
+                results.append(
+                    {
+                        "edge_index": i,
+                        "edge_id": e.get("edge_id", "?"),
+                        "verdict": "error",
+                        "note": str(ex),
+                    }
+                )
+
+        return (
+            results if results else [{"status": "error", "reason": "All checks failed"}]
+        )
+
+
 # ---------------------------------------------------------------------------
 # Pipeline class
 # ---------------------------------------------------------------------------
@@ -459,10 +636,11 @@ def step3_review(
 
 class EdgeExtractionPipeline:
     """
-    Four-step pipeline:
+    Five-step pipeline:
       Step 0: Classify paper type
       Step 1: Enumerate all statistical edges (with deduplication)
-      Step 2: Fill each edge into the HPP template (with semantic validation + retry)
+      Step 1.5: Pre-validate (hard + soft check, no LLM)
+      Step 2: Fill each edge into HPP template (simplified, no retry)
       Step 3: Review, rerank, consistency check, spot-check, quality report
     """
 
@@ -476,8 +654,8 @@ class EdgeExtractionPipeline:
         ocr_validate_pages: bool = True,
         hpp_dict_path: Optional[str] = None,
         template_path: Optional[str] = None,
-        # Step 2 retry options
-        max_retries: int = 2,
+        # Step 2 retry options (kept for API compat but no longer used)
+        max_retries: int = 0,
         # Step 3 options
         enable_step3: bool = True,
         enable_rerank: bool = True,
@@ -541,7 +719,7 @@ class EdgeExtractionPipeline:
 
         pdf_text = self._get_pdf_text(pdf_path)
 
-        # -- Step 0: Classify (skip if cached) --
+        # -- Step 0: Classify --
         step0_cached = False
         if resume and pdf_dir and (pdf_dir / "step0_classification.json").exists():
             with open(
@@ -563,7 +741,7 @@ class EdgeExtractionPipeline:
         if pdf_dir and not step0_cached:
             save_json(pdf_dir / "step0_classification.json", classification)
 
-        # -- Step 1: Enumerate edges (skip if cached) --
+        # -- Step 1: Enumerate edges --
         step1_cached = False
         if resume and pdf_dir and (pdf_dir / "step1_edges.json").exists():
             with open(pdf_dir / "step1_edges.json", "r", encoding="utf-8") as f:
@@ -584,19 +762,27 @@ class EdgeExtractionPipeline:
             if pdf_dir:
                 save_json(pdf_dir / "step1_edges.json", step1_result)
 
-        # -- Step 2: Fill templates (with semantic validation + retry) --
+        # -- Step 1.5: Pre-validate edges (NO LLM calls) --
+        edges_list, preval_report = step1_5_prevalidate(
+            edges_list, pdf_text, evidence_type
+        )
+        if pdf_dir:
+            save_json(pdf_dir / "step1_5_prevalidation.json", preval_report)
+
+        # -- Step 2: Fill templates (simplified, no retry) --
         print(
             f"\n[Step 2] Filling templates for {len(edges_list)} edges ...",
             file=sys.stderr,
         )
         all_filled_edges: List[Dict] = []
-        total_retries = 0
 
         for i, edge in enumerate(edges_list):
             idx = edge.get("edge_index", i + 1)
-            y_short = str(edge.get("Y", ""))
+            y_short = str(edge.get("Y", ""))[:60]
+            eq_pre = edge.get("_prevalidation", {}).get("equation_type", "?")
             print(
-                f"\n  [{idx}/{len(edges_list)}] Filling: -> {y_short} ...",
+                f"\n  [{idx}/{len(edges_list)}] Filling: -> {y_short} "
+                f"(pre-validated: {eq_pre}) ...",
                 file=sys.stderr,
             )
 
@@ -610,7 +796,6 @@ class EdgeExtractionPipeline:
                 pdf_name=pdf_name,
                 template_path=self.template_path,
                 hpp_dict_path=self.hpp_dict_path,
-                max_retries=self.max_retries,
             )
 
             all_filled_edges.append(filled)
@@ -618,22 +803,13 @@ class EdgeExtractionPipeline:
             eid = filled.get("edge_id", f"#{idx}")
             eq = filled.get("equation_type", "?")
             validation = filled.get("_validation", {})
-            retries = validation.get("retries_used", 0)
-            total_retries += retries
             sem_valid = validation.get("is_semantically_valid", "?")
             print(
-                f"         Done: {eid} (equation_type={eq}, "
-                f"semantic_valid={sem_valid}, retries={retries})",
+                f"         Done: {eid} (equation_type={eq}, semantic_valid={sem_valid})",
                 file=sys.stderr,
             )
 
-        if total_retries > 0:
-            print(
-                f"\n[Step 2] Total retries across all edges: {total_retries}",
-                file=sys.stderr,
-            )
-
-        # -- Step 3: Review & Quality Assessment --
+        # -- Step 3: Review --
         quality_report = None
         if self.enable_step3 and all_filled_edges:
             all_filled_edges, quality_report = step3_review(
@@ -690,7 +866,7 @@ class EdgeExtractionPipeline:
         evidence_type: Optional[str] = None,
         output_dir: Optional[str] = None,
     ) -> Any:
-        """Run a single pipeline step (classify, edges, or review)."""
+        """Run a single pipeline step."""
         pdf_text = self._get_pdf_text(pdf_path)
 
         if step == "classify":

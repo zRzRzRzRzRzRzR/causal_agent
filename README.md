@@ -38,7 +38,7 @@ PDF 论文
 └────────┬─────────────┘
          │
          ▼
-   edges.json + step3_review.json
+   edges.json + review.json
 ```
 
 ### 单边约束

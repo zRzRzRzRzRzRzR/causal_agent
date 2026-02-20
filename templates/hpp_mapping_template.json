@@ -57,27 +57,52 @@
     // 格式示例: "λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γ₁·Age + γ₂·Sex)"
     // 作用: 管线执行时使用此方程
     "equation_formula": "基于E1-6框架构建的数学公式字符串",
-    // ─── 论文原文报告的方程 ───
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ─── equation_formula_reported（独立字段）───
     // 用于与 equation_formula (E1-6 框架方程) 进行双重校验 (dual-check)
     // 此方程独立于 E1-6 框架，不必与 E1-6 模板格式相同
+    // ⚠ 所有子字段不允许为 null，尽量使用枚举值/短标签/数值
     //
-    // ⚠ 强制约束:
-    //   1. 此字段 **绝对不允许为 null**，必须始终填写
-    //   2. 值必须是 **数学方程字符串**（含变量符号、运算符、函数），
-    //      **禁止填写文字描述**（如 "使用了 Cox 回归" 是不合规的）
-    //
-    // 填写规则:
-    //   情况 1: 论文中有明确的数学方程
-    //     → 直接从 Methods / Statistical Analysis 等章节中摘录原始方程
-    //     → 例: "h(t|X) = h₀(t)exp(β₁·LifestyleScore + β₂·Age + β₃·Sex + β₄·TDI)"
-    //
-    //   情况 2: 论文未给出明确方程，但描述了统计方法
-    //     → 根据论文中对模型类型、因变量、自变量、调整变量等描述，
-    //       自行重构出一个等价的数学方程（不必套用 E1-6 模板）
-    //     → 例: 论文描述 "We used Cox proportional hazards model adjusting for age and sex"
-    //       → 重构为: "h(t) = h₀(t)·exp(β·X + γ₁·age + γ₂·sex)"
-    //     → 注意: 重构结果必须是方程形式，不能是文字总结
-    "equation_formula_reported": "论文中报告或从文献方法描述重构的数学方程字符串（不允许为null）",
+    // source = "extracted" → 论文有明确方程，直接摘录
+    // source = "reconstructed" → 论文无方程，根据方法描述重构
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    "equation_formula_reported": {
+        // 数学方程字符串（不允许 null / 文字描述）
+        "equation": "h(t) = h₀(t)·exp(β·X + γ₁·Z₁ + γ₂·Z₂)",
+        // "extracted" | "reconstructed"
+        "source": "extracted",
+        // "Cox" | "logistic" | "linear" | "Poisson" | "neg_binomial" |
+        // "linear_mixed" | "GEE" | "meta_RE" | "meta_FE" | "probit" | "other"
+        "model_type": "Cox",
+        // "log" | "logit" | "identity" | "probit" | "cloglog"
+        "link_function": "log",
+        // "HR" | "OR" | "RR" | "IRR" | "MD" | "BETA" | "RD" | "logHR" | "logOR" | "logRR"
+        "effect_measure": "HR",
+        // 论文原始尺度的效应值（可直接回论文核对）
+        //   ratio 类: 原始值 (如 HR=0.84)，literature_estimate.theta_hat 存的是 ln(0.84)
+        //   difference 类: 原始值 (如 β=-3.2)，与 theta_hat 相同
+        "reported_effect_value": 0.84,
+        // 论文原始尺度 CI [下界, 上界]
+        //   ratio 类: 原始值 (如 [0.78, 0.90])，literature_estimate.ci 存的是 log 值
+        //   difference 类: 原始值，与 literature_estimate.ci 相同
+        "reported_ci": [
+            0.78,
+            0.90
+        ],
+        // 论文报告的 p 值（字符串，如 "< 0.001" 或 "0.035"）
+        "reported_p": "< 0.001",
+        // ─── 通路节点（此 reported_effect_value 的 X→Y 及协变量）───
+        // X: 暴露/自变量短标签（= epsilon.rho.X）
+        "X": "Healthy Lifestyle Score",
+        // Y: 结局/因变量短标签（= epsilon.rho.Y）
+        "Y": "Hypertension",
+        // Z: 协变量列表（= epsilon.rho.Z）
+        "Z": [
+            "Age",
+            "Sex",
+            "TDI"
+        ]
+    },
     "epsilon": {
         // ─── Pi: 人群标签 ───
         // 论文的纳入标准/目标人群，用于人群可比性分层
@@ -92,7 +117,7 @@
             }
         },
         // ─── o: 结局坐标 ───
-        // name: 结局变量名称（从论文 outcome 提取）
+        // name: 结局变量名称（从论文 outcome 提取）/
         // type: "binary" (有/无事件) | "continuous" (连续指标) | "survival" (时间到事件)
         "o": {
             "name": "结局变量名称",
@@ -171,8 +196,10 @@
         ],
         // ci_level: 置信水平，默认 0.95
         "ci_level": 0.95,
-        // p_value: p 值，如论文报告（可为 null）
-        "p_value": 0.001,
+        // p_value: 论文报告的 p 值（字符串，保留论文原文写法，如 "< 0.001" 或 "0.035"）
+        // 与 equation_formula_reported.reported_p 格式一致
+        // 如经过验证但没有明确数字，可以通过ci_level和theta_hat推算，然后填入，比如对约 22 种疾病做 Bonferroni 校正，阈值为 0.05 / 22 ≈ 0.00227。校正后显著意味着原始 p 一定 < 0.0023。
+        "p_value": "< 0.001",
         // n: 总样本量
         "n": 170000,
         // design: 研究设计类型
@@ -213,12 +240,15 @@
         // tentative: 数据集中没有直接对应的字段，但可以通过现有字段计算得出（例如：BMI若未直接提供，需由身高体重计算）。，仅为猜测，不确定匹配是否正确。
         // missing: 在提供的 JSON 文件中完全找不到相关数据集或字段。
         "X": {
+            "name": "暴露变量名称",
             "dataset": "016-blood_tests",
             "field": "bt__ldl_cholesterol_float_value",
             "status": "exact"
         },
         // Y: 结局变量的 HPP 字段（所有方程类型必需）
+        // name: 论文中该变量的名称（应与 epsilon.rho.Y 一致）
         "Y": {
+            "name": "结局变量名称",
             "dataset": "021-medical_conditions",
             "field": "icd11_code",
             "status": "exact"
@@ -231,16 +261,19 @@
         //       三处列表必须保持一致，否则管线应产生 warning flag
         "Z": [
             {
+                "name": "协变量1名称",
                 "dataset": "001-demographics",
                 "field": "age_at_research_stage",
                 "status": "exact"
             },
             {
+                "name": "协变量2名称",
                 "dataset": "001-demographics",
                 "field": "sex",
                 "status": "exact"
             },
             {
+                "name": "协变量3名称",
                 "dataset": "002-anthropometrics",
                 "field": "bmi",
                 "status": "exact"
@@ -251,6 +284,7 @@
         // E4 估计器会验证 data["M"] 列存在
         // "__required_when": "equation_type == E4"
         "M": {
+            "name": "中介变量名称",
             "dataset": "016-blood_tests",
             "field": "bt__crp_float_value",
             "status": "exact"
@@ -260,6 +294,7 @@
         // E6 估计器会验证 data["X2"] 列存在
         // "__required_when": "equation_type == E6"
         "X2": {
+            "name": "第二处理变量名称",
             "dataset": "015-medications",
             "field": "med__statin_use",
             "status": "exact"

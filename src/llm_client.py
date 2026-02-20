@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -61,7 +62,7 @@ class GLMClient:
     def call_json(
         self,
         prompt: str,
-        system_prompt: str = "请你遵循我的指令，请严格以 JSON 格式输出。",
+        system_prompt: str = "请你遵循我的指令，请严格以 JSON 格式输出。不要生成任何额外的内容。",
         temperature: float = _DEFAULT_TEMPERATURE,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
     ) -> Any:
@@ -72,7 +73,33 @@ class GLMClient:
             max_tokens=max_tokens,
             response_format={"type": "json_object"},
         )
-        return json.loads(raw)
+
+        try:
+            return json.loads(raw)
+
+        except json.JSONDecodeError:
+            pass
+
+        cleaned = raw.strip()
+
+        code_block_match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL)
+        if code_block_match:
+            cleaned = code_block_match.group(1).strip()
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        json_match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
+        if json_match:
+            candidate = json_match.group(1)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+
+        raise ValueError(f"模型输出无法解析为 JSON：\n{raw}")
 
     def call_vision(
         self,

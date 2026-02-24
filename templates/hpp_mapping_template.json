@@ -7,6 +7,260 @@
     // 用于溯源和上下文理解（管线代码不直接通过这些字段运行，但对人类验证至关重要）
     "paper_title": "论文完整标题",
     "paper_abstract": "论文摘要文本...",
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ─── 研究队列/数据集信息 (Study Cohort) ───
+    // 描述论文中实际使用的原始数据队列的详细信息
+    // 用于评估 HPP 数据与文献数据的人群可比性 (Population Comparability)
+    //
+    // ⚠ is_reported 标记位说明：
+    //   每个子字段均包含 is_reported (boolean) 标记，用于区分两种情况：
+    //   ┌─────────────────────┬──────────────────────────────────────────┐
+    //   │ is_reported = true  │ 论文中明确提及/报告了该信息               │
+    //   │                     │ → value 填入从论文中提取的实际值          │
+    //   ├─────────────────────┼──────────────────────────────────────────┤
+    //   │ is_reported = false │ 论文全文中未提及该信息（文献未报告）       │
+    //   │                     │ → value 填 ""（空字符串）                │
+    //   └─────────────────────┴──────────────────────────────────────────┘
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    "study_cohort": {
+        // ─── sample_size: 总样本量 ───
+        // 含义: 论文中纳入最终分析的受试者/参与者总数
+        // 提取来源: 通常出现在论文的 Methods → Study Population 或 Results 首段
+        // 常见表述: "N=1,234", "a total of 500 patients were included",
+        //          "our cohort comprised 10,523 participants",
+        //          "after exclusion, 8,456 subjects remained"
+        // 填写规则:
+        //   - value (string): 直接摘录论文原文中描述样本量的语句片段
+        //     不要仅填数字，需保留论文的上下文描述以便回溯核对
+        //     示例: "N=502,490", "a total of 1,234 patients",
+        //           "168,726 participants after exclusion criteria applied"
+        //   - is_reported (boolean): 论文是否明确报告了样本量
+        //     true  — 论文中有明确的样本量数字
+        //     false — 论文未提供具体样本量（极少见，但可能出现于部分综述类文献）
+        // 与其他字段的关系:
+        //   此处 value 应与 literature_estimate.n 的数值保持一致
+        //   literature_estimate.n 存数值型, 此处存原文描述型
+        "sample_size": {
+            "value": "N=502,490",
+            "is_reported": true
+        },
+        // ─── age: 年龄描述 ───
+        // 含义: 队列人群的年龄分布特征（基线时的年龄）
+        // 提取来源: 通常出现在论文的 Table 1 (Baseline Characteristics)
+        //          或 Methods → Study Population 中
+        // 常见表述:
+        //   均值±标准差: "mean age 58.3±12.1 years"
+        //   中位数(IQR):  "median age 63 (IQR 55-71) years"
+        //   仅范围:       "aged 40-69 years at enrollment"
+        //   混合:         "mean age 56.5 years (range 40-69)"
+        // 填写规则:
+        //   - value (string): 直接摘录论文原文中描述年龄的语句片段
+        //     尽可能保留统计量类型 (mean/median) 和离散度 (SD/IQR/range)
+        //     示例: "mean age 58.3±12.1 years"
+        //           "median age 63 (IQR 55-71)"
+        //           "aged 40-69 years at recruitment"
+        //   - is_reported (boolean): 论文是否报告了年龄信息
+        //     true  — 论文中有年龄描述（均值/中位数/范围中至少有一项）
+        //     false — 论文完全未提及研究人群的年龄信息
+        // 备注: 如论文分组报告 (如男/女分开报告)，
+        //       可合并为 "men: 57.2±10.3, women: 59.1±11.5"
+        "age": {
+            "value": "mean age 56.5 years (range 40-69)",
+            "is_reported": true
+        },
+        // ─── sex: 性别构成 ───
+        // 含义: 队列人群的性别/生物学性别分布
+        // 提取来源: 通常出现在论文的 Table 1 (Baseline Characteristics)
+        //          或 Methods → Study Population 中
+        // 常见表述:
+        //   百分比: "62% male", "54.4% female"
+        //   人数:   "3,421 men and 4,102 women"
+        //   比例:   "male-to-female ratio 1.2:1"
+        //   单一:   "all female participants", "male only cohort"
+        // 填写规则:
+        //   - value (string): 直接摘录论文原文中描述性别构成的语句片段
+        //     优先使用百分比表述以便量化比较
+        //     示例: "54.4% female"
+        //           "62% male, 38% female"
+        //           "3,421 men (45.4%) and 4,102 women (54.6%)"
+        //   - is_reported (boolean): 论文是否报告了性别构成
+        //     true  — 论文中有性别分布描述
+        //     false — 论文未提及性别构成（罕见，但可能出现于某些汇总分析中）
+        // 备注: 如论文使用 "gender" 而非 "sex"，仍按原文提取，
+        //       下游管线不对 sex/gender 做语义区分
+        "sex": {
+            "value": "54.4% female",
+            "is_reported": true
+        },
+        // ─── disease_indication: 目标疾病/适应症 ───
+        // 含义: 论文研究的目标疾病、健康结局或适应症
+        //       即该因果边所关注的疾病/健康状态
+        // 提取来源: 论文标题、摘要的 Objective/Aim 部分、
+        //          或 Methods → Outcome Definition 中
+        // 常见表述:
+        //   具体疾病:  "type 2 diabetes mellitus", "HER2+ breast cancer"
+        //   宽泛结局:  "cardiovascular disease", "all-cause mortality"
+        //   复合终点:  "MACE (major adverse cardiovascular events)"
+        //   亚型指定:  "non-small cell lung cancer (NSCLC), stage III-IV"
+        // 填写规则:
+        //   - value (string): 填入论文中定义的目标疾病/结局名称
+        //     优先使用论文原文的疾病名称（英文），保留亚型/分期等修饰语
+        //     如果论文研究多个疾病结局，填当前 edge 对应的那个结局
+        //     示例: "type 2 diabetes"
+        //           "hypertension"
+        //           "major adverse cardiovascular events (MACE)"
+        //           "all-cause mortality"
+        //   - is_reported (boolean): 论文是否明确指定了目标疾病
+        //     true  — 论文中有明确的疾病/结局定义
+        //     false — 论文未明确指定目标疾病（理论上不应出现，因为结局是必要信息）
+        // 与其他字段的关系:
+        //   应与 epsilon.o.name (结局变量名称) 保持一致或包含关系
+        //   epsilon.o.name 是标准化短标签, 此处保留论文原始表述
+        "disease_indication": {
+            "value": "hypertension",
+            "is_reported": true
+        },
+        // ─── study_design: 研究设计类型 ───
+        // 含义: 论文的流行病学/临床研究设计类型
+        //       决定了因果推断的强度和潜在偏倚方向
+        // 提取来源: 论文的 Methods → Study Design 部分，
+        //          或摘要的 Design/Setting 部分
+        // 常见表述:
+        //   "prospective cohort study", "retrospective cohort study"
+        //   "randomized controlled trial (RCT)"
+        //   "nested case-control study", "cross-sectional survey"
+        //   "two-sample Mendelian randomization study"
+        //   "systematic review and meta-analysis"
+        // 填写规则:
+        //   - value (string): 填入论文声明的研究设计类型
+        //     优先使用以下标准化短标签（如论文表述可直接归类）:
+        //       "prospective_cohort"    — 前瞻性队列研究
+        //       "retrospective_cohort"  — 回顾性队列研究
+        //       "RCT"                   — 随机对照试验
+        //       "cross_sectional"       — 横截面研究
+        //       "case_control"          — 病例对照研究
+        //       "nested_case_control"   — 巢式病例对照研究
+        //       "case_cohort"           — 病例队列研究
+        //       "MR"                    — 孟德尔随机化研究
+        //       "meta_analysis"         — 系统综述/Meta 分析
+        //       "registry_based"        — 基于登记数据的研究
+        //       "ecological"            — 生态学研究
+        //       "other"                 — 其他
+        //     如论文设计不完全匹配上述标签，可在标签后附加描述
+        //     示例: "prospective_cohort (population-based)"
+        //   - is_reported (boolean): 论文是否明确声明了研究设计类型
+        //     true  — 论文中有明确的研究设计描述
+        //     false — 论文未明确声明设计类型（需从方法细节中推断）
+        // 与其他字段的关系:
+        //   应与 literature_estimate.design 保持一致
+        //   literature_estimate.design 是精简枚举, 此处可保留更多细节
+        "study_design": {
+            "value": "prospective_cohort",
+            "is_reported": true
+        },
+        // ─── country_or_region: 国家或地区 ───
+        // 含义: 研究数据采集/队列人群所在的国家或地理区域
+        //       影响种族遗传背景、医疗体系差异、疾病谱和环境暴露
+        // 提取来源: 论文的 Methods → Study Setting/Population 部分，
+        //          或摘要中的研究背景描述
+        // 常见表述:
+        //   单中心: "conducted in the United Kingdom"
+        //   多中心: "multicenter study across 5 European countries"
+        //   具体机构: "from the UK Biobank, a large population-based cohort in England"
+        //   地区级:  "nationwide registry in Denmark"
+        // 填写规则:
+        //   - value (string): 填入论文描述的研究开展国家/地区
+        //     优先使用国家名，多国研究列出主要国家或地区标签
+        //     示例: "United Kingdom"
+        //           "United States"
+        //           "multicenter study in the US and Europe"
+        //           "China (Beijing, Shanghai)"
+        //           "South Korea, nationwide"
+        //           "22 countries across 5 continents"
+        //   - is_reported (boolean): 论文是否报告了研究地点
+        //     true  — 论文中有明确的国家/地区信息
+        //     false — 论文未明确提及研究开展地点（罕见）
+        // 备注: 对于 meta-analysis，如涉及多个国家的纳入研究，
+        //       填 "multinational meta-analysis" 或列出主要贡献国家
+        "country_or_region": {
+            "value": "United Kingdom",
+            "is_reported": true
+        },
+        // ─── data_source: 数据来源 ───
+        // 含义: 研究使用的原始数据的类型/来源渠道
+        //       不同数据来源有不同的质量特征、覆盖范围和潜在偏倚
+        // 提取来源: 论文的 Methods → Data Source / Study Setting 部分
+        // 常见表述:
+        //   特定数据库: "data were obtained from the UK Biobank"
+        //   EHR 系统:   "electronic health records from Kaiser Permanente"
+        //   登记数据库: "Danish National Patient Registry"
+        //   保险理赔:   "Medicare fee-for-service claims data"
+        //   临床试验:   "data from the ACCORD trial"
+        //   自建队列:   "prospectively enrolled patients at our institution"
+        // 填写规则:
+        //   - value (string): 填入论文声明的数据来源
+        //     优先使用以下标准化短标签（如可归类）:
+        //       "EHR"                — 电子健康档案 / 电子病历系统
+        //       "registry"           — 国家/地区级疾病登记数据库
+        //       "claims"             — 医疗保险理赔/索赔数据
+        //       "biobank"            — 大型生物样本库（如 UK Biobank）
+        //       "clinical_trial"     — 临床试验数据（RCT 或其他试验）
+        //       "survey"             — 全国性/地区性健康调查（如 NHANES）
+        //       "hospital_based"     — 单中心/多中心医院数据
+        //       "primary_care"       — 基层医疗/全科医生数据
+        //       "administrative"     — 行政管理数据
+        //       "self_reported"      — 自我报告/问卷数据
+        //       "linked_dataset"     — 多源链接数据集
+        //       "other"              — 其他
+        //     如有具体数据库名称，在标签后附加
+        //     示例: "biobank (UK Biobank)"
+        //           "EHR (Kaiser Permanente)"
+        //           "registry (SEER cancer registry)"
+        //           "claims (Medicare)"
+        //   - is_reported (boolean): 论文是否明确说明了数据来源
+        //     true  — 论文中有明确的数据来源描述
+        //     false — 论文未明确说明数据来源渠道
+        // 备注: 部分研究可能使用多个数据源的链接
+        //       （如 UK Biobank + Hospital Episode Statistics），
+        //       此时填主数据源，链接数据源用括号附加
+        "data_source": {
+            "value": "biobank (UK Biobank)",
+            "is_reported": true
+        },
+        // ─── follow_up_duration: 随访时长 ───
+        // 含义: 从基线评估到最后一次结局观测的时间跨度
+        //       仅适用于纵向研究设计（队列研究、RCT、生存分析等）
+        //       横截面研究 (cross-sectional) 本质上无随访期，
+        //       此时 is_reported 设为 false
+        // 提取来源: 论文的 Methods → Follow-up 或 Results 首段
+        // 常见表述:
+        //   中位数:    "median follow-up of 7.1 years (IQR 6.3-7.8)"
+        //   均值:      "mean follow-up 5.2 ± 1.8 years"
+        //   最大值:    "participants were followed for up to 14 years"
+        //   固定窗口:  "12-month follow-up period"
+        //   截止日期:  "follow-up until December 31, 2022"
+        // 填写规则:
+        //   - value (string): 直接摘录论文中关于随访时长的描述
+        //     保留统计量类型 (median/mean) 和离散度/范围信息
+        //     示例: "median follow-up 12.2 years (IQR 11.1-13.0)"
+        //           "mean follow-up 5.2 ± 1.8 years"
+        //           "up to 14 years of follow-up"
+        //           "12-month follow-up"
+        //           "follow-up through December 2022"
+        //   - is_reported (boolean): 论文是否报告了随访时长
+        //     true  — 论文中有随访时长的描述
+        //     false — 论文未报告随访时长
+        //             (1) 横截面研究天然无此项，设 false
+        //             (2) 队列研究未报告随访信息（少见，属于报告缺陷），设 false
+        // 与其他字段的关系:
+        //   应与 epsilon.tau.core.horizon 保持一致
+        //   epsilon.tau.core.horizon 使用 ISO 8601 格式 (如 "P12Y"),
+        //   此处保留论文原始表述以便回溯核对
+        "follow_up_duration": {
+            "value": "median follow-up 12.2 years",
+            "is_reported": true
+        }
+    },
     // ─── 方程类型 ───
     // 从以下 6 种中选择一个，LLM 需根据论文的统计方法和研究设计判断：
     //

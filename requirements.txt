@@ -3,3 +3,4 @@ python-dotenv>=1.0.0
 zai-sdk>=0.2.2
 pre-commit>=4.5.1
 json5>=0.13.0
+pymupdf>=1.27.1

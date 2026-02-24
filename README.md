@@ -41,6 +41,25 @@ PDF 论文
    edges.json + review.json
 ```
 
+输出结果流程图
+```
+Step 2 每条边的输出
+  → 符合模板结构的 JSON
+  → Step 1.5 预验证强制覆盖（equation_type, model, mu, theta_hat, ci）
+  → 附加 _validation 元数据
+  ↓
+所有边汇总成列表
+  ↓
+step2_edges_raw.json  ← 【新增】保存检查点（rerank 之前的状态）
+  ↓
+Step 3a rerank → 【原地修改】hpp_mapping.X 和 hpp_mapping.Y 的 dataset/field
+Step 3b 一致性检查 → 只读，不改边
+Step 3c 抽查数值 → 只读，不改边
+  ↓
+edges.json  ← 最终输出（包含 rerank 后的 hpp_mapping）
+step3_review.json  ← 质量报告（改了什么、哪些有问题）
+```
+
 ### 单边约束
 
 每条边 = **一个 X → 一个 Y**。同一论文中同一暴露变量对多个结局的效应会被拆分为多条独立的边，各自生成独立的 JSON 对象。

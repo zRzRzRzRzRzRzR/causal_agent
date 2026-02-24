@@ -1,975 +1,1 @@
-"""
-semantic_validator.py -- Deep semantic validation for filled edges.
-
-Goes beyond format checks (template_utils.validate_filled_edge) to verify
-that the LLM output is *logically correct*:
-
-  1. equation_type <-> literature_estimate.model consistency
-  2. equation_type <-> equation_formula keyword consistency
-  3. equation_type <-> mu.core (family/type/scale) consistency
-  4. equation_type <-> conditional fields (M for E4, X2 for E6)
-  5. alpha.id_strategy <-> evidence_type consistency
-  6. equation_formula structural correctness (hazard/logit/linear patterns)
-  7. rho.Z <-> literature_estimate.adjustment_set consistency
-
-Also provides fuzzy edge deduplication for Step 1 output.
-"""
-
-import math
-import re
-from typing import Any, Dict, List, Optional, Set, Tuple
-
-# ---------------------------------------------------------------------------
-# 1. Canonical mapping tables (from step2_fill_template.md prompt)
-# ---------------------------------------------------------------------------
-
-# model -> allowed equation_types
-MODEL_TO_EQUATION_TYPE: Dict[str, Set[str]] = {
-    "logistic": {"E1"},
-    "linear": {"E1"},
-    "poisson": {"E1"},
-    "ANCOVA": {"E1"},
-    "IVW": {"E1"},
-    "t-test": {"E1"},
-    "Cox": {"E2"},
-    "parametric_survival": {"E2"},
-    "KM": {"E2"},
-    "LMM": {"E3"},
-    "GEE": {"E3"},
-    "mixed": {"E3"},
-    "mediation": {"E4"},
-    "path_analysis": {"E4"},
-    "counterfactual": {"E5"},
-    "S-learner": {"E5"},
-    "T-learner": {"E5"},
-    "interaction_model": {"E6"},
-    "factorial": {"E6"},
-}
-
-# equation_type -> allowed models (inverse of above)
-EQUATION_TYPE_TO_MODELS: Dict[str, Set[str]] = {}
-for _model, _eqs in MODEL_TO_EQUATION_TYPE.items():
-    for _eq in _eqs:
-        EQUATION_TYPE_TO_MODELS.setdefault(_eq, set()).add(_model)
-
-# equation_type -> expected mu.core.type values
-EQUATION_TYPE_TO_MU_TYPES: Dict[str, Set[str]] = {
-    "E1": {"OR", "BETA", "MD", "SMD", "RR", "RD"},
-    "E2": {"HR", "RR"},
-    "E3": {"BETA", "MD", "SMD"},
-    "E4": {"BETA", "MD", "OR", "HR", "RR"},
-    "E5": {"MD", "BETA", "SMD"},
-    "E6": {"BETA", "MD", "OR", "HR", "RR"},
-}
-
-# equation_type -> keyword patterns expected in equation_formula
-FORMULA_KEYWORDS: Dict[str, List[str]] = {
-    "E1": [r"logit", r"log\s*\(", r"P\(Y", r"\balpha\b.*\bbeta\b", r"linear", r"E\[Y"],
-    "E2": [r"lambda|λ", r"hazard", r"exp\s*\(", r"λ₀", r"h\s*\(t\)", r"S\(t\)"],
-    "E3": [r"random", r"u_i|b_i", r"cluster", r"GEE", r"mixed", r"longitudinal"],
-    "E4": [r"mediat", r"indirect", r"M\b", r"ACME", r"path", r"α.*β"],
-    "E5": [r"ITE|CATE", r"counterfactual", r"Y\^?\(1\)|Y\^?\(0\)", r"potential"],
-    "E6": [r"interact", r"X1.*X2|X2.*X1", r"modifier", r"×|\\times"],
-}
-
-# equation_type -> formula patterns that are CONTRADICTORY (should NOT appear)
-FORMULA_CONTRADICTIONS: Dict[str, List[str]] = {
-    "E1": [r"λ₀\(t\)", r"hazard", r"S\(t\)", r"h\(t\)"],
-    "E2": [r"\blogit\b", r"P\(Y\s*=\s*1\)"],
-    "E3": [r"λ₀\(t\)", r"hazard"],
-    "E4": [],
-    "E5": [],
-    "E6": [],
-}
-
-# alpha.id_strategy -> evidence_type consistency
-ID_STRATEGY_TO_EVIDENCE: Dict[str, Set[str]] = {
-    "rct": {"interventional"},
-    "observational": {"causal", "associational", "mechanistic"},
-    "MR": {"causal"},
-    "IV": {"causal"},
-    "pooled_estimates": {"causal", "associational", "mechanistic", "interventional"},
-}
-
-# mu.core.type -> expected family and scale
-MU_TYPE_FAMILY_SCALE: Dict[str, Tuple[str, str]] = {
-    "HR": ("ratio", "log"),
-    "OR": ("ratio", "log"),
-    "RR": ("ratio", "log"),
-    "logHR": ("ratio", "log"),
-    "logOR": ("ratio", "log"),
-    "logRR": ("ratio", "log"),
-    "MD": ("difference", "identity"),
-    "BETA": ("difference", "identity"),
-    "SMD": ("difference", "identity"),
-    "RD": ("difference", "identity"),
-}
-
-
-# ---------------------------------------------------------------------------
-# 2. Core semantic validation function
-# ---------------------------------------------------------------------------
-
-
-def validate_semantics(
-    edge_json: Dict,
-    evidence_type: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Run all semantic checks on a single filled edge.
-
-    Returns a list of issue dicts, each with:
-      - check: str        (check identifier, e.g. "model_eq_type_mismatch")
-      - severity: str     ("error" | "warning")
-      - message: str      (human-readable description)
-      - field: str        (dot-path of the problematic field)
-      - expected: Any     (what the correct value should be, if known)
-      - actual: Any       (what the edge currently has)
-    """
-    issues: List[Dict[str, Any]] = []
-
-    eq_type = edge_json.get("equation_type", "")
-    lit = edge_json.get("literature_estimate", {})
-    model = str(lit.get("model", "")).strip()
-    formula = str(edge_json.get("equation_formula", ""))
-    mu = edge_json.get("epsilon", {}).get("mu", {}).get("core", {})
-    alpha = edge_json.get("epsilon", {}).get("alpha", {})
-    rho = edge_json.get("epsilon", {}).get("rho", {})
-    hm = edge_json.get("hpp_mapping", {})
-
-    # -- Check 1: model <-> equation_type --
-    issues.extend(_check_model_equation_type(eq_type, model))
-
-    # -- Check 2: equation_formula keyword presence --
-    issues.extend(_check_formula_keywords(eq_type, formula))
-
-    # -- Check 3: equation_formula contradiction detection --
-    issues.extend(_check_formula_contradictions(eq_type, formula))
-
-    # -- Check 4: equation_formula structural patterns --
-    issues.extend(_check_formula_structure(eq_type, formula))
-
-    # -- Check 5: mu.core consistency with equation_type --
-    issues.extend(_check_mu_equation_type(eq_type, mu))
-
-    # -- Check 6: mu.core internal consistency (type <-> family/scale) --
-    issues.extend(_check_mu_internal(mu))
-
-    # -- Check 7: mu scale <-> theta_hat range plausibility --
-    issues.extend(_check_theta_plausibility(mu, lit))
-
-    # -- Check 8: conditional fields M (E4) and X2 (E6) --
-    issues.extend(_check_conditional_fields(eq_type, hm))
-
-    # -- Check 9: alpha.id_strategy <-> evidence_type --
-    if evidence_type:
-        issues.extend(_check_alpha_evidence_type(alpha, evidence_type))
-
-    # -- Check 10: rho.Z <-> adjustment_set consistency --
-    issues.extend(_check_rho_z_adjustment(rho, lit))
-
-    return issues
-
-
-# ---------------------------------------------------------------------------
-# 3. Individual check functions
-# ---------------------------------------------------------------------------
-
-
-def _check_model_equation_type(eq_type: str, model: str) -> List[Dict]:
-    """Verify that literature_estimate.model matches equation_type."""
-    if not eq_type or not model:
-        return []
-
-    allowed_models = EQUATION_TYPE_TO_MODELS.get(eq_type)
-    if allowed_models is None:
-        return []
-
-    # Normalize model string for lookup (handle case variations)
-    model_lower = model.lower().strip()
-    model_lookup = None
-    for canonical in MODEL_TO_EQUATION_TYPE:
-        if canonical.lower() == model_lower:
-            model_lookup = canonical
-            break
-
-    if model_lookup is None:
-        return [
-            {
-                "check": "model_unknown",
-                "severity": "warning",
-                "message": (
-                    f"literature_estimate.model='{model}' is not in the "
-                    f"canonical model list. Cannot verify equation_type match."
-                ),
-                "field": "literature_estimate.model",
-                "expected": sorted(EQUATION_TYPE_TO_MODELS.get(eq_type, set())),
-                "actual": model,
-            }
-        ]
-
-    allowed_eqs = MODEL_TO_EQUATION_TYPE.get(model_lookup, set())
-    if eq_type not in allowed_eqs:
-        return [
-            {
-                "check": "model_eq_type_mismatch",
-                "severity": "error",
-                "message": (
-                    f"model='{model}' requires equation_type in {sorted(allowed_eqs)}, "
-                    f"but got equation_type='{eq_type}'."
-                ),
-                "field": "equation_type",
-                "expected": sorted(allowed_eqs),
-                "actual": eq_type,
-            }
-        ]
-
-    return []
-
-
-def _check_formula_keywords(eq_type: str, formula: str) -> List[Dict]:
-    """Check that equation_formula contains expected keywords for its equation_type."""
-    if not eq_type or not formula or formula in ("null", "None", "..."):
-        return []
-
-    patterns = FORMULA_KEYWORDS.get(eq_type, [])
-    if not patterns:
-        return []
-
-    matched = any(re.search(p, formula, re.IGNORECASE) for p in patterns)
-    if not matched:
-        return [
-            {
-                "check": "formula_missing_keywords",
-                "severity": "warning",
-                "message": (
-                    f"equation_formula does not contain expected keywords for "
-                    f"equation_type='{eq_type}'. Expected patterns like: "
-                    f"{patterns[:3]}. Got formula: '{formula[:120]}...'"
-                ),
-                "field": "equation_formula",
-                "expected": patterns[:3],
-                "actual": formula[:120],
-            }
-        ]
-
-    return []
-
-
-def _check_formula_contradictions(eq_type: str, formula: str) -> List[Dict]:
-    """Check that equation_formula does NOT contain contradictory patterns."""
-    if not eq_type or not formula or formula in ("null", "None", "..."):
-        return []
-
-    contradictions = FORMULA_CONTRADICTIONS.get(eq_type, [])
-    if not contradictions:
-        return []
-
-    found = []
-    for p in contradictions:
-        if re.search(p, formula, re.IGNORECASE):
-            found.append(p)
-
-    if found:
-        return [
-            {
-                "check": "formula_contradicts_eq_type",
-                "severity": "error",
-                "message": (
-                    f"equation_formula contains patterns contradictory to "
-                    f"equation_type='{eq_type}': {found}. "
-                    f"Formula: '{formula[:120]}...'"
-                ),
-                "field": "equation_formula",
-                "expected": f"No {found} patterns for {eq_type}",
-                "actual": formula[:120],
-            }
-        ]
-
-    return []
-
-
-def _check_formula_structure(eq_type: str, formula: str) -> List[Dict]:
-    """
-    Validate formula structural correctness beyond keywords:
-    - E1 formula should have a regression form (Y = ... or logit(...) = ...)
-    - E2 formula should have a hazard/survival form
-    - E4 formula should reference a mediator variable
-    - E6 formula should have an interaction term
-    """
-    if not eq_type or not formula or formula in ("null", "None", "..."):
-        return []
-
-    issues = []
-
-    if eq_type == "E2":
-        # Cox model: formula must contain time-dependent hazard structure
-        has_time = bool(
-            re.search(r"\(t[|\s,)]|λ₀|h_0|baseline", formula, re.IGNORECASE)
-        )
-        has_exp = bool(re.search(r"exp\s*\(", formula, re.IGNORECASE))
-        if not has_time and not has_exp:
-            issues.append(
-                {
-                    "check": "formula_e2_missing_hazard",
-                    "severity": "error",
-                    "message": (
-                        "E2 (Cox/survival) formula should contain time-dependent "
-                        "hazard structure like λ(t|...) or exp(β·X). "
-                        f"Got: '{formula[:120]}'"
-                    ),
-                    "field": "equation_formula",
-                    "expected": "λ(t) = λ₀(t) · exp(β·X + ...) or equivalent",
-                    "actual": formula[:120],
-                }
-            )
-
-    if eq_type == "E4":
-        # Mediation: formula must reference a mediator (M or indirect/direct paths)
-        has_mediator = bool(
-            re.search(
-                r"\bM\b|mediator|indirect|direct|ACME|ADE", formula, re.IGNORECASE
-            )
-        )
-        if not has_mediator:
-            issues.append(
-                {
-                    "check": "formula_e4_missing_mediator",
-                    "severity": "error",
-                    "message": (
-                        "E4 (mediation) formula should reference a mediator "
-                        f"variable M. Got: '{formula[:120]}'"
-                    ),
-                    "field": "equation_formula",
-                    "expected": "Formula with M (mediator) variable",
-                    "actual": formula[:120],
-                }
-            )
-
-    if eq_type == "E6":
-        # Interaction: formula must have an interaction term (X1*X2 or X1:X2)
-        has_interaction = bool(
-            re.search(r"[*×:]|\\times|interact", formula, re.IGNORECASE)
-        )
-        if not has_interaction:
-            issues.append(
-                {
-                    "check": "formula_e6_missing_interaction",
-                    "severity": "error",
-                    "message": (
-                        "E6 (interaction) formula should contain an interaction "
-                        f"term (X1*X2 or X1×X2). Got: '{formula[:120]}'"
-                    ),
-                    "field": "equation_formula",
-                    "expected": "Formula with interaction term X1*X2",
-                    "actual": formula[:120],
-                }
-            )
-
-    if eq_type == "E1":
-        # Regression: should look like Y = ... or logit(P(Y)) = ... or E[Y|X] = ...
-        has_regression = bool(
-            re.search(
-                r"[=]|logit|log\s*\(|P\(Y|E\[Y|β|alpha|\\beta",
-                formula,
-                re.IGNORECASE,
-            )
-        )
-        if not has_regression:
-            issues.append(
-                {
-                    "check": "formula_e1_missing_regression",
-                    "severity": "warning",
-                    "message": (
-                        "E1 (static regression) formula should have regression "
-                        f"form. Got: '{formula[:120]}'"
-                    ),
-                    "field": "equation_formula",
-                    "expected": "logit(P(Y=1)) = α + β*X + ... or E[Y] = α + β*X + ...",
-                    "actual": formula[:120],
-                }
-            )
-
-    return issues
-
-
-def _check_mu_equation_type(eq_type: str, mu: Dict) -> List[Dict]:
-    """Verify mu.core.type is compatible with equation_type."""
-    if not eq_type:
-        return []
-
-    mu_type = mu.get("type", "")
-    if not mu_type:
-        return []
-
-    # Normalize: strip 'log' prefix for matching
-    normalized_type = (
-        mu_type.replace("log", "") if mu_type.startswith("log") else mu_type
-    )
-
-    allowed = EQUATION_TYPE_TO_MU_TYPES.get(eq_type, set())
-    if not allowed:
-        return []
-
-    if normalized_type not in allowed:
-        return [
-            {
-                "check": "mu_type_eq_type_mismatch",
-                "severity": "error",
-                "message": (
-                    f"mu.core.type='{mu_type}' (normalized: '{normalized_type}') "
-                    f"is not compatible with equation_type='{eq_type}'. "
-                    f"Expected one of: {sorted(allowed)}"
-                ),
-                "field": "epsilon.mu.core.type",
-                "expected": sorted(allowed),
-                "actual": mu_type,
-            }
-        ]
-
-    return []
-
-
-def _check_mu_internal(mu: Dict) -> List[Dict]:
-    """Verify mu.core.type, family, and scale are internally consistent."""
-    mu_type = mu.get("type", "")
-    family = mu.get("family", "")
-    scale = mu.get("scale", "")
-
-    if not mu_type:
-        return []
-
-    # Normalize: strip 'log' prefix
-    lookup_type = mu_type.replace("log", "") if mu_type.startswith("log") else mu_type
-    expected = MU_TYPE_FAMILY_SCALE.get(lookup_type)
-    if expected is None:
-        return []
-
-    expected_family, expected_scale = expected
-    issues = []
-
-    if family and family != expected_family:
-        issues.append(
-            {
-                "check": "mu_family_mismatch",
-                "severity": "error",
-                "message": (
-                    f"mu.core.type='{mu_type}' requires family='{expected_family}', "
-                    f"but got family='{family}'"
-                ),
-                "field": "epsilon.mu.core.family",
-                "expected": expected_family,
-                "actual": family,
-            }
-        )
-
-    if scale and scale != expected_scale:
-        issues.append(
-            {
-                "check": "mu_scale_mismatch",
-                "severity": "error",
-                "message": (
-                    f"mu.core.type='{mu_type}' requires scale='{expected_scale}', "
-                    f"but got scale='{scale}'"
-                ),
-                "field": "epsilon.mu.core.scale",
-                "expected": expected_scale,
-                "actual": scale,
-            }
-        )
-
-    return issues
-
-
-def _check_theta_plausibility(mu: Dict, lit: Dict) -> List[Dict]:
-    """
-    Verify theta_hat is on the correct scale:
-    - ratio family + log scale: theta_hat should be in roughly [-3, 3]
-    - difference family + identity scale: theta_hat should not look like a ratio
-    """
-    theta = lit.get("theta_hat")
-    if theta is None or not isinstance(theta, (int, float)):
-        return []
-
-    family = mu.get("family", "")
-    scale = mu.get("scale", "")
-    issues = []
-
-    if family == "ratio" and scale == "log":
-        # On log scale, |theta| > 3 is suspicious (corresponds to ratio > 20 or < 0.05)
-        if abs(theta) > 3:
-            issues.append(
-                {
-                    "check": "theta_log_scale_suspect",
-                    "severity": "error",
-                    "message": (
-                        f"theta_hat={theta} on log scale is suspiciously large "
-                        f"(exp({theta})={math.exp(min(theta, 10)):.2f}). "
-                        f"The LLM may have forgotten the log transform."
-                    ),
-                    "field": "literature_estimate.theta_hat",
-                    "expected": "ln(reported_ratio), typically in [-2, 2]",
-                    "actual": theta,
-                }
-            )
-
-        # Positive theta > 0.01 that looks like a raw ratio (0.5-20 range)
-        # while reported_ratio is close to theta -> forgot log
-        reported = (
-            lit.get("reported_HR") or lit.get("reported_OR") or lit.get("reported_RR")
-        )
-        if (
-            reported is not None
-            and isinstance(reported, (int, float))
-            and reported > 0
-            and abs(theta - reported) < 0.01
-            and reported != 1.0
-        ):
-            issues.append(
-                {
-                    "check": "theta_not_log_transformed",
-                    "severity": "error",
-                    "message": (
-                        f"theta_hat={theta} equals reported_ratio={reported}. "
-                        f"For ratio family with log scale, theta_hat should be "
-                        f"ln({reported})={math.log(reported):.4f}"
-                    ),
-                    "field": "literature_estimate.theta_hat",
-                    "expected": round(math.log(reported), 4),
-                    "actual": theta,
-                }
-            )
-
-    if family == "difference" and scale == "identity":
-        # Difference measures: theta should not be a typical ratio value
-        # (this is a soft heuristic -- ratios are usually 0.3-5.0 range)
-        if 0.1 < abs(theta) < 10 and isinstance(theta, float):
-            # Check if there is a reported_HR/OR/RR that matches theta
-            reported = (
-                lit.get("reported_HR")
-                or lit.get("reported_OR")
-                or lit.get("reported_RR")
-            )
-            if reported is not None and abs(theta - reported) < 0.01:
-                issues.append(
-                    {
-                        "check": "theta_scale_confusion",
-                        "severity": "warning",
-                        "message": (
-                            f"mu family='difference' but theta_hat={theta} matches "
-                            f"reported_ratio={reported}. Possible scale confusion."
-                        ),
-                        "field": "literature_estimate.theta_hat",
-                        "expected": "A mean difference or beta coefficient",
-                        "actual": theta,
-                    }
-                )
-
-    return issues
-
-
-def _check_conditional_fields(eq_type: str, hm: Dict) -> List[Dict]:
-    """
-    Verify M and X2 conditional field presence:
-    - M must be non-null only when equation_type = E4
-    - X2 must be non-null only when equation_type = E6
-    """
-    issues = []
-
-    m_mapping = hm.get("M")
-    x2_mapping = hm.get("X2")
-
-    # M field checks
-    if eq_type == "E4":
-        if m_mapping is None or (
-            isinstance(m_mapping, dict) and not m_mapping.get("field")
-        ):
-            issues.append(
-                {
-                    "check": "e4_missing_mediator",
-                    "severity": "error",
-                    "message": (
-                        "equation_type='E4' (mediation) requires hpp_mapping.M "
-                        "to be filled with the mediator variable mapping."
-                    ),
-                    "field": "hpp_mapping.M",
-                    "expected": "Non-null mediator mapping",
-                    "actual": m_mapping,
-                }
-            )
-    elif (
-        m_mapping is not None and isinstance(m_mapping, dict) and m_mapping.get("field")
-    ):
-        issues.append(
-            {
-                "check": "non_e4_has_mediator",
-                "severity": "error",
-                "message": (
-                    f"equation_type='{eq_type}' should not have hpp_mapping.M. "
-                    f"M is only valid for E4 (mediation)."
-                ),
-                "field": "hpp_mapping.M",
-                "expected": "null",
-                "actual": m_mapping,
-            }
-        )
-
-    # X2 field checks
-    if eq_type == "E6":
-        if x2_mapping is None or (
-            isinstance(x2_mapping, dict) and not x2_mapping.get("field")
-        ):
-            issues.append(
-                {
-                    "check": "e6_missing_x2",
-                    "severity": "error",
-                    "message": (
-                        "equation_type='E6' (interaction) requires hpp_mapping.X2 "
-                        "to be filled with the second treatment variable mapping."
-                    ),
-                    "field": "hpp_mapping.X2",
-                    "expected": "Non-null X2 mapping",
-                    "actual": x2_mapping,
-                }
-            )
-    elif (
-        x2_mapping is not None
-        and isinstance(x2_mapping, dict)
-        and x2_mapping.get("field")
-    ):
-        issues.append(
-            {
-                "check": "non_e6_has_x2",
-                "severity": "error",
-                "message": (
-                    f"equation_type='{eq_type}' should not have hpp_mapping.X2. "
-                    f"X2 is only valid for E6 (interaction)."
-                ),
-                "field": "hpp_mapping.X2",
-                "expected": "null",
-                "actual": x2_mapping,
-            }
-        )
-
-    return issues
-
-
-def _check_alpha_evidence_type(alpha: Dict, evidence_type: str) -> List[Dict]:
-    """Verify alpha.id_strategy is consistent with the paper's evidence_type."""
-    strategy = alpha.get("id_strategy", "")
-    if not strategy:
-        return []
-
-    allowed_evidence = ID_STRATEGY_TO_EVIDENCE.get(strategy)
-    if allowed_evidence is None:
-        return [
-            {
-                "check": "id_strategy_unknown",
-                "severity": "warning",
-                "message": (
-                    f"alpha.id_strategy='{strategy}' is not in the canonical list: "
-                    f"{sorted(ID_STRATEGY_TO_EVIDENCE.keys())}"
-                ),
-                "field": "epsilon.alpha.id_strategy",
-                "expected": sorted(ID_STRATEGY_TO_EVIDENCE.keys()),
-                "actual": strategy,
-            }
-        ]
-
-    if evidence_type not in allowed_evidence:
-        return [
-            {
-                "check": "alpha_evidence_type_mismatch",
-                "severity": "error",
-                "message": (
-                    f"alpha.id_strategy='{strategy}' expects evidence_type in "
-                    f"{sorted(allowed_evidence)}, but paper is classified as "
-                    f"'{evidence_type}'."
-                ),
-                "field": "epsilon.alpha.id_strategy",
-                "expected": sorted(allowed_evidence),
-                "actual": f"{strategy} vs {evidence_type}",
-            }
-        ]
-
-    return []
-
-
-def _check_rho_z_adjustment(rho: Dict, lit: Dict) -> List[Dict]:
-    """Verify rho.Z matches literature_estimate.adjustment_set."""
-    rho_z = rho.get("Z", [])
-    adj_set = lit.get("adjustment_set", [])
-
-    if not rho_z and not adj_set:
-        return []
-
-    # Normalize both to comparable sets
-    def _normalize_list(items):
-        if not isinstance(items, list):
-            return set()
-        return {str(item).lower().strip().replace(" ", "_") for item in items if item}
-
-    rho_set = _normalize_list(rho_z)
-    adj_set_normalized = _normalize_list(adj_set)
-
-    if not rho_set and not adj_set_normalized:
-        return []
-
-    if rho_set and adj_set_normalized and rho_set != adj_set_normalized:
-        only_in_rho = rho_set - adj_set_normalized
-        only_in_adj = adj_set_normalized - rho_set
-        if only_in_rho or only_in_adj:
-            return [
-                {
-                    "check": "rho_z_adjustment_mismatch",
-                    "severity": "warning",
-                    "message": (
-                        f"rho.Z and adjustment_set differ. "
-                        f"Only in rho.Z: {sorted(only_in_rho) if only_in_rho else 'none'}. "
-                        f"Only in adjustment_set: {sorted(only_in_adj) if only_in_adj else 'none'}."
-                    ),
-                    "field": "epsilon.rho.Z",
-                    "expected": "rho.Z == adjustment_set",
-                    "actual": f"rho.Z={sorted(rho_set)}, adj={sorted(adj_set_normalized)}",
-                }
-            ]
-
-    return []
-
-
-# ---------------------------------------------------------------------------
-# 4. Aggregate severity assessment
-# ---------------------------------------------------------------------------
-
-
-def has_blocking_errors(issues: List[Dict]) -> bool:
-    """Return True if any issue has severity='error'."""
-    return any(i.get("severity") == "error" for i in issues)
-
-
-def format_issues_for_prompt(issues: List[Dict]) -> str:
-    """
-    Format semantic issues into a readable string suitable for
-    inclusion in a correction prompt sent back to the LLM.
-    """
-    if not issues:
-        return "No semantic issues found."
-
-    lines = []
-    errors = [i for i in issues if i.get("severity") == "error"]
-    warnings = [i for i in issues if i.get("severity") == "warning"]
-
-    if errors:
-        lines.append(f"=== {len(errors)} ERRORS (must fix) ===")
-        for i, err in enumerate(errors, 1):
-            lines.append(
-                f"{i}. [{err['check']}] {err['message']}\n"
-                f"   Field: {err.get('field', '?')}\n"
-                f"   Expected: {err.get('expected', '?')}\n"
-                f"   Got: {err.get('actual', '?')}"
-            )
-
-    if warnings:
-        lines.append(f"\n=== {len(warnings)} WARNINGS (should fix if possible) ===")
-        for i, w in enumerate(warnings, 1):
-            lines.append(f"{i}. [{w['check']}] {w['message']}")
-
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# 5. Edge deduplication (for Step 1 output)
-# ---------------------------------------------------------------------------
-
-
-def _normalize_var_name(name: str) -> str:
-    """
-    Normalize a variable name for fuzzy comparison:
-    lowercase, strip punctuation, collapse whitespace/underscores,
-    remove common filler words.
-    """
-    s = str(name).lower().strip()
-    s = re.sub(r"[_\-/\s.()]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-
-    # Remove common filler tokens that do not affect identity
-    filler = {"the", "a", "an", "of", "in", "at", "for", "and", "or", "with"}
-    tokens = [t for t in s.split() if t not in filler]
-    return " ".join(tokens)
-
-
-def _token_overlap_ratio(a: str, b: str) -> float:
-    """
-    Compute Jaccard-like overlap ratio between two normalized strings.
-    Returns a float in [0, 1].
-    """
-    tokens_a = set(a.split())
-    tokens_b = set(b.split())
-    if not tokens_a or not tokens_b:
-        return 0.0
-    intersection = tokens_a & tokens_b
-    union = tokens_a | tokens_b
-    return len(intersection) / len(union)
-
-
-def deduplicate_step1_edges(
-    edges: List[Dict],
-    similarity_threshold: float = 0.75,
-) -> Tuple[List[Dict], List[Dict]]:
-    """
-    Remove duplicate edges from Step 1 output using fuzzy matching.
-
-    Two edges are considered duplicates if:
-    - Their X names are highly similar (token overlap >= threshold)
-    - Their Y names are highly similar (token overlap >= threshold)
-    - Their subgroup is the same (exact match after normalization)
-    - Their effect_scale is the same
-
-    When duplicates are found, keep the one with a numeric estimate
-    (has_numeric_estimate=True), or the first one if both have estimates.
-
-    Returns:
-        (unique_edges, removed_duplicates)
-    """
-    if len(edges) <= 1:
-        return edges, []
-
-    # Build normalized signatures
-    sigs = []
-    for e in edges:
-        x_norm = _normalize_var_name(e.get("X", ""))
-        y_norm = _normalize_var_name(e.get("Y", ""))
-        sub_norm = _normalize_var_name(e.get("subgroup", "overall"))
-        scale = str(e.get("effect_scale", "")).lower().strip()
-        c_norm = _normalize_var_name(e.get("C", ""))
-        sigs.append((x_norm, y_norm, sub_norm, scale, c_norm))
-
-    keep_mask = [True] * len(edges)
-    removed = []
-
-    for i in range(len(edges)):
-        if not keep_mask[i]:
-            continue
-        for j in range(i + 1, len(edges)):
-            if not keep_mask[j]:
-                continue
-
-            x_sim = _token_overlap_ratio(sigs[i][0], sigs[j][0])
-            y_sim = _token_overlap_ratio(sigs[i][1], sigs[j][1])
-            same_sub = sigs[i][2] == sigs[j][2]
-            same_scale = sigs[i][3] == sigs[j][3]
-            same_c = _token_overlap_ratio(sigs[i][4], sigs[j][4]) > 0.5
-
-            if (
-                x_sim >= similarity_threshold
-                and y_sim >= similarity_threshold
-                and same_sub
-                and (same_scale or same_c)
-            ):
-                # Determine which to keep: prefer the one with numeric estimate
-                e_i = edges[i]
-                e_j = edges[j]
-                i_has_est = (
-                    e_i.get("has_numeric_estimate", True)
-                    and e_i.get("estimate") is not None
-                )
-                j_has_est = (
-                    e_j.get("has_numeric_estimate", True)
-                    and e_j.get("estimate") is not None
-                )
-
-                if j_has_est and not i_has_est:
-                    # Keep j, remove i
-                    keep_mask[i] = False
-                    removed.append(
-                        {
-                            "removed_index": i,
-                            "kept_index": j,
-                            "reason": (
-                                f"Duplicate of edge {j+1}: "
-                                f"X_sim={x_sim:.2f}, Y_sim={y_sim:.2f}"
-                            ),
-                            "removed_edge": e_i,
-                        }
-                    )
-                    break
-                else:
-                    # Keep i, remove j
-                    keep_mask[j] = False
-                    removed.append(
-                        {
-                            "removed_index": j,
-                            "kept_index": i,
-                            "reason": (
-                                f"Duplicate of edge {i+1}: "
-                                f"X_sim={x_sim:.2f}, Y_sim={y_sim:.2f}"
-                            ),
-                            "removed_edge": e_j,
-                        }
-                    )
-
-    unique = [e for e, keep in zip(edges, keep_mask) if keep]
-
-    # Re-index edge_index for unique edges
-    for new_idx, e in enumerate(unique, 1):
-        e["edge_index"] = new_idx
-
-    return unique, removed
-
-
-# ---------------------------------------------------------------------------
-# 6. Enhanced cross-edge duplicate detection (for Step 3)
-# ---------------------------------------------------------------------------
-
-
-def detect_fuzzy_duplicates_step3(
-    edges: List[Dict],
-    similarity_threshold: float = 0.70,
-) -> List[Dict]:
-    """
-    Detect fuzzy duplicates among filled edges (Step 3 level).
-    Uses epsilon.rho.X, epsilon.rho.Y, subgroup, and effect measure type.
-
-    Returns list of issue dicts compatible with check_cross_edge_consistency.
-    """
-    issues = []
-    if len(edges) <= 1:
-        return issues
-
-    sigs = []
-    for e in edges:
-        rho = e.get("epsilon", {}).get("rho", {})
-        lit = e.get("literature_estimate", {})
-        x_norm = _normalize_var_name(rho.get("X", ""))
-        y_norm = _normalize_var_name(rho.get("Y", ""))
-        sub_norm = _normalize_var_name(lit.get("subgroup", "overall"))
-        mu_type = e.get("epsilon", {}).get("mu", {}).get("core", {}).get("type", "")
-        sigs.append((x_norm, y_norm, sub_norm, mu_type.lower()))
-
-    for i in range(len(edges)):
-        for j in range(i + 1, len(edges)):
-            x_sim = _token_overlap_ratio(sigs[i][0], sigs[j][0])
-            y_sim = _token_overlap_ratio(sigs[i][1], sigs[j][1])
-            same_sub = sigs[i][2] == sigs[j][2]
-            same_mu = sigs[i][3] == sigs[j][3]
-
-            if (
-                x_sim >= similarity_threshold
-                and y_sim >= similarity_threshold
-                and same_sub
-                and same_mu
-            ):
-                issues.append(
-                    {
-                        "type": "fuzzy_duplicate_edge",
-                        "severity": "warning",
-                        "message": (
-                            f"Edges #{i+1} and #{j+1} are likely duplicates: "
-                            f"X_similarity={x_sim:.2f}, Y_similarity={y_sim:.2f}, "
-                            f"same_subgroup={same_sub}, same_mu_type={same_mu}"
-                        ),
-                        "edge_indices": [i, j],
-                    }
-                )
-
-    return issues
+"""semantic_validator.py -- Deep semantic validation for filled edges.Goes beyond format checks (template_utils.validate_filled_edge) to verifythat the LLM output is *logically correct*:  1. equation_type <-> literature_estimate.model consistency  2. equation_type <-> equation_formula keyword consistency  3. equation_type <-> mu.core (family/type/scale) consistency  4. equation_type <-> conditional fields (M for E4, X2 for E6)  5. alpha.id_strategy <-> evidence_type consistency  6. equation_formula structural correctness (hazard/logit/linear patterns)  7. rho.Z <-> literature_estimate.adjustment_set consistencyAlso provides fuzzy edge deduplication for Step 1 output."""import mathimport refrom typing import Any, Dict, List, Optional, Set, Tuple# ---------------------------------------------------------------------------# 1. Canonical mapping tables (from step2_fill_template.md prompt)# ---------------------------------------------------------------------------# model -> allowed equation_typesMODEL_TO_EQUATION_TYPE: Dict[str, Set[str]] = {    "logistic": {"E1"},    "linear": {"E1"},    "poisson": {"E1"},    "ANCOVA": {"E1"},    "IVW": {"E1"},    "t-test": {"E1"},    "Cox": {"E2"},    "parametric_survival": {"E2"},    "KM": {"E2"},    "LMM": {"E3"},    "GEE": {"E3"},    "mixed": {"E3"},    "mediation": {"E4"},    "path_analysis": {"E4"},    "counterfactual": {"E5"},    "S-learner": {"E5"},    "T-learner": {"E5"},    "interaction_model": {"E6"},    "factorial": {"E6"},}# equation_type -> allowed models (inverse of above)EQUATION_TYPE_TO_MODELS: Dict[str, Set[str]] = {}for _model, _eqs in MODEL_TO_EQUATION_TYPE.items():    for _eq in _eqs:        EQUATION_TYPE_TO_MODELS.setdefault(_eq, set()).add(_model)# equation_type -> expected mu.core.type valuesEQUATION_TYPE_TO_MU_TYPES: Dict[str, Set[str]] = {    "E1": {"OR", "BETA", "MD", "SMD", "RR", "RD"},    "E2": {"HR", "RR"},    "E3": {"BETA", "MD", "SMD"},    "E4": {"BETA", "MD", "OR", "HR", "RR"},    "E5": {"MD", "BETA", "SMD"},    "E6": {"BETA", "MD", "OR", "HR", "RR"},}# equation_type -> keyword patterns expected in equation_formulaFORMULA_KEYWORDS: Dict[str, List[str]] = {    "E1": [r"logit", r"log\s*\(", r"P\(Y", r"\balpha\b.*\bbeta\b", r"linear", r"E\[Y"],    "E2": [r"lambda|λ", r"hazard", r"exp\s*\(", r"λ₀", r"h\s*\(t\)", r"S\(t\)"],    "E3": [r"random", r"u_i|b_i", r"cluster", r"GEE", r"mixed", r"longitudinal"],    "E4": [r"mediat", r"indirect", r"M\b", r"ACME", r"path", r"α.*β"],    "E5": [r"ITE|CATE", r"counterfactual", r"Y\^?\(1\)|Y\^?\(0\)", r"potential"],    "E6": [r"interact", r"X1.*X2|X2.*X1", r"modifier", r"×|\\times"],}# equation_type -> formula patterns that are CONTRADICTORY (should NOT appear)FORMULA_CONTRADICTIONS: Dict[str, List[str]] = {    "E1": [r"λ₀\(t\)", r"hazard", r"S\(t\)", r"h\(t\)"],    "E2": [r"\blogit\b", r"P\(Y\s*=\s*1\)"],    "E3": [r"λ₀\(t\)", r"hazard"],    "E4": [],    "E5": [],    "E6": [],}# alpha.id_strategy -> evidence_type consistencyID_STRATEGY_TO_EVIDENCE: Dict[str, Set[str]] = {    "rct": {"interventional"},    "observational": {"causal", "associational", "mechanistic"},    "MR": {"causal"},    "IV": {"causal"},    "pooled_estimates": {"causal", "associational", "mechanistic", "interventional"},}# mu.core.type -> expected family and scaleMU_TYPE_FAMILY_SCALE: Dict[str, Tuple[str, str]] = {    "HR": ("ratio", "log"),    "OR": ("ratio", "log"),    "RR": ("ratio", "log"),    "logHR": ("ratio", "log"),    "logOR": ("ratio", "log"),    "logRR": ("ratio", "log"),    "MD": ("difference", "identity"),    "BETA": ("difference", "identity"),    "SMD": ("difference", "identity"),    "RD": ("difference", "identity"),}# ---------------------------------------------------------------------------# 2. Core semantic validation function# ---------------------------------------------------------------------------def validate_semantics(    edge_json: Dict,    evidence_type: Optional[str] = None,) -> List[Dict[str, Any]]:    """    Run all semantic checks on a single filled edge.    Returns a list of issue dicts, each with:      - check: str        (check identifier, e.g. "model_eq_type_mismatch")      - severity: str     ("error" | "warning")      - message: str      (human-readable description)      - field: str        (dot-path of the problematic field)      - expected: Any     (what the correct value should be, if known)      - actual: Any       (what the edge currently has)    """    issues: List[Dict[str, Any]] = []    eq_type = edge_json.get("equation_type", "")    lit = edge_json.get("literature_estimate", {})    model = str(lit.get("model", "")).strip()    formula = str(edge_json.get("equation_formula", ""))    mu = edge_json.get("epsilon", {}).get("mu", {}).get("core", {})    alpha = edge_json.get("epsilon", {}).get("alpha", {})    rho = edge_json.get("epsilon", {}).get("rho", {})    hm = edge_json.get("hpp_mapping", {})    # -- Check 1: model <-> equation_type --    issues.extend(_check_model_equation_type(eq_type, model))    # -- Check 2: equation_formula keyword presence --    issues.extend(_check_formula_keywords(eq_type, formula))    # -- Check 3: equation_formula contradiction detection --    issues.extend(_check_formula_contradictions(eq_type, formula))    # -- Check 4: equation_formula structural patterns --    issues.extend(_check_formula_structure(eq_type, formula))    # -- Check 5: mu.core consistency with equation_type --    issues.extend(_check_mu_equation_type(eq_type, mu))    # -- Check 6: mu.core internal consistency (type <-> family/scale) --    issues.extend(_check_mu_internal(mu))    # -- Check 7: mu scale <-> theta_hat range plausibility --    issues.extend(_check_theta_plausibility(mu, lit))    # -- Check 8: conditional fields M (E4) and X2 (E6) --    issues.extend(_check_conditional_fields(eq_type, hm))    # -- Check 9: alpha.id_strategy <-> evidence_type --    if evidence_type:        issues.extend(_check_alpha_evidence_type(alpha, evidence_type))    # -- Check 10: rho.Z <-> adjustment_set consistency --    issues.extend(_check_rho_z_adjustment(rho, lit))    return issues# ---------------------------------------------------------------------------# 3. Individual check functions# ---------------------------------------------------------------------------def _check_model_equation_type(eq_type: str, model: str) -> List[Dict]:    """Verify that literature_estimate.model matches equation_type."""    if not eq_type or not model:        return []    allowed_models = EQUATION_TYPE_TO_MODELS.get(eq_type)    if allowed_models is None:        return []    # Normalize model string for lookup (handle case variations)    model_lower = model.lower().strip()    model_lookup = None    for canonical in MODEL_TO_EQUATION_TYPE:        if canonical.lower() == model_lower:            model_lookup = canonical            break    if model_lookup is None:        return [            {                "check": "model_unknown",                "severity": "warning",                "message": (                    f"literature_estimate.model='{model}' is not in the "                    f"canonical model list. Cannot verify equation_type match."                ),                "field": "literature_estimate.model",                "expected": sorted(EQUATION_TYPE_TO_MODELS.get(eq_type, set())),                "actual": model,            }        ]    allowed_eqs = MODEL_TO_EQUATION_TYPE.get(model_lookup, set())    if eq_type not in allowed_eqs:        return [            {                "check": "model_eq_type_mismatch",                "severity": "error",                "message": (                    f"model='{model}' requires equation_type in {sorted(allowed_eqs)}, "                    f"but got equation_type='{eq_type}'."                ),                "field": "equation_type",                "expected": sorted(allowed_eqs),                "actual": eq_type,            }        ]    return []def _check_formula_keywords(eq_type: str, formula: str) -> List[Dict]:    """Check that equation_formula contains expected keywords for its equation_type."""    if not eq_type or not formula or formula in ("null", "None", "..."):        return []    patterns = FORMULA_KEYWORDS.get(eq_type, [])    if not patterns:        return []    matched = any(re.search(p, formula, re.IGNORECASE) for p in patterns)    if not matched:        return [            {                "check": "formula_missing_keywords",                "severity": "warning",                "message": (                    f"equation_formula does not contain expected keywords for "                    f"equation_type='{eq_type}'. Expected patterns like: "                    f"{patterns[:3]}. Got formula: '{formula[:120]}...'"                ),                "field": "equation_formula",                "expected": patterns[:3],                "actual": formula[:120],            }        ]    return []def _check_formula_contradictions(eq_type: str, formula: str) -> List[Dict]:    """Check that equation_formula does NOT contain contradictory patterns."""    if not eq_type or not formula or formula in ("null", "None", "..."):        return []    contradictions = FORMULA_CONTRADICTIONS.get(eq_type, [])    if not contradictions:        return []    found = []    for p in contradictions:        if re.search(p, formula, re.IGNORECASE):            found.append(p)    if found:        return [            {                "check": "formula_contradicts_eq_type",                "severity": "error",                "message": (                    f"equation_formula contains patterns contradictory to "                    f"equation_type='{eq_type}': {found}. "                    f"Formula: '{formula[:120]}...'"                ),                "field": "equation_formula",                "expected": f"No {found} patterns for {eq_type}",                "actual": formula[:120],            }        ]    return []def _check_formula_structure(eq_type: str, formula: str) -> List[Dict]:    """    Validate formula structural correctness beyond keywords:    - E1 formula should have a regression form (Y = ... or logit(...) = ...)    - E2 formula should have a hazard/survival form    - E4 formula should reference a mediator variable    - E6 formula should have an interaction term    """    if not eq_type or not formula or formula in ("null", "None", "..."):        return []    issues = []    if eq_type == "E2":        # Cox model: formula must contain time-dependent hazard structure        has_time = bool(            re.search(r"\(t[|\s,)]|λ₀|h_0|baseline", formula, re.IGNORECASE)        )        has_exp = bool(re.search(r"exp\s*\(", formula, re.IGNORECASE))        if not has_time and not has_exp:            issues.append(                {                    "check": "formula_e2_missing_hazard",                    "severity": "error",                    "message": (                        "E2 (Cox/survival) formula should contain time-dependent "                        "hazard structure like λ(t|...) or exp(β·X). "                        f"Got: '{formula[:120]}'"                    ),                    "field": "equation_formula",                    "expected": "λ(t) = λ₀(t) · exp(β·X + ...) or equivalent",                    "actual": formula[:120],                }            )    if eq_type == "E4":        # Mediation: formula must reference a mediator (M or indirect/direct paths)        has_mediator = bool(            re.search(                r"\bM\b|mediator|indirect|direct|ACME|ADE", formula, re.IGNORECASE            )        )        if not has_mediator:            issues.append(                {                    "check": "formula_e4_missing_mediator",                    "severity": "error",                    "message": (                        "E4 (mediation) formula should reference a mediator "                        f"variable M. Got: '{formula[:120]}'"                    ),                    "field": "equation_formula",                    "expected": "Formula with M (mediator) variable",                    "actual": formula[:120],                }            )    if eq_type == "E6":        # Interaction: formula must have an interaction term (X1*X2 or X1:X2)        has_interaction = bool(            re.search(r"[*×:]|\\times|interact", formula, re.IGNORECASE)        )        if not has_interaction:            issues.append(                {                    "check": "formula_e6_missing_interaction",                    "severity": "error",                    "message": (                        "E6 (interaction) formula should contain an interaction "                        f"term (X1*X2 or X1×X2). Got: '{formula[:120]}'"                    ),                    "field": "equation_formula",                    "expected": "Formula with interaction term X1*X2",                    "actual": formula[:120],                }            )    if eq_type == "E1":        # Regression: should look like Y = ... or logit(P(Y)) = ... or E[Y|X] = ...        has_regression = bool(            re.search(                r"[=]|logit|log\s*\(|P\(Y|E\[Y|β|alpha|\\beta",                formula,                re.IGNORECASE,            )        )        if not has_regression:            issues.append(                {                    "check": "formula_e1_missing_regression",                    "severity": "warning",                    "message": (                        "E1 (static regression) formula should have regression "                        f"form. Got: '{formula[:120]}'"                    ),                    "field": "equation_formula",                    "expected": "logit(P(Y=1)) = α + β*X + ... or E[Y] = α + β*X + ...",                    "actual": formula[:120],                }            )    return issuesdef _check_mu_equation_type(eq_type: str, mu: Dict) -> List[Dict]:    """Verify mu.core.type is compatible with equation_type."""    if not eq_type:        return []    mu_type = mu.get("type", "")    if not mu_type:        return []    # Normalize: strip 'log' prefix for matching    normalized_type = (        mu_type.replace("log", "") if mu_type.startswith("log") else mu_type    )    allowed = EQUATION_TYPE_TO_MU_TYPES.get(eq_type, set())    if not allowed:        return []    if normalized_type not in allowed:        return [            {                "check": "mu_type_eq_type_mismatch",                "severity": "error",                "message": (                    f"mu.core.type='{mu_type}' (normalized: '{normalized_type}') "                    f"is not compatible with equation_type='{eq_type}'. "                    f"Expected one of: {sorted(allowed)}"                ),                "field": "epsilon.mu.core.type",                "expected": sorted(allowed),                "actual": mu_type,            }        ]    return []def _check_mu_internal(mu: Dict) -> List[Dict]:    """Verify mu.core.type, family, and scale are internally consistent."""    mu_type = mu.get("type", "")    family = mu.get("family", "")    scale = mu.get("scale", "")    if not mu_type:        return []    # Normalize: strip 'log' prefix    lookup_type = mu_type.replace("log", "") if mu_type.startswith("log") else mu_type    expected = MU_TYPE_FAMILY_SCALE.get(lookup_type)    if expected is None:        return []    expected_family, expected_scale = expected    issues = []    if family and family != expected_family:        issues.append(            {                "check": "mu_family_mismatch",                "severity": "error",                "message": (                    f"mu.core.type='{mu_type}' requires family='{expected_family}', "                    f"but got family='{family}'"                ),                "field": "epsilon.mu.core.family",                "expected": expected_family,                "actual": family,            }        )    if scale and scale != expected_scale:        issues.append(            {                "check": "mu_scale_mismatch",                "severity": "error",                "message": (                    f"mu.core.type='{mu_type}' requires scale='{expected_scale}', "                    f"but got scale='{scale}'"                ),                "field": "epsilon.mu.core.scale",                "expected": expected_scale,                "actual": scale,            }        )    return issuesdef _check_theta_plausibility(mu: Dict, lit: Dict) -> List[Dict]:    """    Verify theta_hat is on the correct scale:    - ratio family + log scale: theta_hat should be in roughly [-3, 3]    - difference family + identity scale: theta_hat should not look like a ratio    """    theta = lit.get("theta_hat")    if theta is None or not isinstance(theta, (int, float)):        return []    family = mu.get("family", "")    scale = mu.get("scale", "")    issues = []    if family == "ratio" and scale == "log":        # On log scale, |theta| > 3 is suspicious (corresponds to ratio > 20 or < 0.05)        if abs(theta) > 3:            issues.append(                {                    "check": "theta_log_scale_suspect",                    "severity": "error",                    "message": (                        f"theta_hat={theta} on log scale is suspiciously large "                        f"(exp({theta})={math.exp(min(theta, 10)):.2f}). "                        f"The LLM may have forgotten the log transform."                    ),                    "field": "literature_estimate.theta_hat",                    "expected": "ln(reported_ratio), typically in [-2, 2]",                    "actual": theta,                }            )        # Positive theta > 0.01 that looks like a raw ratio (0.5-20 range)        # while reported_ratio is close to theta -> forgot log        reported = (            lit.get("reported_HR") or lit.get("reported_OR") or lit.get("reported_RR")        )        if (            reported is not None            and isinstance(reported, (int, float))            and reported > 0            and abs(theta - reported) < 0.01            and reported != 1.0        ):            issues.append(                {                    "check": "theta_not_log_transformed",                    "severity": "error",                    "message": (                        f"theta_hat={theta} equals reported_ratio={reported}. "                        f"For ratio family with log scale, theta_hat should be "                        f"ln({reported})={math.log(reported):.4f}"                    ),                    "field": "literature_estimate.theta_hat",                    "expected": round(math.log(reported), 4),                    "actual": theta,                }            )    if family == "difference" and scale == "identity":        # Difference measures: theta should not be a typical ratio value        # (this is a soft heuristic -- ratios are usually 0.3-5.0 range)        if 0.1 < abs(theta) < 10 and isinstance(theta, float):            # Check if there is a reported_HR/OR/RR that matches theta            reported = (                lit.get("reported_HR")                or lit.get("reported_OR")                or lit.get("reported_RR")            )            if reported is not None and abs(theta - reported) < 0.01:                issues.append(                    {                        "check": "theta_scale_confusion",                        "severity": "warning",                        "message": (                            f"mu family='difference' but theta_hat={theta} matches "                            f"reported_ratio={reported}. Possible scale confusion."                        ),                        "field": "literature_estimate.theta_hat",                        "expected": "A mean difference or beta coefficient",                        "actual": theta,                    }                )    return issuesdef _check_conditional_fields(eq_type: str, hm: Dict) -> List[Dict]:    """    Verify M and X2 conditional field presence:    - M must be non-null only when equation_type = E4    - X2 must be non-null only when equation_type = E6    """    issues = []    m_mapping = hm.get("M")    x2_mapping = hm.get("X2")    # M field checks    if eq_type == "E4":        if m_mapping is None or (            isinstance(m_mapping, dict) and not m_mapping.get("field")        ):            issues.append(                {                    "check": "e4_missing_mediator",                    "severity": "error",                    "message": (                        "equation_type='E4' (mediation) requires hpp_mapping.M "                        "to be filled with the mediator variable mapping."                    ),                    "field": "hpp_mapping.M",                    "expected": "Non-null mediator mapping",                    "actual": m_mapping,                }            )    elif (        m_mapping is not None and isinstance(m_mapping, dict) and m_mapping.get("field")    ):        issues.append(            {                "check": "non_e4_has_mediator",                "severity": "error",                "message": (                    f"equation_type='{eq_type}' should not have hpp_mapping.M. "                    f"M is only valid for E4 (mediation)."                ),                "field": "hpp_mapping.M",                "expected": "null",                "actual": m_mapping,            }        )    # X2 field checks    if eq_type == "E6":        if x2_mapping is None or (            isinstance(x2_mapping, dict) and not x2_mapping.get("field")        ):            issues.append(                {                    "check": "e6_missing_x2",                    "severity": "error",                    "message": (                        "equation_type='E6' (interaction) requires hpp_mapping.X2 "                        "to be filled with the second treatment variable mapping."                    ),                    "field": "hpp_mapping.X2",                    "expected": "Non-null X2 mapping",                    "actual": x2_mapping,                }            )    elif (        x2_mapping is not None        and isinstance(x2_mapping, dict)        and x2_mapping.get("field")    ):        issues.append(            {                "check": "non_e6_has_x2",                "severity": "error",                "message": (                    f"equation_type='{eq_type}' should not have hpp_mapping.X2. "                    f"X2 is only valid for E6 (interaction)."                ),                "field": "hpp_mapping.X2",                "expected": "null",                "actual": x2_mapping,            }        )    return issuesdef _check_alpha_evidence_type(alpha: Dict, evidence_type: str) -> List[Dict]:    """Verify alpha.id_strategy is consistent with the paper's evidence_type."""    strategy = alpha.get("id_strategy", "")    if not strategy:        return []    allowed_evidence = ID_STRATEGY_TO_EVIDENCE.get(strategy)    if allowed_evidence is None:        return [            {                "check": "id_strategy_unknown",                "severity": "warning",                "message": (                    f"alpha.id_strategy='{strategy}' is not in the canonical list: "                    f"{sorted(ID_STRATEGY_TO_EVIDENCE.keys())}"                ),                "field": "epsilon.alpha.id_strategy",                "expected": sorted(ID_STRATEGY_TO_EVIDENCE.keys()),                "actual": strategy,            }        ]    if evidence_type not in allowed_evidence:        return [            {                "check": "alpha_evidence_type_mismatch",                "severity": "error",                "message": (                    f"alpha.id_strategy='{strategy}' expects evidence_type in "                    f"{sorted(allowed_evidence)}, but paper is classified as "                    f"'{evidence_type}'."                ),                "field": "epsilon.alpha.id_strategy",                "expected": sorted(allowed_evidence),                "actual": f"{strategy} vs {evidence_type}",            }        ]    return []def _check_rho_z_adjustment(rho: Dict, lit: Dict) -> List[Dict]:    """Verify rho.Z matches literature_estimate.adjustment_set."""    rho_z = rho.get("Z", [])    adj_set = lit.get("adjustment_set", [])    if not rho_z and not adj_set:        return []    # Normalize both to comparable sets    def _normalize_list(items):        if not isinstance(items, list):            return set()        return {str(item).lower().strip().replace(" ", "_") for item in items if item}    rho_set = _normalize_list(rho_z)    adj_set_normalized = _normalize_list(adj_set)    if not rho_set and not adj_set_normalized:        return []    if rho_set and adj_set_normalized and rho_set != adj_set_normalized:        only_in_rho = rho_set - adj_set_normalized        only_in_adj = adj_set_normalized - rho_set        if only_in_rho or only_in_adj:            return [                {                    "check": "rho_z_adjustment_mismatch",                    "severity": "warning",                    "message": (                        f"rho.Z and adjustment_set differ. "                        f"Only in rho.Z: {sorted(only_in_rho) if only_in_rho else 'none'}. "                        f"Only in adjustment_set: {sorted(only_in_adj) if only_in_adj else 'none'}."                    ),                    "field": "epsilon.rho.Z",                    "expected": "rho.Z == adjustment_set",                    "actual": f"rho.Z={sorted(rho_set)}, adj={sorted(adj_set_normalized)}",                }            ]    return []# ---------------------------------------------------------------------------# 4. Aggregate severity assessment# ---------------------------------------------------------------------------def has_blocking_errors(issues: List[Dict]) -> bool:    """Return True if any issue has severity='error'."""    return any(i.get("severity") == "error" for i in issues)def format_issues_for_prompt(issues: List[Dict]) -> str:    """    Format semantic issues into a readable string suitable for    inclusion in a correction prompt sent back to the LLM.    """    if not issues:        return "No semantic issues found."    lines = []    errors = [i for i in issues if i.get("severity") == "error"]    warnings = [i for i in issues if i.get("severity") == "warning"]    if errors:        lines.append(f"=== {len(errors)} ERRORS (must fix) ===")        for i, err in enumerate(errors, 1):            lines.append(                f"{i}. [{err['check']}] {err['message']}\n"                f"   Field: {err.get('field', '?')}\n"                f"   Expected: {err.get('expected', '?')}\n"                f"   Got: {err.get('actual', '?')}"            )    if warnings:        lines.append(f"\n=== {len(warnings)} WARNINGS (should fix if possible) ===")        for i, w in enumerate(warnings, 1):            lines.append(f"{i}. [{w['check']}] {w['message']}")    return "\n".join(lines)# ---------------------------------------------------------------------------# 5. Edge deduplication (for Step 1 output)# ---------------------------------------------------------------------------def _normalize_var_name(name: str) -> str:    """    Normalize a variable name for fuzzy comparison:    lowercase, strip punctuation, collapse whitespace/underscores,    remove common filler words.    """    s = str(name).lower().strip()    s = re.sub(r"[_\-/\s.()]+", " ", s)    s = re.sub(r"\s+", " ", s).strip()    # Remove common filler tokens that do not affect identity    filler = {"the", "a", "an", "of", "in", "at", "for", "and", "or", "with"}    tokens = [t for t in s.split() if t not in filler]    return " ".join(tokens)def _token_overlap_ratio(a: str, b: str) -> float:    """    Compute Jaccard-like overlap ratio between two normalized strings.    Returns a float in [0, 1].    """    tokens_a = set(a.split())    tokens_b = set(b.split())    if not tokens_a or not tokens_b:        return 0.0    intersection = tokens_a & tokens_b    union = tokens_a | tokens_b    return len(intersection) / len(union)def deduplicate_step1_edges(    edges: List[Dict],    similarity_threshold: float = 0.75,) -> Tuple[List[Dict], List[Dict]]:    """    Remove duplicate edges from Step 1 output using fuzzy matching.    Two edges are considered duplicates if:    - Their X names are highly similar (token overlap >= threshold)    - Their Y names are highly similar (token overlap >= threshold)    - Their subgroup is the same (exact match after normalization)    - Their effect_scale is the same    When duplicates are found, keep the one with a numeric estimate    (has_numeric_estimate=True), or the first one if both have estimates.    Returns:        (unique_edges, removed_duplicates)    """    if len(edges) <= 1:        return edges, []    # Build normalized signatures    sigs = []    for e in edges:        x_norm = _normalize_var_name(e.get("X", ""))        y_norm = _normalize_var_name(e.get("Y", ""))        sub_norm = _normalize_var_name(e.get("subgroup", "overall"))        scale = str(e.get("effect_scale", "")).lower().strip()        c_norm = _normalize_var_name(e.get("C", ""))        sigs.append((x_norm, y_norm, sub_norm, scale, c_norm))    keep_mask = [True] * len(edges)    removed = []    for i in range(len(edges)):        if not keep_mask[i]:            continue        for j in range(i + 1, len(edges)):            if not keep_mask[j]:                continue            x_sim = _token_overlap_ratio(sigs[i][0], sigs[j][0])            y_sim = _token_overlap_ratio(sigs[i][1], sigs[j][1])            same_sub = sigs[i][2] == sigs[j][2]            same_scale = sigs[i][3] == sigs[j][3]            same_c = _token_overlap_ratio(sigs[i][4], sigs[j][4]) > 0.5            if (                x_sim >= similarity_threshold                and y_sim >= similarity_threshold                and same_sub                and (same_scale or same_c)            ):                # Determine which to keep: prefer the one with numeric estimate                e_i = edges[i]                e_j = edges[j]                i_has_est = (                    e_i.get("has_numeric_estimate", True)                    and e_i.get("estimate") is not None                )                j_has_est = (                    e_j.get("has_numeric_estimate", True)                    and e_j.get("estimate") is not None                )                if j_has_est and not i_has_est:                    # Keep j, remove i                    keep_mask[i] = False                    removed.append(                        {                            "removed_index": i,                            "kept_index": j,                            "reason": (                                f"Duplicate of edge {j+1}: "                                f"X_sim={x_sim:.2f}, Y_sim={y_sim:.2f}"                            ),                            "removed_edge": e_i,                        }                    )                    break                else:                    # Keep i, remove j                    keep_mask[j] = False                    removed.append(                        {                            "removed_index": j,                            "kept_index": i,                            "reason": (                                f"Duplicate of edge {i+1}: "                                f"X_sim={x_sim:.2f}, Y_sim={y_sim:.2f}"                            ),                            "removed_edge": e_j,                        }                    )    unique = [e for e, keep in zip(edges, keep_mask) if keep]    # Re-index edge_index for unique edges    for new_idx, e in enumerate(unique, 1):        e["edge_index"] = new_idx    return unique, removed# ---------------------------------------------------------------------------# 6. Enhanced cross-edge duplicate detection (for Step 3)# ---------------------------------------------------------------------------def detect_fuzzy_duplicates_step3(    edges: List[Dict],    similarity_threshold: float = 0.70,) -> List[Dict]:    """    Detect fuzzy duplicates among filled edges (Step 3 level).    Uses epsilon.rho.X, epsilon.rho.Y, subgroup, and effect measure type.    Returns list of issue dicts compatible with check_cross_edge_consistency.    """    issues = []    if len(edges) <= 1:        return issues    sigs = []    for e in edges:        rho = e.get("epsilon", {}).get("rho", {})        lit = e.get("literature_estimate", {})        x_norm = _normalize_var_name(rho.get("X", ""))        y_norm = _normalize_var_name(rho.get("Y", ""))        sub_norm = _normalize_var_name(lit.get("subgroup", "overall"))        mu_type = e.get("epsilon", {}).get("mu", {}).get("core", {}).get("type", "")        sigs.append((x_norm, y_norm, sub_norm, mu_type.lower()))    for i in range(len(edges)):        for j in range(i + 1, len(edges)):            x_sim = _token_overlap_ratio(sigs[i][0], sigs[j][0])            y_sim = _token_overlap_ratio(sigs[i][1], sigs[j][1])            same_sub = sigs[i][2] == sigs[j][2]            same_mu = sigs[i][3] == sigs[j][3]            if (                x_sim >= similarity_threshold                and y_sim >= similarity_threshold                and same_sub                and same_mu            ):                issues.append(                    {                        "type": "fuzzy_duplicate_edge",                        "severity": "warning",                        "message": (                            f"Edges #{i+1} and #{j+1} are likely duplicates: "                            f"X_similarity={x_sim:.2f}, Y_similarity={y_sim:.2f}, "                            f"same_subgroup={same_sub}, same_mu_type={same_mu}"                        ),                        "edge_indices": [i, j],                    }                )    return issues

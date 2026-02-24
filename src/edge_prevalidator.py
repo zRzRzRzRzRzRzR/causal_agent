@@ -58,23 +58,40 @@ RATIO_SCALES = {"HR", "OR", "RR", "IRR"}
 
 # Mediation keywords (force E4)
 MEDIATION_KEYWORDS = {
-    "mediation", "indirect effect", "direct effect", "acme", "ade",
-    "mediator", "mediating", "path analysis", "structural equation",
+    "mediation",
+    "indirect effect",
+    "direct effect",
+    "acme",
+    "ade",
+    "mediator",
+    "mediating",
+    "path analysis",
+    "structural equation",
 }
 
 # Interaction keywords (force E6)
 INTERACTION_KEYWORDS = {
-    "interaction", "modifier", "factorial", "joint effect",
-    "effect modification", "multiplicative", "additive interaction",
+    "interaction",
+    "modifier",
+    "factorial",
+    "joint effect",
+    "effect modification",
+    "multiplicative",
+    "additive interaction",
 }
 
 # Longitudinal keywords (force E3)
 LONGITUDINAL_KEYWORDS = {
-    "mixed model", "linear mixed", "lmm", "gee", "repeated measure",
-    "longitudinal", "random effect", "random intercept", "random slope",
+    "mixed model",
+    "linear mixed",
+    "lmm",
+    "gee",
+    "repeated measure",
+    "longitudinal",
+    "random effect",
+    "random intercept",
+    "random slope",
 }
-
-
 
 
 def _normalize_number(val: Any) -> Optional[str]:
@@ -149,11 +166,13 @@ def hard_check_edge(edge: Dict, pdf_text: str) -> Dict[str, Any]:
     # Check estimate
     if estimate is not None:
         found = _number_appears_in_text(estimate, pdf_text)
-        results["checks"].append({
-            "field": "estimate",
-            "value": estimate,
-            "found_in_text": found,
-        })
+        results["checks"].append(
+            {
+                "field": "estimate",
+                "value": estimate,
+                "found_in_text": found,
+            }
+        )
         if not found:
             results["missing_values"].append(f"estimate={estimate}")
 
@@ -163,22 +182,26 @@ def hard_check_edge(edge: Dict, pdf_text: str) -> Dict[str, Any]:
             if bound is not None:
                 label = "ci_lower" if i == 0 else "ci_upper"
                 found = _number_appears_in_text(bound, pdf_text)
-                results["checks"].append({
-                    "field": label,
-                    "value": bound,
-                    "found_in_text": found,
-                })
+                results["checks"].append(
+                    {
+                        "field": label,
+                        "value": bound,
+                        "found_in_text": found,
+                    }
+                )
                 if not found:
                     results["missing_values"].append(f"{label}={bound}")
 
     # Check p_value
     if p_value is not None:
         found = _number_appears_in_text(p_value, pdf_text)
-        results["checks"].append({
-            "field": "p_value",
-            "value": p_value,
-            "found_in_text": found,
-        })
+        results["checks"].append(
+            {
+                "field": "p_value",
+                "value": p_value,
+                "found_in_text": found,
+            }
+        )
         if not found:
             results["missing_values"].append(f"p_value={p_value}")
 
@@ -187,17 +210,20 @@ def hard_check_edge(edge: Dict, pdf_text: str) -> Dict[str, Any]:
 
     return results
 
+
 def _detect_special_equation_type(edge: Dict, evidence_type: str) -> Optional[str]:
     """
     Detect if edge requires a special equation_type (E3/E4/E6) based
     on keywords in the edge notes, X, Y, or subgroup fields.
     """
-    searchable = " ".join([
-        str(edge.get("X", "")),
-        str(edge.get("Y", "")),
-        str(edge.get("notes", "")),
-        str(edge.get("subgroup", "")),
-    ]).lower()
+    searchable = " ".join(
+        [
+            str(edge.get("X", "")),
+            str(edge.get("Y", "")),
+            str(edge.get("notes", "")),
+            str(edge.get("subgroup", "")),
+        ]
+    ).lower()
 
     # E4: mediation
     if any(kw in searchable for kw in MEDIATION_KEYWORDS):
@@ -277,14 +303,16 @@ def derive_equation_metadata(
             effect_scale = "beta"
     else:
         eq_type = "E1"
-        issues.append({
-            "check": "derive_eq_type_fallback",
-            "severity": "warning",
-            "message": (
-                f"Could not derive equation_type from statistical_method='{stat_method}', "
-                f"effect_scale='{effect_scale}', outcome_type='{outcome_type}'. Defaulting to E1."
-            ),
-        })
+        issues.append(
+            {
+                "check": "derive_eq_type_fallback",
+                "severity": "warning",
+                "message": (
+                    f"Could not derive equation_type from statistical_method='{stat_method}', "
+                    f"effect_scale='{effect_scale}', outcome_type='{outcome_type}'. Defaulting to E1."
+                ),
+            }
+        )
 
     # Step 3: Derive model — priority: stat_method > equation_type + effect_scale
     if stat_method in method_to_eq:
@@ -307,14 +335,16 @@ def derive_equation_metadata(
             model = "linear"
         else:
             model = "linear"
-            issues.append({
-                "check": "derive_model_fallback",
-                "severity": "warning",
-                "message": (
-                    f"Could not derive model for {eq_type}/{effect_scale}. "
-                    f"Defaulting to 'linear'."
-                ),
-            })
+            issues.append(
+                {
+                    "check": "derive_model_fallback",
+                    "severity": "warning",
+                    "message": (
+                        f"Could not derive model for {eq_type}/{effect_scale}. "
+                        f"Defaulting to 'linear'."
+                    ),
+                }
+            )
 
     # Step 4: Derive mu
     if effect_scale in EFFECT_SCALE_TO_MU:
@@ -323,14 +353,16 @@ def derive_equation_metadata(
         mu = {"family": "ratio", "type": "HR", "scale": "log"}
     else:
         mu = {"family": "difference", "type": "BETA", "scale": "identity"}
-        issues.append({
-            "check": "derive_mu_fallback",
-            "severity": "warning",
-            "message": (
-                f"Could not derive mu from effect_scale='{effect_scale}'. "
-                f"Defaulting to difference/BETA/identity."
-            ),
-        })
+        issues.append(
+            {
+                "check": "derive_mu_fallback",
+                "severity": "warning",
+                "message": (
+                    f"Could not derive mu from effect_scale='{effect_scale}'. "
+                    f"Defaulting to difference/BETA/identity."
+                ),
+            }
+        )
 
     # Step 5: Derive id_strategy
     if evidence_type == "interventional":
@@ -397,11 +429,13 @@ def soft_check_edge(
         derived["equation_type"] = "E2"
         derived["model"] = "Cox"
         derived["mu"] = {"family": "ratio", "type": "HR", "scale": "log"}
-        derived["issues"].append({
-            "check": "notes_override_to_cox",
-            "severity": "info",
-            "message": "Edge notes mention 'Cox', overriding to E2/Cox.",
-        })
+        derived["issues"].append(
+            {
+                "check": "notes_override_to_cox",
+                "severity": "info",
+                "message": "Edge notes mention 'Cox', overriding to E2/Cox.",
+            }
+        )
 
     if "logistic" in notes and derived["equation_type"] not in ("E4", "E6"):
         derived["model"] = "logistic"
@@ -517,10 +551,12 @@ def prevalidate_edges(
             report["hard_check_passed"] += 1
         else:
             report["hard_check_failed"] += 1
-            report["hard_check_missing_values"].append({
-                "edge_index": idx,
-                "missing": hard_result["missing_values"],
-            })
+            report["hard_check_missing_values"].append(
+                {
+                    "edge_index": idx,
+                    "missing": hard_result["missing_values"],
+                }
+            )
 
         # Phase B: Soft check
         soft_result = soft_check_edge(edge, evidence_type)

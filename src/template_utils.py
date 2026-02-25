@@ -354,18 +354,74 @@ def _count_leaves(obj: Any) -> Tuple[int, int]:
 def auto_fix(edge_json: Dict) -> Dict:
     """
     Apply deterministic fixes for common LLM output issues:
-      - Normalize dataset IDs: replace '-' with '_' (template uses '-', examples use '_')
+      - Normalize dataset IDs: replace '_' between number prefix and name with '-'
+        (e.g. "055_lifestyle_and_environment" -> "055-lifestyle_and_environment")
       - Ensure theta_hat is numeric
       - Fix hpp_mapping status=missing -> dataset/field = 'N/A'
-      - Remove conditional fields (M, X2) if not needed by equation_type
+      - Ensure M and X2 keys always exist in hpp_mapping (null if not E4/E6)
+      - Strip forbidden extra fields from hpp_mapping, literature_estimate
+      - Strip top-level _validation key
       - Infer mu.core.scale from mu.core.type if inconsistent
+      - Normalize mu.core.type to use log prefix for ratio measures
     """
-    # --- Normalize dataset IDs in hpp_mapping: replace '-' with '_' ---
+    # --- Strip _validation from final output ---
+    edge_json.pop("_validation", None)
+
+    # --- Normalize dataset IDs in hpp_mapping: ensure hyphen format ---
     hm = edge_json.get("hpp_mapping", {})
     _normalize_dataset_ids(hm)
 
-    # --- theta_hat: try to coerce string to number ---
+    # --- Ensure M and X2 always exist ---
+    eq_type = edge_json.get("equation_type", "")
+    if eq_type != "E4":
+        hm["M"] = None
+    elif "M" not in hm:
+        hm["M"] = None
+    if eq_type != "E6":
+        hm["X2"] = None
+    elif "X2" not in hm:
+        hm["X2"] = None
+
+    # --- Strip forbidden fields from hpp_mapping entries ---
+    _ALLOWED_MAPPING_KEYS = {"name", "dataset", "field", "status"}
+    for role in ("X", "Y"):
+        mapping = hm.get(role)
+        if isinstance(mapping, dict):
+            extra_keys = set(mapping.keys()) - _ALLOWED_MAPPING_KEYS
+            for k in extra_keys:
+                del mapping[k]
+    # Strip Z entries too
+    z_list = hm.get("Z")
+    if isinstance(z_list, list):
+        for z_item in z_list:
+            if isinstance(z_item, dict):
+                extra_keys = set(z_item.keys()) - _ALLOWED_MAPPING_KEYS
+                for k in extra_keys:
+                    del z_item[k]
+    # Strip any non-standard top-level keys from hpp_mapping
+    _ALLOWED_HPP_KEYS = {"X", "Y", "Z", "M", "X2"}
+    extra_hpp_keys = set(hm.keys()) - _ALLOWED_HPP_KEYS
+    for k in extra_hpp_keys:
+        del hm[k]
+
+    # --- Strip forbidden fields from literature_estimate ---
+    _ALLOWED_LIT_KEYS = {
+        "theta_hat",
+        "ci",
+        "ci_level",
+        "p_value",
+        "n",
+        "design",
+        "grade",
+        "model",
+        "adjustment_set",
+    }
     lit = edge_json.get("literature_estimate", {})
+    extra_lit_keys = set(lit.keys()) - _ALLOWED_LIT_KEYS
+    for k in extra_lit_keys:
+        del lit[k]
+
+    # --- theta_hat: try to coerce string to number ---
     theta = lit.get("theta_hat")
     if isinstance(theta, str):
         try:
@@ -376,81 +432,54 @@ def auto_fix(edge_json: Dict) -> Dict:
     # --- Auto-compute theta_hat from reported ratio if on log scale ---
     mu = edge_json.get("epsilon", {}).get("mu", {}).get("core", {})
     if mu.get("scale") == "log" and mu.get("family") == "ratio":
-        # If LLM provided theta_hat as the raw ratio, convert to log
         theta = lit.get("theta_hat")
-        reported_ratio = (
-            lit.get("reported_HR") or lit.get("reported_OR") or lit.get("reported_RR")
-        )
-        if theta is not None and reported_ratio is not None:
-            # Check if theta looks like a raw ratio (> 0.01 and matches reported)
-            try:
-                if abs(float(theta) - float(reported_ratio)) < 0.01:
-                    # theta_hat was given as the ratio, not log — convert
-                    lit["theta_hat"] = round(math.log(float(reported_ratio)), 4)
-            except (ValueError, TypeError, ZeroDivisionError):
-                pass
-        elif theta is None and reported_ratio is not None:
-            try:
-                lit["theta_hat"] = round(math.log(float(reported_ratio)), 4)
-            except (ValueError, TypeError, ZeroDivisionError):
-                pass
+        # If theta_hat looks like a raw ratio (positive, not already log-transformed)
+        if theta is not None and isinstance(theta, (int, float)) and theta > 0:
+            # Heuristic: if theta > 0.05 and exp(theta) would be unreasonably large,
+            # it's probably already on ratio scale and needs log transform
+            if theta > 0.05 and abs(theta) < 50:
+                # Check if it looks more like a ratio than a log value
+                # Ratios are typically 0.1-20, log values are typically -3 to 3
+                if theta > 3 or (0.1 < theta < 0.95):
+                    # Likely a raw ratio, convert to log
+                    try:
+                        lit["theta_hat"] = round(math.log(theta), 6)
+                    except (ValueError, ZeroDivisionError):
+                        pass
 
     # --- CI: auto-convert to log scale if needed ---
     if mu.get("scale") == "log" and mu.get("family") == "ratio":
-        reported_ci = (
-            lit.get("reported_CI_HR")
-            or lit.get("reported_CI_OR")
-            or lit.get("reported_CI_RR")
-        )
         ci = lit.get("ci")
-        if reported_ci and isinstance(reported_ci, list) and len(reported_ci) == 2:
-            # If ci matches reported_ci (ratio scale), convert to log
-            if ci and isinstance(ci, list) and len(ci) == 2:
-                try:
-                    if ci[0] is not None and abs(ci[0] - reported_ci[0]) < 0.01:
-                        lit["ci"] = [
-                            (
-                                round(math.log(reported_ci[0]), 4)
-                                if reported_ci[0] and reported_ci[0] > 0
-                                else None
-                            ),
-                            (
-                                round(math.log(reported_ci[1]), 4)
-                                if reported_ci[1] and reported_ci[1] > 0
-                                else None
-                            ),
-                        ]
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass
-            elif ci is None:
-                try:
-                    lit["ci"] = [
-                        (
-                            round(math.log(reported_ci[0]), 4)
-                            if reported_ci[0] and reported_ci[0] > 0
-                            else None
-                        ),
-                        (
-                            round(math.log(reported_ci[1]), 4)
-                            if reported_ci[1] and reported_ci[1] > 0
-                            else None
-                        ),
-                    ]
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass
+        if ci and isinstance(ci, list) and len(ci) == 2:
+            # If CI values look like raw ratios (both positive, typical ratio range)
+            if (
+                ci[0] is not None
+                and ci[1] is not None
+                and isinstance(ci[0], (int, float))
+                and isinstance(ci[1], (int, float))
+            ):
+                if ci[0] > 0 and ci[1] > 0 and ci[0] < 50 and ci[1] < 50:
+                    # If both are in ratio range (0.01-50) and not already log
+                    if ci[1] > 0.05:  # upper bound should be > 0.05 for ratio
+                        try:
+                            lit["ci"] = [
+                                round(math.log(ci[0]), 6) if ci[0] > 0 else None,
+                                round(math.log(ci[1]), 6) if ci[1] > 0 else None,
+                            ]
+                        except (TypeError, ValueError, ZeroDivisionError):
+                            pass
 
-    # --- Remove M/X2 from hpp_mapping if not needed ---
-    eq_type = edge_json.get("equation_type", "")
-    if eq_type != "E4" and "M" in hm:
-        del hm["M"]
-    if eq_type != "E6" and "X2" in hm:
-        del hm["X2"]
-
-    # --- Infer mu scale from type ---
+    # --- Normalize mu.core.type to use log prefix for ratio measures ---
     mu_type = mu.get("type", "")
-    if mu_type in ("HR", "OR", "RR", "logHR", "logOR", "logRR"):
+    if mu_type in ("HR", "OR", "RR") and mu.get("scale") == "log":
+        mu["type"] = f"log{mu_type}"
+    if mu_type in ("logHR", "logOR", "logRR"):
         mu["family"] = "ratio"
         mu["scale"] = "log"
+    elif mu_type in ("HR", "OR", "RR"):
+        mu["family"] = "ratio"
+        mu["scale"] = "log"
+        mu["type"] = f"log{mu_type}"
     elif mu_type in ("MD", "BETA", "RD", "SMD"):
         mu["family"] = "difference"
         mu["scale"] = "identity"
@@ -459,13 +488,29 @@ def auto_fix(edge_json: Dict) -> Dict:
 
 
 def _normalize_dataset_ids(mapping: Dict) -> None:
-    """Replace '-' with '_' in all dataset IDs within hpp_mapping."""
-    for key, val in mapping.items():
+    """
+    Normalize dataset IDs in hpp_mapping to use hyphen format.
+    Converts '055_lifestyle_and_environment' -> '055-lifestyle_and_environment'
+    (hyphen between numeric prefix and name, underscores within name preserved).
+    """
+    import re as _re
+
+    for key, val in list(mapping.items()):
         if isinstance(val, dict):
             if "dataset" in val and isinstance(val["dataset"], str):
-                val["dataset"] = val["dataset"].replace("-", "_")
-            # Recurse for composite_components etc.
+                ds = val["dataset"]
+                # Pattern: digits followed by underscore/hyphen then name
+                # Normalize to: digits-name (hyphen after prefix)
+                ds = _re.sub(r"^(\d+)[_\-]", r"\1-", ds)
+                val["dataset"] = ds
             _normalize_dataset_ids(val)
+        elif isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict):
+                    if "dataset" in item and isinstance(item["dataset"], str):
+                        ds = item["dataset"]
+                        ds = _re.sub(r"^(\d+)[_\-]", r"\1-", ds)
+                        item["dataset"] = ds
 
 
 # ---------------------------------------------------------------------------

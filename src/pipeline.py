@@ -431,23 +431,8 @@ def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
     if preval.get("ci") and any(v is not None for v in preval["ci"]):
         lit["ci"] = preval["ci"]
 
-    # Add reported values for ratio measures
-    mu_type = preval.get("mu", {}).get("type", "")
-    if preval.get("reported_value") is not None:
-        if mu_type in ("HR", "logHR"):
-            lit["reported_HR"] = preval["reported_value"]
-        elif mu_type in ("OR", "logOR"):
-            lit["reported_OR"] = preval["reported_value"]
-        elif mu_type in ("RR", "logRR"):
-            lit["reported_RR"] = preval["reported_value"]
-
-    if preval.get("reported_ci") is not None:
-        if mu_type in ("HR", "logHR"):
-            lit["reported_CI_HR"] = preval["reported_ci"]
-        elif mu_type in ("OR", "logOR"):
-            lit["reported_CI_OR"] = preval["reported_ci"]
-        elif mu_type in ("RR", "logRR"):
-            lit["reported_CI_RR"] = preval["reported_ci"]
+    # NOTE: Do NOT add reported_HR/reported_OR/reported_CI_* to literature_estimate.
+    # The GT schema only allows: theta_hat, ci, ci_level, p_value, n, design, grade, model, adjustment_set.
 
     # Override id_strategy
     if preval.get("id_strategy"):
@@ -465,6 +450,94 @@ def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
             lit["adjustment_set"] = adj_vars
 
     return filled
+
+
+def _final_schema_enforcement(edge: Dict) -> None:
+    """
+    Final deterministic cleanup to ensure output matches GT schema exactly.
+    Called once before saving to disk. Mutates edge in place.
+    """
+    import re as _re
+
+    # 1. Strip _validation and any other internal keys
+    for key in list(edge.keys()):
+        if key.startswith("_"):
+            del edge[key]
+
+    # 2. hpp_mapping: enforce strict structure
+    hm = edge.get("hpp_mapping", {})
+
+    _ALLOWED_MAPPING_KEYS = {"name", "dataset", "field", "status"}
+    _ALLOWED_HPP_TOP_KEYS = {"X", "Y", "Z", "M", "X2"}
+
+    # Strip forbidden fields from X, Y mapping objects
+    for role in ("X", "Y"):
+        mapping = hm.get(role)
+        if isinstance(mapping, dict):
+            for k in list(mapping.keys()):
+                if k not in _ALLOWED_MAPPING_KEYS:
+                    del mapping[k]
+
+    # Strip forbidden fields from Z list items
+    z_list = hm.get("Z")
+    if isinstance(z_list, list):
+        for z_item in z_list:
+            if isinstance(z_item, dict):
+                for k in list(z_item.keys()):
+                    if k not in _ALLOWED_MAPPING_KEYS:
+                        del z_item[k]
+
+    # Ensure M and X2 always present
+    eq_type = edge.get("equation_type", "")
+    if "M" not in hm:
+        hm["M"] = None
+    if "X2" not in hm:
+        hm["X2"] = None
+    if eq_type != "E4":
+        hm["M"] = None
+    if eq_type != "E6":
+        hm["X2"] = None
+
+    # Strip non-standard top-level hpp_mapping keys
+    for k in list(hm.keys()):
+        if k not in _ALLOWED_HPP_TOP_KEYS:
+            del hm[k]
+
+    # 3. Normalize dataset IDs to hyphen format
+    def _fix_ds(obj):
+        if isinstance(obj, dict):
+            if "dataset" in obj and isinstance(obj["dataset"], str):
+                obj["dataset"] = _re.sub(r"^(\d+)[_]", r"\1-", obj["dataset"])
+            for v in obj.values():
+                _fix_ds(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _fix_ds(item)
+
+    _fix_ds(hm)
+
+    # 4. literature_estimate: strip extra fields
+    _ALLOWED_LIT_KEYS = {
+        "theta_hat",
+        "ci",
+        "ci_level",
+        "p_value",
+        "n",
+        "design",
+        "grade",
+        "model",
+        "adjustment_set",
+    }
+    lit = edge.get("literature_estimate", {})
+    for k in list(lit.keys()):
+        if k not in _ALLOWED_LIT_KEYS:
+            del lit[k]
+
+    # 5. Normalize mu.core.type to use log prefix for ratio measures
+    mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})
+    mu_type = mu.get("type", "")
+    if mu_type in ("HR", "OR", "RR") and mu.get("scale") == "log":
+        mu["type"] = f"log{mu_type}"
 
 
 # ---------------------------------------------------------------------------
@@ -592,20 +665,16 @@ def _safe_spot_check(
         checkable = []
         for i, e in enumerate(edges):
             lit = e.get("literature_estimate", {})
-            reported = (
-                lit.get("reported_HR")
-                or lit.get("reported_OR")
-                or lit.get("reported_RR")
-            )
-            if reported is not None and isinstance(reported, (int, float)):
-                checkable.append((i, e, reported))
+            theta = lit.get("theta_hat")
+            if theta is not None and isinstance(theta, (int, float)):
+                checkable.append((i, e, theta))
 
-        for idx, (i, e, reported) in enumerate(checkable[:sample_size]):
+        for idx, (i, e, theta_val) in enumerate(checkable[:sample_size]):
             rho = e.get("epsilon", {}).get("rho", {})
             try:
                 prompt = (
                     f"Verify: {rho.get('X', '?')} -> {rho.get('Y', '?')}\n"
-                    f"Extracted value: {reported}\n"
+                    f"Extracted theta_hat (log scale): {theta_val}\n"
                     f'Reply JSON: {{"verdict": "correct/incorrect/not_found", '
                     f'"correct_value": null}}\n\n'
                     f"Paper (first 15000 chars):\n{pdf_text[:15000]}"
@@ -825,6 +894,11 @@ class EdgeExtractionPipeline:
                 save_json(pdf_dir / "step3_review.json", quality_report)
 
         # -- Save final edges --
+        # Final cleanup: strip internal metadata and enforce schema
+        for edge in all_filled_edges:
+            edge.pop("_validation", None)
+            _final_schema_enforcement(edge)
+
         if pdf_dir:
             output_file = pdf_dir / "edges.json"
             save_json(output_file, all_filled_edges)

@@ -43,15 +43,15 @@ EQUATION_TYPE_TO_MODEL: Dict[str, str] = {
 }
 
 EFFECT_SCALE_TO_MU: Dict[str, Dict[str, str]] = {
-    "HR": {"family": "ratio", "type": "HR", "scale": "log"},
-    "OR": {"family": "ratio", "type": "OR", "scale": "log"},
-    "RR": {"family": "ratio", "type": "RR", "scale": "log"},
+    "HR": {"family": "ratio", "type": "logHR", "scale": "log"},
+    "OR": {"family": "ratio", "type": "logOR", "scale": "log"},
+    "RR": {"family": "ratio", "type": "logRR", "scale": "log"},
     "MD": {"family": "difference", "type": "MD", "scale": "identity"},
     "beta": {"family": "difference", "type": "BETA", "scale": "identity"},
     "BETA": {"family": "difference", "type": "BETA", "scale": "identity"},
     "SMD": {"family": "difference", "type": "SMD", "scale": "identity"},
     "RD": {"family": "difference", "type": "RD", "scale": "identity"},
-    "IRR": {"family": "ratio", "type": "RR", "scale": "log"},
+    "IRR": {"family": "ratio", "type": "logRR", "scale": "log"},
 }
 
 RATIO_SCALES = {"HR", "OR", "RR", "IRR"}

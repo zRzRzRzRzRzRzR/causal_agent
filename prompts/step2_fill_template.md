@@ -75,13 +75,14 @@ Evidence type: {evidence_type}
 
 ### 3. epsilon字段（来自论文）
 - `epsilon.Pi`: 人群标签 — `"adult_general"`（成人一般人群）、`"cvd"`（心血管疾病）、`"diabetes"`（糖尿病）、`"oncology"`（肿瘤）、`"pediatric"`（儿科）
-- `epsilon.iota.core.name`: 暴露变量名称（必须匹配rho.X）
+- `epsilon.iota.core.name`: 暴露变量的**简洁名称**（例如 `"Healthy Lifestyle Score"` 而非 `"Healthy Lifestyle Score 4 (Never smoking, Physically active, ...)"）`。必须匹配rho.X
 - `epsilon.o.name`: 结局变量名称（必须匹配rho.Y）
 - `epsilon.o.type`: `"binary"`（二分类）、`"continuous"`（连续）或`"survival"`（生存）
 - `epsilon.tau`: 时间坐标（index、horizon，ISO 8601格式如"P5Y"、"P10Y"）
-- `epsilon.alpha.assumptions`: 选择适用的：`"exchangeability"`（可交换性）、`"positivity"`（一致性）、`"consistency"`（一致性）、`"proportional_hazards"`（比例风险，仅Cox）、`"no_publication_bias"`（无发表偏倚）、`"sequential_ignorability"`（顺序可忽略性，仅E4）
+- `epsilon.mu.core.type`: 对于比率度量（HR/OR/RR），**必须使用log前缀**：`"logHR"`, `"logOR"`, `"logRR"`（因为theta_hat在对数尺度上）。对于差异度量：`"MD"`, `"BETA"`, `"SMD"`
+- `epsilon.alpha.assumptions`: 选择适用的：`"exchangeability"`（可交换性）、`"positivity"`（正性）、`"consistency"`（一致性）。**不要**包含 `"proportional_hazards"`
 - `epsilon.alpha.status`: `"identified"`（已识别，RCT）/ `"partially_identified"`（部分识别，观察性）/ `"not_identified"`（未识别）
-- `epsilon.rho`: 变量角色 — X、Y、Z（调整变量列表）、IV（仅MR，否则为null）
+- `epsilon.rho`: 变量角色 — X（使用简洁名称，与iota.core.name一致）、Y、Z（调整变量列表）、IV（仅MR，否则为null）
 
 ### 4. literature_estimate（剩余字段）
 - `n`: 总样本量
@@ -90,26 +91,48 @@ Evidence type: {evidence_type}
 - `adjustment_set`: 调整变量列表（必须匹配rho.Z）
 - `p_value`: 如论文中所报告
 - `ci_level`: 通常为0.95
-- 如适用的额外字段：`subgroup`、`group_means`、`notes`
+
+⚠️ **literature_estimate 只包含以下字段**：`theta_hat`, `ci`, `ci_level`, `p_value`, `n`, `design`, `grade`, `model`, `adjustment_set`。**禁止**添加 `subgroup`, `control_reference`, `reported_HR`, `reported_CI_HR`, `group_means`, `notes` 等额外字段。
 
 ### 5. hpp_mapping（关键 — 这决定了管道能否运行）
-- `X`: 使用下面检索到的候选项将暴露映射到HPP数据集+字段
-- `Y`: 将结局映射到HPP数据集+字段
-- `Z`: 将每个协变量映射到HPP数据集+字段
-- `M`: 仅当equation_type = E4（中介）时，否则设为`null`
-- `X2`: 仅当equation_type = E6（交互）时，否则设为`null`
 
-每个映射：`{"name": "var_name", "dataset": "009_sleep", "field": "field_name", "status": "exact|close|tentative|missing"}`
+⚠️ **hpp_mapping 结构必须严格遵循以下模式，不允许添加任何额外字段。**
+
+每个变量映射**只能有4个字段**：
+```json
+{"name": "变量名", "dataset": "009-sleep", "field": "字段名", "status": "exact|close|tentative|missing"}
+```
+
+**hpp_mapping 顶层结构**（必须包含所有5个键）：
+```json
+{
+  "X": {"name": "...", "dataset": "...", "field": "...", "status": "..."},
+  "Y": {"name": "...", "dataset": "...", "field": "...", "status": "..."},
+  "Z": [
+    {"name": "协变量1", "dataset": "...", "field": "...", "status": "..."},
+    ...
+  ],
+  "M": null,
+  "X2": null
+}
+```
+
+**关键约束**：
+- 每个映射对象**恰好4个字段**：`name`, `dataset`, `field`, `status`。**禁止**添加 `mapping_notes`、`composite_components`、`subgroup_mapping` 或任何其他字段。
+- `M`: 仅当 equation_type = E4 时填写，否则**必须为** `null`
+- `X2`: 仅当 equation_type = E6 时填写，否则**必须为** `null`
+- **M 和 X2 必须始终出现**在 hpp_mapping 中（作为 `null` 或映射对象）
+- **数据集ID使用连字符格式**：`"009-sleep"`、`"002-anthropometrics"`、`"021-medical_conditions"`（编号和名称之间用连字符`-`连接）
+- 对于复合变量（如 Healthy Lifestyle Score），X.name 使用简洁名称（如 `"Healthy Lifestyle Score"`），X.field 中用 `+` 连接多个字段（如 `"smoking_status + activity_minutes + alcohol_frequency + diet_*"`），status 标为 `"tentative"`
+- 对于需要从现有字段计算/推导的变量，status 必须标为 `"tentative"` 而非 `"exact"`
 
 **status值**：
 | status | 含义 |
 |--------|------|
-| `exact` | 字段语义完全匹配 |
-| `close` | 近似匹配，定义略有不同 |
-| `tentative` | 必须从现有字段计算，不确定 |
+| `exact` | HPP中有直接对应字段，语义完全匹配 |
+| `close` | HPP中有近似字段，定义略有不同 |
+| `tentative` | 需要从HPP现有字段计算或组合得到 |
 | `missing` | HPP字典中无对应字段 |
-
-数据集ID使用下划线：`"009_sleep"`、`"002_anthropometrics"`（不用连字符）。
 
 ---
 
@@ -152,7 +175,11 @@ Evidence type: {evidence_type}
 2. 对未知字段使用`null`（不是`"..."`或空字符串）
 3. `theta_hat`必须是**数字**或`null`（不是字符串）
 4. 通过上述一致性检查清单（C1–C6）
-5. 数据集ID使用**下划线**格式（例如，`009_sleep`）
-6. 可以添加额外的描述字段（`mapping_notes`、`composite_components`、`notes`、`group_means`、`subgroup`）
-7. **不要**在输出中包含`//`注释或`_comment`键
-8. 恰好描述**一个**边
+5. 数据集ID使用**连字符**格式（例如，`009-sleep`、`055-lifestyle_and_environment`）
+6. **hpp_mapping中每个变量映射只允许4个字段**：`name`, `dataset`, `field`, `status`。**禁止**添加 `mapping_notes`、`composite_components`、`subgroup_mapping` 等。
+7. **hpp_mapping必须包含** `M` 和 `X2` 键（值为 `null` 除非 E4/E6）
+8. **literature_estimate只允许**：`theta_hat`, `ci`, `ci_level`, `p_value`, `n`, `design`, `grade`, `model`, `adjustment_set`。**禁止** `reported_HR`, `reported_CI_HR`, `subgroup`, `control_reference`, `notes`, `group_means` 等。
+9. **不要**在输出中包含`//`注释、`_comment`键、`_validation`键
+10. `epsilon.mu.core.type` 对于比率度量必须使用log前缀（`logHR`/`logOR`/`logRR`）
+11. `epsilon.iota.core.name` 和 `epsilon.rho.X` 使用简洁变量名
+12. 恰好描述**一个**边

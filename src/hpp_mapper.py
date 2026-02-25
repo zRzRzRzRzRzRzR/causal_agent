@@ -460,8 +460,8 @@ class HPPMapper:
         for ds_id, _ in sorted_datasets:
             fields = self.raw_dict.get(ds_id, {}).get("tabular_field_name", [])
             shown = fields[:max_fields_per_dataset]
-            # Normalize dataset ID for display (use underscore format)
-            display_id = ds_id.replace("-", "_")
+            # Normalize dataset ID for display (use hyphen format: 055-lifestyle_and_environment)
+            display_id = ds_id  # Already in hyphen format from raw_dict keys
             parts.append(f"\n**`{display_id}`** ({len(fields)} fields)")
             parts.append("```")
             parts.append(", ".join(shown))
@@ -476,16 +476,14 @@ class HPPMapper:
                 continue
             suggestions = []
             for c in candidates[:3]:
-                ds_display = c.dataset_id.replace("-", "_")
+                ds_display = c.dataset_id  # Keep original hyphen format
                 suggestions.append(
                     f"`{ds_display}` → `{c.field_name}` (score={c.score:.2f})"
                 )
             parts.append(f"- **{role}**: {' | '.join(suggestions)}")
 
         parts.append("\n#### 所有可用数据集 ID\n")
-        parts.append(
-            ", ".join(f"`{k.replace('-', '_')}`" for k in sorted(self.raw_dict.keys()))
-        )
+        parts.append(", ".join(f"`{k}`" for k in sorted(self.raw_dict.keys())))
 
         return "\n".join(parts)
 

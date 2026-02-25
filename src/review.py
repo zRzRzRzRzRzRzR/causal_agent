@@ -51,7 +51,7 @@ def rerank_hpp_mapping(
 
         candidate_lines = []
         for i, c in enumerate(candidates[:6]):
-            ds = c.dataset_id.replace("-", "_")
+            ds = c.dataset_id  # Keep original hyphen format
             candidate_lines.append(f"{i + 1}. {ds} / {c.field_name}")
 
         current = hm.get(role, {})
@@ -80,7 +80,7 @@ def rerank_hpp_mapping(
 
         if 0 < best_idx <= len(candidates[:6]):
             chosen = candidates[best_idx - 1]
-            new_ds = chosen.dataset_id.replace("-", "_")
+            new_ds = chosen.dataset_id  # Keep original hyphen format
             new_field = chosen.field_name
 
             if new_ds != current_ds or new_field != current_field:
@@ -221,10 +221,6 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
         if theta is None or not isinstance(theta, (int, float)):
             continue
 
-        reported = (
-            lit.get("reported_HR") or lit.get("reported_OR") or lit.get("reported_RR")
-        )
-
         # |theta| > 3 on log scale is suspicious
         if abs(theta) > 3:
             issues.append(
@@ -233,35 +229,11 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
                     "severity": "error",
                     "message": (
                         f"Edge #{i + 1}: theta_hat={theta} on log scale "
-                        f"too large. reported_ratio={reported}. "
-                        f"May have forgotten log transform."
+                        f"too large. May have forgotten log transform."
                     ),
                     "edge_indices": [i],
                 }
             )
-
-        if (
-            reported is not None
-            and isinstance(reported, (int, float))
-            and reported > 0
-            and reported != 1.0
-            and theta != 0
-        ):
-            expected_neg = reported < 1
-            actual_neg = theta < 0
-            if expected_neg != actual_neg:
-                issues.append(
-                    {
-                        "type": "theta_sign_mismatch",
-                        "severity": "error",
-                        "message": (
-                            f"Edge #{i + 1}: theta_hat={theta} but "
-                            f"reported_ratio={reported} -> expected "
-                            f"{'negative' if expected_neg else 'positive'}"
-                        ),
-                        "edge_indices": [i],
-                    }
-                )
 
     return issues
 
@@ -278,34 +250,37 @@ def spot_check_values(
     checkable: List[Tuple[int, Dict, float]] = []
     for i, e in enumerate(edges):
         lit = e.get("literature_estimate", {})
-        reported = (
-            lit.get("reported_HR") or lit.get("reported_OR") or lit.get("reported_RR")
-        )
-        if reported is not None and isinstance(reported, (int, float)):
-            checkable.append((i, e, reported))
+        # Use theta_hat for spot checking since reported_HR etc are no longer stored
+        theta = lit.get("theta_hat")
+        if theta is not None and isinstance(theta, (int, float)):
+            checkable.append((i, e, theta))
 
     to_check = checkable[:sample_size]
     if not to_check:
         return [{"status": "skipped", "reason": "No reported ratios to check"}]
 
     check_items: List[str] = []
-    for idx, (i, e, reported) in enumerate(to_check):
+    for idx, (i, e, theta_val) in enumerate(to_check):
         rho = e.get("epsilon", {}).get("rho", {})
         lit = e.get("literature_estimate", {})
-        sub = lit.get("subgroup", "overall")
-        ci = (
-            lit.get("reported_CI_HR")
-            or lit.get("reported_CI_OR")
-            or lit.get("reported_CI_RR")
-            or lit.get("ci")
-        )
-        mu_type = e.get("epsilon", {}).get("mu", {}).get("core", {}).get("type", "HR")
-        effect_label = mu_type.replace("log", "")
+        mu_type = e.get("epsilon", {}).get("mu", {}).get("core", {}).get("type", "")
+        # Convert theta back to ratio scale for human-readable check
+        import math as _math
+
+        if mu_type.startswith("log") and theta_val is not None:
+            try:
+                display_val = round(_math.exp(theta_val), 2)
+                effect_label = mu_type.replace("log", "")
+            except (OverflowError, ValueError):
+                display_val = theta_val
+                effect_label = mu_type
+        else:
+            display_val = theta_val
+            effect_label = mu_type
 
         check_items.append(
             f"{idx + 1}. {rho.get('X', '?')} -> {rho.get('Y', '?')}\n"
-            f"   Subgroup: {sub}\n"
-            f"   Extracted: {effect_label}={reported}, 95% CI={ci}\n"
+            f"   Extracted: {effect_label}={display_val}, theta_hat(log)={theta_val}\n"
         )
 
     prompt = (

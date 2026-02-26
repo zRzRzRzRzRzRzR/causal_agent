@@ -10,10 +10,11 @@ from src.llm_client import GLMClient
 from src.ocr import get_pdf_text
 from src.ocr import init_extractor as init_ocr
 from src.pipeline import EdgeExtractionPipeline
+from src.xml_reader import extract_text_from_xml
 
 
-def process_single_pdf(
-    pdf_path: Path,
+def process_single_file(
+    file_path: Path,
     pipeline: EdgeExtractionPipeline,
     output_dir: Path,
     force_type: str = None,
@@ -26,7 +27,7 @@ def process_single_pdf(
 
     try:
         edges = pipeline.run(
-            pdf_path=str(pdf_path),
+            pdf_path=str(file_path),
             force_type=force_type,
             output_dir=str(output_dir),
             resume=resume,
@@ -41,7 +42,7 @@ def process_single_pdf(
     elapsed = round(time.time() - t0, 1)
 
     return {
-        "pdf": pdf_path.name,
+        "file": file_path.name,
         "status": status,
         "n_edges": n_edges,
         "elapsed_sec": elapsed,
@@ -81,18 +82,38 @@ def main():
         action="store_true",
         help="Skip steps whose output already exists (step0/step1 cache)",
     )
+    # ── NEW: XML input support ──
+    parser.add_argument(
+        "--xml",
+        action="store_true",
+        help="Input files are JATS/NLM XML (.nxml/.xml) — skip OCR entirely",
+    )
 
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
-    pdf_files = sorted(input_dir.glob("*.pdf"))
+
+    # ── Collect input files based on format ──
+    if args.xml:
+        input_files = sorted(
+            list(input_dir.glob("*.nxml")) + list(input_dir.glob("*.xml"))
+        )
+        fmt_label = "XML"
+    else:
+        input_files = sorted(input_dir.glob("*.pdf"))
+        fmt_label = "PDF"
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"{'='*60}", file=sys.stderr)
     print(f"Batch Evidence Edge Extraction", file=sys.stderr)
-    print(f"  Input:  {input_dir.resolve()} ({len(pdf_files)} PDFs)", file=sys.stderr)
+    print(
+        f"  Input:  {input_dir.resolve()} ({len(input_files)} {fmt_label}s)",
+        file=sys.stderr,
+    )
     print(f"  Output: {output_dir.resolve()}", file=sys.stderr)
+    print(f"  Format: {fmt_label}", file=sys.stderr)
     print(f"  Type:   {args.type or 'auto-classify'}", file=sys.stderr)
     print(f"  Workers: {args.max_workers}", file=sys.stderr)
     print(f"  Resume:  {args.resume}", file=sys.stderr)
@@ -101,10 +122,18 @@ def main():
 
     client = GLMClient(api_key=args.api_key, base_url=args.base_url, model=args.model)
 
+    # ── Select text extraction strategy ──
+    if args.xml:
+        text_func = extract_text_from_xml
+        init_func = None
+    else:
+        text_func = get_pdf_text
+        init_func = init_ocr
+
     pipeline = EdgeExtractionPipeline(
         client=client,
-        ocr_text_func=get_pdf_text,
-        ocr_init_func=init_ocr,
+        ocr_text_func=text_func,
+        ocr_init_func=init_func,
         ocr_output_dir=args.ocr_dir,
         ocr_dpi=args.dpi,
         ocr_validate_pages=not args.no_validate_pages,
@@ -116,11 +145,11 @@ def main():
     t_start = time.time()
 
     if args.max_workers <= 1:
-        for idx, pdf_path in enumerate(pdf_files, 1):
+        for idx, file_path in enumerate(input_files, 1):
             print(f"\n{'─'*50}", file=sys.stderr)
-            print(f"[{idx}/{len(pdf_files)}] {pdf_path.name}", file=sys.stderr)
-            summary = process_single_pdf(
-                pdf_path, pipeline, output_dir, args.type, args.resume
+            print(f"[{idx}/{len(input_files)}] {file_path.name}", file=sys.stderr)
+            summary = process_single_file(
+                file_path, pipeline, output_dir, args.type, args.resume
             )
             results.append(summary)
             tag = "OK" if summary["status"] == "success" else "FAIL"
@@ -130,19 +159,24 @@ def main():
             )
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-            future_to_pdf = {
+            future_to_file = {
                 executor.submit(
-                    process_single_pdf, p, pipeline, output_dir, args.type, args.resume
+                    process_single_file,
+                    p,
+                    pipeline,
+                    output_dir,
+                    args.type,
+                    args.resume,
                 ): p
-                for p in pdf_files
+                for p in input_files
             }
-            for future in as_completed(future_to_pdf):
-                pdf_path = future_to_pdf[future]
+            for future in as_completed(future_to_file):
+                file_path = future_to_file[future]
                 try:
                     summary = future.result()
                 except Exception as e:
                     summary = {
-                        "pdf": pdf_path.name,
+                        "file": file_path.name,
                         "status": "failed",
                         "n_edges": 0,
                         "elapsed_sec": 0,
@@ -151,7 +185,7 @@ def main():
                 results.append(summary)
                 tag = "OK" if summary["status"] == "success" else "FAIL"
                 print(
-                    f"  [{tag}] {pdf_path.name}: {summary['n_edges']} edges, "
+                    f"  [{tag}] {file_path.name}: {summary['n_edges']} edges, "
                     f"{summary['elapsed_sec']}s",
                     file=sys.stderr,
                 )
@@ -161,7 +195,8 @@ def main():
     n_failed = len(results) - n_success
 
     batch_summary = {
-        "total_pdfs": len(pdf_files),
+        "total_files": len(input_files),
+        "format": fmt_label,
         "success": n_success,
         "failed": n_failed,
         "total_edges": sum(r["n_edges"] for r in results),
@@ -175,14 +210,14 @@ def main():
 
     print(f"\n{'='*60}", file=sys.stderr)
     print(
-        f"Complete: {n_success}/{len(pdf_files)} succeeded, "
+        f"Complete: {n_success}/{len(input_files)} succeeded, "
         f"{batch_summary['total_edges']} total edges, {total_elapsed}s",
         file=sys.stderr,
     )
     print(f"  Summary: {summary_path}", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
 
-    sys.exit(1 if n_failed == len(pdf_files) else 0)
+    sys.exit(1 if n_failed == len(input_files) else 0)
 
 
 if __name__ == "__main__":

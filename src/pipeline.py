@@ -679,7 +679,7 @@ def _safe_spot_check(
                     f'"correct_value": null}}\n\n'
                     f"Paper (first 15000 chars):\n{pdf_text[:15000]}"
                 )
-                result = client.call_json(prompt, thinking=False)
+                result = client.call_json(prompt)
                 result["edge_index"] = i
                 result["edge_id"] = e.get("edge_id", "?")
                 results.append(result)

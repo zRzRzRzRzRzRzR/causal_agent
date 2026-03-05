@@ -200,7 +200,7 @@ def main():
         "--batch-size",
         type=int,
         default=0,
-        help="Max PDFs to process per sub-folder batch (0 = no limit, process all)",
+        help="Global max files to process across all batches in order (0 = no limit, process all)",
     )
     parser.add_argument(
         "--batches",
@@ -225,9 +225,18 @@ def main():
         selected = set(args.batches)
         all_batches = {k: v for k, v in all_batches.items() if k in selected}
 
-    # Apply --batch-size per batch
+    # Apply --batch-size as a global cap across all batches (folders processed in order)
     if args.batch_size > 0:
-        all_batches = {k: v[: args.batch_size] for k, v in all_batches.items()}
+        capped: dict[str, list[Path]] = {}
+        remaining = args.batch_size
+        for k, v in all_batches.items():
+            take = v[:remaining]
+            if take:
+                capped[k] = take
+            remaining -= len(take)
+            if remaining <= 0:
+                break
+        all_batches = capped
 
     total_files = sum(len(v) for v in all_batches.values())
 

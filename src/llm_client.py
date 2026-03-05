@@ -9,12 +9,12 @@ from openai import OpenAI
 
 load_dotenv()
 
-_API_KEY = os.getenv("OPENAI_API_KEY", "")
-_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
-_DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "glm-5")
-_DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "1.0"))
-_DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "16384"))
-_VISION_MODEL = os.getenv("VISION_MODEL", "glm-4.6v")
+_API_KEY = os.getenv("OPENAI_API_KEY")
+_BASE_URL = os.getenv("OPENAI_BASE_URL")
+_DEFAULT_MODEL = os.getenv("DEFAULT_MODEL")
+_DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE"))
+_DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS"))
+_VISION_MODEL = os.getenv("VISION_MODEL")
 
 
 class GLMClient:

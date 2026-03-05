@@ -72,13 +72,14 @@ step3_review.json  ← 质量报告（改了什么、哪些有问题）
 .
 ├── src/
 │   ├── __init__.py            # 公共导出
-│   ├── main.py                # CLI 入口
 │   ├── pipeline.py            # 四步流水线（Step 0/1/2/3），含语义验证重试
 │   ├── llm_client.py          # LLM 客户端（OpenAI 兼容 API）
 │   ├── ocr.py                 # PDF → 图片 → GLM-OCR → Markdown
+│   ├── xml_reader.py          # JATS/NLM XML 文本提取（跳过 OCR）
 │   ├── hpp_mapper.py          # HPP 数据字典 RAG 检索模块
 │   ├── template_utils.py      # 模板加载、合并、校验、自动修复
-│   ├── semantic_validator.py  # 语义正确性验证 + 公式检查 + 边去重（新增）
+│   ├── edge_prevalidator.py   # Step 1.5 预验证：强制覆盖确定性字段
+│   ├── semantic_validator.py  # 语义正确性验证 + 公式检查 + 边去重
 │   ├── review.py              # Step 3 审查：rerank、一致性检查、spot-check、质量报告
 │   └── utils.py               # 工具函数（PDF 转图、base64、保存 JSON）
 ├── prompts/                   # LLM 提示词模板（.md 文件）
@@ -88,7 +89,8 @@ step3_review.json  ← 质量报告（改了什么、哪些有问题）
 ├── templates/                 # HPP 模板和数据字典
 │   ├── hpp_mapping_template.json                    # 带 // 注释的模板（LLM 阅读用）
 │   └── pheno_ai_data_dictionaries_simplified.json   # HPP 数据字典（35 datasets, ~2779 fields）
-├── batch_run.py               # 批处理脚本
+├── glm-ocr/                   # GLM-OCR 模型相关
+├── batch_run.py               # 批处理脚本（支持子文件夹 batch 模式）
 ├── requirements.txt
 └── .env                       # API 配置
 ```
@@ -134,15 +136,55 @@ python src/main.py edges paper.pdf
 
 ### 批量处理
 
+支持两种输入目录结构：
+
+1. **平铺模式**：`-i ./pdfs`，目录下直接放 PDF 文件
+2. **子文件夹模式**：`-i /mnt/nature_causal_pdf/S`，目录下按编号分子文件夹，每个子文件夹视为一个 batch
+
+```
+/mnt/nature_causal_pdf/S/
+├── 98/
+│   ├── 11041398.pdf
+│   ├── 15765398.pdf
+│   └── 16837098.pdf
+└── 99/
+    ├── 15781099.pdf
+    ├── 16214599.pdf
+    └── 16227999.pdf
+```
+
+输出也会按 batch 分目录：
+
+```
+output/
+├── 98/
+│   ├── 11041398/
+│   │   ├── edges.json
+│   │   └── ...
+│   └── ...
+├── 99/
+│   └── ...
+└── _batch_summary.json
+```
+
 ```bash
-# 默认：处理 ./evidence_card 目录下的所有 PDF
+# 平铺模式（向后兼容）：处理 ./evidence_card 目录下的所有 PDF
 python batch_run.py
 
-# 自定义输入/输出目录 + 并发
-python batch_run.py -i ./pdfs -o ./results --max-workers 3
+# 子文件夹模式：自动识别子文件夹为 batch
+python batch_run.py -i /mnt/nature_causal_pdf/S -o ./results
+
+# 每个 batch 最多处理 5 个 PDF
+python batch_run.py -i /mnt/nature_causal_pdf/S --batch-size 5
+
+# 只处理指定的子文件夹
+python batch_run.py -i /mnt/nature_causal_pdf/S --batches 98 99
+
+# 组合：只跑 98，每批 3 个，4 个并发 worker
+python batch_run.py -i /mnt/nature_causal_pdf/S --batches 98 --batch-size 3 --max-workers 4
 
 # 指定 HPP 字典 + 控制重试次数
-python batch_run.py -i ./pdfs -o ./results \
+python batch_run.py -i /mnt/nature_causal_pdf/S -o ./results \
   --hpp-dict templates/pheno_ai_data_dictionaries_simplified.json \
   --max-retries 3
 
@@ -155,16 +197,23 @@ python batch_run.py --type interventional
 
 ### 常用参数
 
-| 参数                    | 说明                                |
-|-----------------------|-----------------------------------|
-| `--model`             | 覆盖默认 LLM 模型名                      |
-| `--api-key`           | 覆盖环境变量中的 API Key                  |
-| `--base-url`          | 覆盖环境变量中的 Base URL                 |
-| `--hpp-dict`          | HPP 数据字典 JSON 路径（启用 RAG + Rerank） |
-| `--max-retries`       | 语义验证失败时最大重试次数（默认 2，设 0 关闭）        |
-| `--ocr-dir`           | OCR 缓存目录（默认 `./cache_ocr`）        |
-| `--dpi`               | PDF 转图片 DPI（默认 200）               |
-| `--no-validate-pages` | 跳过 OCR 尾页过滤                       |
+| 参数                    | 说明                                          |
+|-----------------------|---------------------------------------------|
+| `-i`, `--input-dir`   | 输入目录，支持平铺 PDF 或含子文件夹（默认 `./evidence_card`） |
+| `-o`, `--output-dir`  | 输出目录（默认 `./output`）                         |
+| `--batch-size`        | 每个子文件夹最多处理 N 个 PDF（0 = 不限制，默认 0）           |
+| `--batches`           | 只处理指定的子文件夹（如 `--batches 98 99`，默认全部）        |
+| `--max-workers`       | 并发线程数（默认 1，即串行）                             |
+| `--model`             | 覆盖默认 LLM 模型名                                |
+| `--api-key`           | 覆盖环境变量中的 API Key                            |
+| `--base-url`          | 覆盖环境变量中的 Base URL                           |
+| `--hpp-dict`          | HPP 数据字典 JSON 路径（启用 RAG + Rerank）           |
+| `--max-retries`       | 语义验证失败时最大重试次数（默认 2，设 0 关闭）                  |
+| `--ocr-dir`           | OCR 缓存目录（默认 `./cache_ocr`）                  |
+| `--dpi`               | PDF 转图片 DPI（默认 200）                         |
+| `--no-validate-pages` | 跳过 OCR 尾页过滤                                 |
+| `--xml`               | 输入为 JATS/NLM XML 格式，跳过 OCR                  |
+| `--resume`            | 跳过已有缓存的步骤（step0/step1）                      |
 
 ---
 

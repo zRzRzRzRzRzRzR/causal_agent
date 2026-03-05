@@ -41,6 +41,7 @@ class GLMClient:
         temperature: float = _DEFAULT_TEMPERATURE,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         response_format: Optional[Dict[str, str]] = None,
+        thinking: bool = True,
     ) -> str:
         messages: List[Dict] = []
         if system_prompt:
@@ -56,6 +57,9 @@ class GLMClient:
         if response_format:
             kwargs["response_format"] = response_format
 
+        if not thinking:
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
         response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content
 
@@ -65,6 +69,7 @@ class GLMClient:
         system_prompt: str = "请你遵循我的指令，请严格以 JSON 格式输出。不要生成任何额外的内容。",
         temperature: float = _DEFAULT_TEMPERATURE,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
+        thinking: bool = True,
     ) -> Any:
         raw = self.call(
             prompt=prompt,
@@ -72,6 +77,7 @@ class GLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
             response_format={"type": "json_object"},
+            thinking=thinking,
         )
 
         try:

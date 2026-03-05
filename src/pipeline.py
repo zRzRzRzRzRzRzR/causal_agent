@@ -130,7 +130,7 @@ def step1_enumerate_edges(
     prompt_template = prompt_template.replace("{evidence_type}", evidence_type)
     full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text}"
 
-    result = client.call_json(full_prompt, max_tokens=32768)
+    result = client.call_json(full_prompt)
 
     edges = result.get("edges", [])
     paper_info = result.get("paper_info", {})
@@ -679,7 +679,7 @@ def _safe_spot_check(
                     f'"correct_value": null}}\n\n'
                     f"Paper (first 15000 chars):\n{pdf_text[:15000]}"
                 )
-                result = client.call_json(prompt)
+                result = client.call_json(prompt, thinking=False)
                 result["edge_index"] = i
                 result["edge_id"] = e.get("edge_id", "?")
                 results.append(result)

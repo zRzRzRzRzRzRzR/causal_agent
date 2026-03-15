@@ -1,6 +1,7 @@
-openai>=2.16.0
+openai>=2.28.0
 python-dotenv>=1.0.0
 zai-sdk>=0.2.2
 pre-commit>=4.5.1
 json5>=0.13.0
 pymupdf>=1.27.1
+glmocr>=0.1.3

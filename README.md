@@ -89,7 +89,6 @@ step3_review.json  ← 质量报告（改了什么、哪些有问题）
 ├── templates/                 # HPP 模板和数据字典
 │   ├── hpp_mapping_template.json                    # 带 // 注释的模板（LLM 阅读用）
 │   └── pheno_ai_data_dictionaries_simplified.json   # HPP 数据字典（35 datasets, ~2779 fields）
-├── glm-ocr/                   # GLM-OCR 模型相关
 ├── batch_run.py               # 批处理脚本（支持子文件夹 batch 模式）
 ├── requirements.txt
 └── .env                       # API 配置

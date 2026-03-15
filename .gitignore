@@ -1,5 +1,6 @@
 glm-ocr
-reference
+reference/case*
+reference/*.json
 .idea
 .vscode
 .DS_Store

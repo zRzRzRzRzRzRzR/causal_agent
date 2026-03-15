@@ -1,5 +1,5 @@
 """
-pipeline.py -- Edge extraction pipeline v2.
+pipeline.py -- Edge extraction pipeline v3.
 
 Redesigned for speed and reliability:
 
@@ -10,13 +10,15 @@ Redesigned for speed and reliability:
   Step 2: Fill each edge into HPP template (simplified, no retry loop --
           pre-validation provides equation_type/model/mu/theta)
   Step 3: Review with robust JSON parsing (no crash on LLM parse failures)
+  Step 4: Content audit -- deterministic + LLM checks against paper text
+          (covariate hallucination, numeric hallucination, Y-label mismatch,
+          HPP variable leakage, sample data errors)
 
-Key changes from v1:
-  - Step 1.5 catches equation_type/model/formula errors deterministically
-  - Step 2 no longer does semantic retry (pre-validation handles this)
-  - Step 2 injects pre-computed equation metadata into the LLM prompt
-  - Step 3 spot_check uses safe_call_json with fallback
-  - Step 3 rerank is batched to reduce LLM calls
+Key changes from v2:
+  - Step 4 added: post-extraction content audit with auto-fix
+  - Phase A (deterministic): covariate/numeric/HPP leakage detection + auto-removal
+  - Phase B (LLM): Y-label cross-check, adjustment semantics, guided by
+    error_patterns.json from reference GT cases
 """
 
 import json
@@ -25,6 +27,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .audit import run_step4_audit
 from .edge_prevalidator import prevalidate_edges
 from .hpp_mapper import HPPMapper, get_hpp_context
 from .llm_client import GLMClient
@@ -54,6 +57,8 @@ _PROMPTS_DIR = _PROJECT_DIR / "prompts"
 _TEMPLATES_DIR = _PROJECT_DIR / "templates"
 _DEFAULT_HPP_DICT = _TEMPLATES_DIR / "pheno_ai_data_dictionaries_simplified.json"
 _DEFAULT_TEMPLATE = _TEMPLATES_DIR / "hpp_mapping_template.json"
+_REFERENCE_DIR = _PROJECT_DIR / "reference"
+_DEFAULT_ERROR_PATTERNS = _REFERENCE_DIR / "error_patterns.json"
 
 
 def _load_prompt(name: str) -> str:
@@ -705,12 +710,13 @@ def _safe_spot_check(
 
 class EdgeExtractionPipeline:
     """
-    Five-step pipeline:
+    Six-step pipeline:
       Step 0: Classify paper type
       Step 1: Enumerate all statistical edges (with deduplication)
       Step 1.5: Pre-validate (hard + soft check, no LLM)
       Step 2: Fill each edge into HPP template (simplified, no retry)
       Step 3: Review, rerank, consistency check, spot-check, quality report
+      Step 4: Content audit (deterministic Phase A + LLM Phase B)
     """
 
     def __init__(
@@ -730,6 +736,11 @@ class EdgeExtractionPipeline:
         enable_rerank: bool = True,
         enable_spot_check: bool = True,
         spot_check_sample: int = 5,
+        # Step 4 options
+        enable_step4: bool = True,
+        enable_step4_llm: bool = True,
+        step4_max_edges_per_call: int = 5,
+        error_patterns_path: Optional[str] = None,
     ):
         self.client = client
         self.ocr_text_func = ocr_text_func
@@ -751,6 +762,24 @@ class EdgeExtractionPipeline:
         self.enable_rerank = enable_rerank
         self.enable_spot_check = enable_spot_check
         self.spot_check_sample = spot_check_sample
+
+        # Step 4 flags
+        self.enable_step4 = enable_step4
+        self.enable_step4_llm = enable_step4_llm
+        self.step4_max_edges_per_call = step4_max_edges_per_call
+        if error_patterns_path:
+            self.error_patterns_path = error_patterns_path
+        elif _DEFAULT_ERROR_PATTERNS.exists():
+            self.error_patterns_path = str(_DEFAULT_ERROR_PATTERNS)
+        else:
+            self.error_patterns_path = None
+        if self.enable_step4:
+            print(
+                f"[Pipeline] Step 4 enabled "
+                f"(LLM={'on' if self.enable_step4_llm else 'off'}, "
+                f"patterns={self.error_patterns_path})",
+                file=sys.stderr,
+            )
 
         if ocr_init_func is not None:
             ocr_init_func(
@@ -893,6 +922,19 @@ class EdgeExtractionPipeline:
             if pdf_dir:
                 save_json(pdf_dir / "step3_review.json", quality_report)
 
+        # -- Step 4: Content Audit --
+        audit_report = None
+        if self.enable_step4 and all_filled_edges:
+            all_filled_edges, audit_report = run_step4_audit(
+                edges=all_filled_edges,
+                pdf_text=pdf_text,
+                client=self.client if self.enable_step4_llm else None,
+                max_edges_per_llm_call=self.step4_max_edges_per_call,
+                error_patterns_path=self.error_patterns_path,
+            )
+            if pdf_dir:
+                save_json(pdf_dir / "step4_audit.json", audit_report)
+
         # -- Save final edges --
         # Final cleanup: strip internal metadata and enforce schema
         for edge in all_filled_edges:
@@ -918,6 +960,15 @@ class EdgeExtractionPipeline:
             print(
                 f"  Quality: {s['valid_edges']}/{s['total_edges']} valid, "
                 f"avg fill {s['avg_fill_rate']:.0%}",
+                file=sys.stderr,
+            )
+        if audit_report:
+            s4 = audit_report["summary"]
+            print(
+                f"  Audit: {s4['phase_a_issues']} Phase A issues, "
+                f"{s4['phase_a_fixes']} auto-fixed, "
+                f"{s4['phase_b_issues']} Phase B issues, "
+                f"{s4['edges_with_errors']} edges with errors",
                 file=sys.stderr,
             )
         sem_pass = sum(
@@ -974,4 +1025,24 @@ class EdgeExtractionPipeline:
             save_json(base / pdf_name / "step3_review.json", report)
             return report
 
-        raise ValueError(f"Unknown step: {step}. Valid: classify, edges, review")
+        if step == "audit":
+            pdf_name = Path(pdf_path).stem
+            base = Path(output_dir or ".")
+            edges_path = base / pdf_name / "edges.json"
+            assert edges_path.exists(), f"Run 'full' first. Not found: {edges_path}"
+            with open(edges_path, "r", encoding="utf-8") as f:
+                edges = json.load(f)
+
+            updated, report = run_step4_audit(
+                edges=edges,
+                pdf_text=pdf_text,
+                client=self.client if self.enable_step4_llm else None,
+                max_edges_per_llm_call=self.step4_max_edges_per_call,
+                error_patterns_path=self.error_patterns_path,
+            )
+
+            save_json(edges_path, updated)
+            save_json(base / pdf_name / "step4_audit.json", report)
+            return report
+
+        raise ValueError(f"Unknown step: {step}. Valid: classify, edges, review, audit")

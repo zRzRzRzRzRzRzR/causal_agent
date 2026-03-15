@@ -1,3 +1,4 @@
+from .audit import phase_a_audit, run_step4_audit
 from .llm_client import GLMClient
 from .review import (
     check_cross_edge_consistency,
@@ -38,4 +39,6 @@ __all__ = [
     "spot_check_values",
     "validate_filled_edge",
     "validate_semantics",
+    "run_step4_audit",
+    "phase_a_audit",
 ]

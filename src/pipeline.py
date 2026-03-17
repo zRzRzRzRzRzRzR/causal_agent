@@ -930,7 +930,6 @@ class EdgeExtractionPipeline:
                 pdf_text=pdf_text,
                 client=self.client if self.enable_step4_llm else None,
                 max_edges_per_llm_call=self.step4_max_edges_per_call,
-                error_patterns_path=self.error_patterns_path,
             )
             if pdf_dir:
                 save_json(pdf_dir / "step4_audit.json", audit_report)

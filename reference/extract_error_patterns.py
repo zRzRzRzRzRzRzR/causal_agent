@@ -24,8 +24,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Dict, List, Tuple
 
 # ---------------------------------------------------------------------------
 # Parse annotated JSON with comments
@@ -34,9 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Regex to detect edge summary lines like:
 #   // EV-2000-McPhillips#1 | ✅ 17 正确 | ⚠️ 4 待确认 | ❌ 2 错误
 # These are NOT field-level annotations; skip them.
-_EDGE_SUMMARY_RE = re.compile(
-    r"EV-\S+\s*\|.*[✅⚠️❌].*\d+\s*(正确|待确认|错误)"
-)
+_EDGE_SUMMARY_RE = re.compile(r"EV-\S+\s*\|.*[✅⚠️❌].*\d+\s*(正确|待确认|错误)")
 
 # Regex to detect "no verification needed" lines like:
 #   // 🔵 无需验证（自定义框架分类）
@@ -75,20 +72,20 @@ def _strip_js_comments(text: str) -> Tuple[str, List[Dict]]:
             current_edge_id = edge_id_match.group(1)
 
         # Match // comment
-        comment_match = re.search(r'//\s*(.*)', line)
+        comment_match = re.search(r"//\s*(.*)", line)
 
         if comment_match:
             comment_text = comment_match.group(1).strip()
 
             # Skip edge summary lines (e.g. "EV-xxx | ✅ 17 正确 | ⚠️ 4 ...")
             if _EDGE_SUMMARY_RE.search(comment_text):
-                clean_line = line[:comment_match.start()].rstrip()
+                clean_line = line[: comment_match.start()].rstrip()
                 clean_lines.append(clean_line)
                 continue
 
             # Skip "no verification needed" / "skip" lines
             if _SKIP_RE.search(comment_text):
-                clean_line = line[:comment_match.start()].rstrip()
+                clean_line = line[: comment_match.start()].rstrip()
                 clean_lines.append(clean_line)
                 continue
 
@@ -102,27 +99,29 @@ def _strip_js_comments(text: str) -> Tuple[str, List[Dict]]:
                 ann_type = "correct"
             else:
                 # Not a structured annotation, skip
-                clean_line = line[:comment_match.start()].rstrip()
+                clean_line = line[: comment_match.start()].rstrip()
                 clean_lines.append(clean_line)
                 continue
 
             # Try to extract field name from the JSON content before the comment
-            field_part = line[:comment_match.start()].strip().rstrip(",")
+            field_part = line[: comment_match.start()].strip().rstrip(",")
             inline_field_match = re.match(r'"(\w+)"', field_part)
             if inline_field_match:
                 last_field = inline_field_match.group(1)
 
-            annotations.append({
-                "line": i + 1,
-                "type": ann_type,
-                "text": comment_text,
-                "context_field": last_field,
-                "edge_id": current_edge_id,
-                "raw_line": stripped,
-            })
+            annotations.append(
+                {
+                    "line": i + 1,
+                    "type": ann_type,
+                    "text": comment_text,
+                    "context_field": last_field,
+                    "edge_id": current_edge_id,
+                    "raw_line": stripped,
+                }
+            )
 
             # Remove comment from line for clean JSON
-            clean_line = line[:comment_match.start()].rstrip()
+            clean_line = line[: comment_match.start()].rstrip()
             clean_lines.append(clean_line)
         else:
             clean_lines.append(line)
@@ -153,8 +152,13 @@ def parse_gt_json(gt_path: str) -> Tuple[List[Dict], List[Dict]]:
         try:
             data = json.loads(clean_json)
         except json.JSONDecodeError as e:
-            print(f"  WARNING: Failed to parse JSON from {gt_path}: {e}", file=sys.stderr)
-            print(f"  Annotations still extracted ({len(annotations)} found)", file=sys.stderr)
+            print(
+                f"  WARNING: Failed to parse JSON from {gt_path}: {e}", file=sys.stderr
+            )
+            print(
+                f"  Annotations still extracted ({len(annotations)} found)",
+                file=sys.stderr,
+            )
             return [], annotations
 
     if isinstance(data, list):
@@ -242,6 +246,7 @@ def categorize_error(text: str) -> str:
 # Extract patterns from annotations
 # ---------------------------------------------------------------------------
 
+
 def extract_patterns(
     annotations: List[Dict],
     edges: List[Dict],
@@ -276,6 +281,7 @@ def extract_patterns(
 # Aggregate patterns across cases
 # ---------------------------------------------------------------------------
 
+
 def aggregate_patterns(all_patterns: List[Dict]) -> Dict:
     """
     Aggregate error patterns across all cases into a catalog.
@@ -288,12 +294,14 @@ def aggregate_patterns(all_patterns: List[Dict]) -> Dict:
     examples_by_category = defaultdict(list)
     for p in all_patterns:
         if p["annotation_type"] == "error":
-            examples_by_category[p["category"]].append({
-                "case": p["case_id"],
-                "edge_id": p["edge_id"],
-                "field": p["field"],
-                "text": p["text"],
-            })
+            examples_by_category[p["category"]].append(
+                {
+                    "case": p["case_id"],
+                    "edge_id": p["edge_id"],
+                    "field": p["field"],
+                    "text": p["text"],
+                }
+            )
 
     # Keep top 3 unique examples per category
     top_examples = {}
@@ -373,7 +381,9 @@ def process_single_case(gt_path: str) -> Tuple[List[Dict], Dict]:
         "num_errors": len(errors),
         "num_warnings": len(warnings),
         "error_categories": dict(Counter(p["category"] for p in errors).most_common()),
-        "warning_categories": dict(Counter(p["category"] for p in warnings).most_common()),
+        "warning_categories": dict(
+            Counter(p["category"] for p in warnings).most_common()
+        ),
     }
 
     return patterns, stats
@@ -388,12 +398,14 @@ def main():
         help="Path to a single GT file or a directory containing case folders",
     )
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         default=None,
         help="Output path for error_patterns.json (default: <target_dir>/error_patterns.json)",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Print detailed per-pattern output",
     )

@@ -13,6 +13,16 @@ from src.pipeline import EdgeExtractionPipeline
 from src.xml_reader import extract_text_from_xml
 
 
+def is_file_completed(file_path: Path, output_dir: Path) -> bool:
+    """
+    Check whether a file has already been fully processed.
+    A file is considered complete if its output sub-directory contains edges.json.
+    """
+    stem = file_path.stem
+    edges_file = output_dir / stem / "edges.json"
+    return edges_file.exists()
+
+
 def process_single_file(
     file_path: Path,
     pipeline: EdgeExtractionPipeline,
@@ -24,6 +34,25 @@ def process_single_file(
     status = "success"
     error_msg = None
     n_edges = 0
+
+    # ── File-level skip: if edges.json already exists, skip entirely ──
+    if resume and is_file_completed(file_path, output_dir):
+        # Read existing edges count for accurate reporting
+        edges_file = output_dir / file_path.stem / "edges.json"
+        try:
+            with open(edges_file, "r", encoding="utf-8") as f:
+                existing_edges = json.load(f)
+            n_edges = len(existing_edges) if isinstance(existing_edges, list) else 0
+        except Exception:
+            n_edges = 0
+
+        return {
+            "file": file_path.name,
+            "status": "skipped",
+            "n_edges": n_edges,
+            "elapsed_sec": 0,
+            "error": None,
+        }
 
     try:
         edges = pipeline.run(
@@ -83,6 +112,34 @@ def collect_batches(input_dir: Path, xml_mode: bool) -> dict[str, list[Path]]:
     return batches
 
 
+def filter_completed_files(
+    batches: dict[str, list[Path]], output_dir: Path
+) -> tuple[dict[str, list[Path]], int]:
+    """
+    Remove already-completed files from each batch.
+    Returns (filtered_batches, n_skipped).
+    """
+    filtered = {}
+    n_skipped = 0
+    for batch_name, files in batches.items():
+        if batch_name == "_root":
+            batch_output = output_dir
+        else:
+            batch_output = output_dir / batch_name
+
+        pending = []
+        for f in files:
+            if is_file_completed(f, batch_output):
+                n_skipped += 1
+            else:
+                pending.append(f)
+
+        if pending:
+            filtered[batch_name] = pending
+
+    return filtered, n_skipped
+
+
 def process_batch(
     batch_name: str,
     files: list[Path],
@@ -111,7 +168,11 @@ def process_batch(
             # Add batch info
             summary["batch"] = batch_name
             results.append(summary)
-            tag = "OK" if summary["status"] == "success" else "FAIL"
+            tag = (
+                "SKIP"
+                if summary["status"] == "skipped"
+                else ("OK" if summary["status"] == "success" else "FAIL")
+            )
             print(
                 f"      [{tag}] {summary['n_edges']} edges, {summary['elapsed_sec']}s",
                 file=sys.stderr,
@@ -143,7 +204,11 @@ def process_batch(
                     }
                 summary["batch"] = batch_name
                 results.append(summary)
-                tag = "OK" if summary["status"] == "success" else "FAIL"
+                tag = (
+                    "SKIP"
+                    if summary["status"] == "skipped"
+                    else ("OK" if summary["status"] == "success" else "FAIL")
+                )
                 print(
                     f"      [{tag}] {file_path.name}: {summary['n_edges']} edges, "
                     f"{summary['elapsed_sec']}s",
@@ -188,19 +253,20 @@ def main():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Skip steps whose output already exists (step0/step1 cache)",
+        help="Skip files whose edges.json already exists, and skip steps whose cache exists",
     )
     parser.add_argument(
         "--xml",
         action="store_true",
         help="Input files are JATS/NLM XML (.nxml/.xml) — skip OCR entirely",
     )
-    # ── NEW: batch control ──
+    # ── Batch control ──
     parser.add_argument(
         "--batch-size",
         type=int,
         default=0,
-        help="Global max files to process across all batches in order (0 = no limit, process all)",
+        help="Max NEW files to process across all batches (0 = no limit). "
+        "Already-completed files are excluded from this count when --resume is set.",
     )
     parser.add_argument(
         "--batches",
@@ -225,7 +291,16 @@ def main():
         selected = set(args.batches)
         all_batches = {k: v for k, v in all_batches.items() if k in selected}
 
-    # Apply --batch-size as a global cap across all batches (folders processed in order)
+    total_found = sum(len(v) for v in all_batches.values())
+
+    # ── If --resume, filter out already-completed files BEFORE applying batch-size ──
+    n_skipped_completed = 0
+    if args.resume:
+        all_batches, n_skipped_completed = filter_completed_files(
+            all_batches, output_dir
+        )
+
+    # Apply --batch-size as a global cap across remaining (pending) files
     if args.batch_size > 0:
         capped: dict[str, list[Path]] = {}
         remaining = args.batch_size
@@ -246,10 +321,13 @@ def main():
     print(f"  Output:  {output_dir.resolve()}", file=sys.stderr)
     print(f"  Format:  {fmt_label}", file=sys.stderr)
     print(
-        f"  Batches: {len(all_batches)} ({', '.join(all_batches.keys())})",
+        f"  Batches: {len(all_batches)} ({', '.join(all_batches.keys()) if all_batches else 'none'})",
         file=sys.stderr,
     )
-    print(f"  Total files: {total_files}", file=sys.stderr)
+    print(f"  Total found: {total_found}", file=sys.stderr)
+    if args.resume:
+        print(f"  Already completed (skipped): {n_skipped_completed}", file=sys.stderr)
+    print(f"  To process: {total_files}", file=sys.stderr)
     print(f"  Batch size limit: {args.batch_size or 'unlimited'}", file=sys.stderr)
     print(f"  Type:    {args.type or 'auto-classify'}", file=sys.stderr)
     print(f"  Workers: {args.max_workers}", file=sys.stderr)
@@ -258,7 +336,13 @@ def main():
     print(f"{'='*60}\n", file=sys.stderr)
 
     if total_files == 0:
-        print("No input files found. Exiting.", file=sys.stderr)
+        if n_skipped_completed > 0:
+            print(
+                f"All {n_skipped_completed} files already completed. Nothing to do.",
+                file=sys.stderr,
+            )
+        else:
+            print("No input files found. Exiting.", file=sys.stderr)
         sys.exit(0)
 
     client = GLMClient(api_key=args.api_key, base_url=args.base_url, model=args.model)
@@ -309,30 +393,35 @@ def main():
         all_results.extend(batch_results)
 
         n_ok = sum(1 for r in batch_results if r["status"] == "success")
+        n_skip = sum(1 for r in batch_results if r["status"] == "skipped")
         n_edges = sum(r["n_edges"] for r in batch_results)
         batch_summaries[batch_name] = {
             "files": len(files),
             "success": n_ok,
-            "failed": len(files) - n_ok,
+            "skipped": n_skip,
+            "failed": len(files) - n_ok - n_skip,
             "total_edges": n_edges,
             "elapsed_sec": batch_elapsed,
         }
         print(
             f"  Batch {batch_name} done: {n_ok}/{len(files)} OK, "
-            f"{n_edges} edges, {batch_elapsed}s",
+            f"{n_skip} skipped, {n_edges} edges, {batch_elapsed}s",
             file=sys.stderr,
         )
 
     # ── Global summary ──
     total_elapsed = round(time.time() - t_start, 1)
     n_success = sum(1 for r in all_results if r["status"] == "success")
-    n_failed = len(all_results) - n_success
+    n_skipped = sum(1 for r in all_results if r["status"] == "skipped")
+    n_failed = len(all_results) - n_success - n_skipped
 
     global_summary = {
-        "total_files": total_files,
+        "total_files_found": total_found,
+        "total_files_processed": total_files,
         "total_batches": len(all_batches),
         "format": fmt_label,
         "success": n_success,
+        "skipped": n_skipped + n_skipped_completed,
         "failed": n_failed,
         "total_edges": sum(r["n_edges"] for r in all_results),
         "total_elapsed_sec": total_elapsed,
@@ -346,8 +435,9 @@ def main():
 
     print(f"\n{'='*60}", file=sys.stderr)
     print(
-        f"Complete: {n_success}/{total_files} succeeded across "
-        f"{len(all_batches)} batches, "
+        f"Complete: {n_success}/{total_files} succeeded, "
+        f"{n_skipped} skipped in-run, {n_skipped_completed} pre-filtered, "
+        f"{n_failed} failed across {len(all_batches)} batches, "
         f"{global_summary['total_edges']} total edges, {total_elapsed}s",
         file=sys.stderr,
     )

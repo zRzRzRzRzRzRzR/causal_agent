@@ -23,13 +23,8 @@ Output: audit_report.json + edges_audited.json (with fixes applied)
 import copy
 import json
 import re
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Tuple
 
-
-# ---------------------------------------------------------------------------
-# Utility: number-in-text search (reused from edge_prevalidator logic)
-# ---------------------------------------------------------------------------
 
 def _number_appears_in_text(val: Any, text: str) -> bool:
     """Check if a numeric value appears somewhere in the paper text."""
@@ -90,13 +85,7 @@ def _term_appears_in_text(term: str, text: str, fuzzy: bool = True) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Phase A: Deterministic checks
-# ---------------------------------------------------------------------------
-
-def _check_covariate_hallucination(
-    edge: Dict, pdf_text: str
-) -> List[Dict[str, Any]]:
+def _check_covariate_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, Any]]:
     """
     A1: Check that each variable in Z / adjustment_set actually appears
     in the paper text. Hallucinated covariates are a top error pattern.
@@ -118,24 +107,24 @@ def _check_covariate_hallucination(
 
     for cov in sorted(all_covariates):
         if not _term_appears_in_text(cov, pdf_text):
-            issues.append({
-                "check": "covariate_hallucination",
-                "severity": "error",
-                "field": "epsilon.rho.Z / literature_estimate.adjustment_set",
-                "variable": cov,
-                "message": (
-                    f"Covariate '{cov}' not found in paper text. "
-                    f"Likely hallucinated by LLM."
-                ),
-                "action": "remove",
-            })
+            issues.append(
+                {
+                    "check": "covariate_hallucination",
+                    "severity": "error",
+                    "field": "epsilon.rho.Z / literature_estimate.adjustment_set",
+                    "variable": cov,
+                    "message": (
+                        f"Covariate '{cov}' not found in paper text. "
+                        f"Likely hallucinated by LLM."
+                    ),
+                    "action": "remove",
+                }
+            )
 
     return issues
 
 
-def _check_numeric_hallucination(
-    edge: Dict, pdf_text: str
-) -> List[Dict[str, Any]]:
+def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, Any]]:
     """
     A2: Check that key numeric values (theta_hat, CI, reported values)
     appear in the paper text.
@@ -147,68 +136,71 @@ def _check_numeric_hallucination(
     # Check reported_effect_value
     rev = efr.get("reported_effect_value")
     if rev is not None and not _number_appears_in_text(rev, pdf_text):
-        issues.append({
-            "check": "numeric_hallucination",
-            "severity": "error",
-            "field": "equation_formula_reported.reported_effect_value",
-            "value": rev,
-            "message": f"reported_effect_value={rev} not found in paper text.",
-            "action": "flag_for_review",
-        })
+        issues.append(
+            {
+                "check": "numeric_hallucination",
+                "severity": "error",
+                "field": "equation_formula_reported.reported_effect_value",
+                "value": rev,
+                "message": f"reported_effect_value={rev} not found in paper text.",
+                "action": "flag_for_review",
+            }
+        )
 
-    # Check reported_ci
     rci = efr.get("reported_ci")
     if isinstance(rci, list):
         for i, bound in enumerate(rci):
             if bound is not None and not _number_appears_in_text(bound, pdf_text):
                 label = "lower" if i == 0 else "upper"
-                issues.append({
-                    "check": "numeric_hallucination",
-                    "severity": "error",
-                    "field": f"equation_formula_reported.reported_ci[{i}]",
-                    "value": bound,
-                    "message": f"CI {label} bound={bound} not found in paper text.",
-                    "action": "flag_for_review",
-                })
+                issues.append(
+                    {
+                        "check": "numeric_hallucination",
+                        "severity": "error",
+                        "field": f"equation_formula_reported.reported_ci[{i}]",
+                        "value": bound,
+                        "message": f"CI {label} bound={bound} not found in paper text.",
+                        "action": "flag_for_review",
+                    }
+                )
 
-    # Check theta_hat (only if on difference scale -- log-scale won't appear)
     mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})
     theta = lit.get("theta_hat")
     if mu.get("scale") != "log" and theta is not None:
         if not _number_appears_in_text(theta, pdf_text):
-            issues.append({
-                "check": "numeric_hallucination",
-                "severity": "warning",
-                "field": "literature_estimate.theta_hat",
-                "value": theta,
-                "message": (
-                    f"theta_hat={theta} not found in paper text "
-                    f"(difference scale)."
-                ),
-                "action": "flag_for_review",
-            })
+            issues.append(
+                {
+                    "check": "numeric_hallucination",
+                    "severity": "warning",
+                    "field": "literature_estimate.theta_hat",
+                    "value": theta,
+                    "message": (
+                        f"theta_hat={theta} not found in paper text "
+                        f"(difference scale)."
+                    ),
+                    "action": "flag_for_review",
+                }
+            )
 
-    # Check CI in literature_estimate
     ci = lit.get("ci")
     if isinstance(ci, list) and mu.get("scale") != "log":
         for i, bound in enumerate(ci):
             if bound is not None and not _number_appears_in_text(bound, pdf_text):
                 label = "lower" if i == 0 else "upper"
-                issues.append({
-                    "check": "numeric_hallucination",
-                    "severity": "warning",
-                    "field": f"literature_estimate.ci[{i}]",
-                    "value": bound,
-                    "message": f"CI {label}={bound} not found in paper text.",
-                    "action": "flag_for_review",
-                })
+                issues.append(
+                    {
+                        "check": "numeric_hallucination",
+                        "severity": "warning",
+                        "field": f"literature_estimate.ci[{i}]",
+                        "value": bound,
+                        "message": f"CI {label}={bound} not found in paper text.",
+                        "action": "flag_for_review",
+                    }
+                )
 
     return issues
 
 
-def _check_sample_data(
-    edge: Dict, pdf_text: str
-) -> List[Dict[str, Any]]:
+def _check_sample_data(edge: Dict, pdf_text: str) -> List[Dict[str, Any]]:
     """
     A3: Check that study_cohort numeric values appear in the paper.
     """
@@ -229,26 +221,26 @@ def _check_sample_data(
                 try:
                     num = float(num_str)
                     if num > 1 and not _number_appears_in_text(num, pdf_text):
-                        issues.append({
-                            "check": "sample_data_hallucination",
-                            "severity": "warning",
-                            "field": f"study_cohort.{field_name}.value",
-                            "value": num_str,
-                            "message": (
-                                f"Number '{num_str}' from "
-                                f"study_cohort.{field_name} not found in text."
-                            ),
-                            "action": "flag_for_review",
-                        })
+                        issues.append(
+                            {
+                                "check": "sample_data_hallucination",
+                                "severity": "warning",
+                                "field": f"study_cohort.{field_name}.value",
+                                "value": num_str,
+                                "message": (
+                                    f"Number '{num_str}' from "
+                                    f"study_cohort.{field_name} not found in text."
+                                ),
+                                "action": "flag_for_review",
+                            }
+                        )
                 except ValueError:
                     pass
 
     return issues
 
 
-def _check_hpp_variable_leakage(
-    edge: Dict, pdf_text: str
-) -> List[Dict[str, Any]]:
+def _check_hpp_variable_leakage(edge: Dict, pdf_text: str) -> List[Dict[str, Any]]:
     """
     A4: Check that X and Y variable names actually come from the paper,
     not leaked from HPP dictionary field names.
@@ -270,19 +262,21 @@ def _check_hpp_variable_leakage(
             if isinstance(hpp_entry, dict):
                 hpp_field = hpp_entry.get("field", "")
                 hpp_name = hpp_entry.get("name", "")
-                issues.append({
-                    "check": "hpp_variable_leakage",
-                    "severity": "error",
-                    "field": f"epsilon.rho.{role}",
-                    "value": var_name,
-                    "hpp_field": hpp_field,
-                    "message": (
-                        f"Variable name '{var_name}' (role={role}) not found "
-                        f"in paper text. May be leaked from HPP dictionary "
-                        f"(hpp field='{hpp_field}')."
-                    ),
-                    "action": "flag_for_review",
-                })
+                issues.append(
+                    {
+                        "check": "hpp_variable_leakage",
+                        "severity": "error",
+                        "field": f"epsilon.rho.{role}",
+                        "value": var_name,
+                        "hpp_field": hpp_field,
+                        "message": (
+                            f"Variable name '{var_name}' (role={role}) not found "
+                            f"in paper text. May be leaked from HPP dictionary "
+                            f"(hpp field='{hpp_field}')."
+                        ),
+                        "action": "flag_for_review",
+                    }
+                )
 
     return issues
 
@@ -295,22 +289,32 @@ def _check_extra_fields(edge: Dict) -> List[Dict[str, Any]]:
     lit = edge.get("literature_estimate", {})
 
     FORBIDDEN_LIT_FIELDS = {
-        "subgroup", "control_reference", "reported_HR", "reported_CI_HR",
-        "reported_OR", "reported_CI_OR", "reported_RR", "reported_CI_RR",
-        "group_means", "notes", "reported_effect_value",
+        "subgroup",
+        "control_reference",
+        "reported_HR",
+        "reported_CI_HR",
+        "reported_OR",
+        "reported_CI_OR",
+        "reported_RR",
+        "reported_CI_RR",
+        "group_means",
+        "notes",
+        "reported_effect_value",
     }
 
     for field in FORBIDDEN_LIT_FIELDS:
         if field in lit:
-            issues.append({
-                "check": "extra_field",
-                "severity": "warning",
-                "field": f"literature_estimate.{field}",
-                "message": (
-                    f"Field '{field}' should not be in literature_estimate."
-                ),
-                "action": "remove",
-            })
+            issues.append(
+                {
+                    "check": "extra_field",
+                    "severity": "warning",
+                    "field": f"literature_estimate.{field}",
+                    "message": (
+                        f"Field '{field}' should not be in literature_estimate."
+                    ),
+                    "action": "remove",
+                }
+            )
 
     # Check hpp_mapping for extra fields
     hm = edge.get("hpp_mapping", {})
@@ -321,24 +325,22 @@ def _check_extra_fields(edge: Dict) -> List[Dict[str, Any]]:
         if isinstance(entry, dict):
             extras = set(entry.keys()) - ALLOWED_HPP_FIELDS
             if extras:
-                issues.append({
-                    "check": "extra_field",
-                    "severity": "warning",
-                    "field": f"hpp_mapping.{role}",
-                    "extra_keys": sorted(extras),
-                    "message": (
-                        f"hpp_mapping.{role} has extra fields: {sorted(extras)}. "
-                        f"Only {sorted(ALLOWED_HPP_FIELDS)} allowed."
-                    ),
-                    "action": "remove",
-                })
+                issues.append(
+                    {
+                        "check": "extra_field",
+                        "severity": "warning",
+                        "field": f"hpp_mapping.{role}",
+                        "extra_keys": sorted(extras),
+                        "message": (
+                            f"hpp_mapping.{role} has extra fields: {sorted(extras)}. "
+                            f"Only {sorted(ALLOWED_HPP_FIELDS)} allowed."
+                        ),
+                        "action": "remove",
+                    }
+                )
 
     return issues
 
-
-# ---------------------------------------------------------------------------
-# Phase A: Run all deterministic checks
-# ---------------------------------------------------------------------------
 
 def phase_a_audit(
     edges: List[Dict], pdf_text: str
@@ -387,10 +389,6 @@ def phase_a_audit(
     return edges, report
 
 
-# ---------------------------------------------------------------------------
-# Phase A: Auto-fix (apply deterministic corrections)
-# ---------------------------------------------------------------------------
-
 def apply_phase_a_fixes(
     edges: List[Dict],
     issues: List[Dict],
@@ -431,25 +429,30 @@ def apply_phase_a_fixes(
                 rho_z = edge.get("epsilon", {}).get("rho", {}).get("Z", [])
                 if isinstance(rho_z, list) and var in rho_z:
                     rho_z.remove(var)
-                    applied_fixes.append({
-                        "edge_id": iss["edge_id"],
-                        "action": "removed_from_rho_Z",
-                        "variable": var,
-                    })
+                    applied_fixes.append(
+                        {
+                            "edge_id": iss["edge_id"],
+                            "action": "removed_from_rho_Z",
+                            "variable": var,
+                        }
+                    )
                 # Remove from adjustment_set
                 adj = edge.get("literature_estimate", {}).get("adjustment_set", [])
                 if isinstance(adj, list) and var in adj:
                     adj.remove(var)
-                    applied_fixes.append({
-                        "edge_id": iss["edge_id"],
-                        "action": "removed_from_adjustment_set",
-                        "variable": var,
-                    })
+                    applied_fixes.append(
+                        {
+                            "edge_id": iss["edge_id"],
+                            "action": "removed_from_adjustment_set",
+                            "variable": var,
+                        }
+                    )
                 # Also remove from hpp_mapping.Z
                 hm_z = edge.get("hpp_mapping", {}).get("Z", [])
                 if isinstance(hm_z, list):
                     edge["hpp_mapping"]["Z"] = [
-                        z for z in hm_z
+                        z
+                        for z in hm_z
                         if not (isinstance(z, dict) and z.get("name") == var)
                     ]
 
@@ -461,11 +464,13 @@ def apply_phase_a_fixes(
                     container = edge.get(parts[0], {})
                     if isinstance(container, dict) and parts[1] in container:
                         del container[parts[1]]
-                        applied_fixes.append({
-                            "edge_id": iss["edge_id"],
-                            "action": "removed_extra_field",
-                            "field": field_path,
-                        })
+                        applied_fixes.append(
+                            {
+                                "edge_id": iss["edge_id"],
+                                "action": "removed_extra_field",
+                                "field": field_path,
+                            }
+                        )
                 elif "extra_keys" in iss:
                     # hpp_mapping role extra keys
                     role = parts[-1] if len(parts) >= 2 else ""
@@ -473,19 +478,17 @@ def apply_phase_a_fixes(
                     if isinstance(entry, dict):
                         for key in iss["extra_keys"]:
                             entry.pop(key, None)
-                        applied_fixes.append({
-                            "edge_id": iss["edge_id"],
-                            "action": "removed_extra_hpp_keys",
-                            "field": field_path,
-                            "keys": iss["extra_keys"],
-                        })
+                        applied_fixes.append(
+                            {
+                                "edge_id": iss["edge_id"],
+                                "action": "removed_extra_hpp_keys",
+                                "field": field_path,
+                                "keys": iss["extra_keys"],
+                            }
+                        )
 
     return fixed_edges, applied_fixes
 
-
-# ---------------------------------------------------------------------------
-# Phase B: Build LLM audit prompt
-# ---------------------------------------------------------------------------
 
 _PHASE_B_SYSTEM_PROMPT = """\
 你是一名医学信息学审核员。你的任务是对照论文原文，逐字段验证证据卡（edge JSON）的准确性。
@@ -584,8 +587,7 @@ def build_phase_b_prompt(
     edge_section_parts = []
     for i, edge in enumerate(edges[:max_edges_per_call]):
         # Strip internal keys
-        clean_edge = {k: v for k, v in edge.items()
-                      if not k.startswith("_")}
+        clean_edge = {k: v for k, v in edge.items() if not k.startswith("_")}
         edge_json_str = json.dumps(clean_edge, ensure_ascii=False, indent=2)
         edge_section_parts.append(
             f"### Edge {i+1}: {edge.get('edge_id', '?')}\n\n"
@@ -609,10 +611,6 @@ def build_phase_b_prompt(
     return prompt
 
 
-# ---------------------------------------------------------------------------
-# Phase B: Parse LLM audit response
-# ---------------------------------------------------------------------------
-
 def parse_phase_b_response(response: Dict) -> List[Dict]:
     """
     Parse the LLM audit response into a list of issues.
@@ -626,24 +624,22 @@ def parse_phase_b_response(response: Dict) -> List[Dict]:
         issues = audit.get("issues", [])
 
         for iss in issues:
-            all_issues.append({
-                "edge_id": edge_id,
-                "check": f"llm_audit_{iss.get('field', 'unknown')}",
-                "severity": iss.get("severity", "warning"),
-                "field": iss.get("field", ""),
-                "message": iss.get("finding", ""),
-                "current_value": iss.get("current_value"),
-                "suggested_fix": iss.get("suggested_fix"),
-                "evidence": iss.get("evidence_in_paper", ""),
-                "source": "phase_b_llm",
-            })
+            all_issues.append(
+                {
+                    "edge_id": edge_id,
+                    "check": f"llm_audit_{iss.get('field', 'unknown')}",
+                    "severity": iss.get("severity", "warning"),
+                    "field": iss.get("field", ""),
+                    "message": iss.get("finding", ""),
+                    "current_value": iss.get("current_value"),
+                    "suggested_fix": iss.get("suggested_fix"),
+                    "evidence": iss.get("evidence_in_paper", ""),
+                    "source": "phase_b_llm",
+                }
+            )
 
     return all_issues
 
-
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
 
 def run_step4_audit(
     edges: List[Dict],
@@ -667,8 +663,7 @@ def run_step4_audit(
 
     phase_a_issues = phase_a_report["issues"]
     print(
-        f"  Found {len(phase_a_issues)} issues "
-        f"({phase_a_report['by_severity']})",
+        f"  Found {len(phase_a_issues)} issues " f"({phase_a_report['by_severity']})",
         file=sys.stderr,
     )
 
@@ -691,12 +686,15 @@ def run_step4_audit(
 
             # Get Phase A flags for this batch
             batch_flags = [
-                iss for iss in phase_a_issues
+                iss
+                for iss in phase_a_issues
                 if batch_start <= iss.get("edge_index", -1) < batch_end
             ]
 
             prompt = build_phase_b_prompt(
-                batch, pdf_text, batch_flags,
+                batch,
+                pdf_text,
+                batch_flags,
                 max_edges_per_call=max_edges_per_llm_call,
             )
 
@@ -736,10 +734,13 @@ def run_step4_audit(
             "phase_a_issues": len(phase_a_issues),
             "phase_a_fixes": len(applied_fixes),
             "phase_b_issues": len(phase_b_issues),
-            "edges_with_errors": len(set(
-                iss["edge_id"] for iss in all_issues
-                if iss.get("severity") == "error"
-            )),
+            "edges_with_errors": len(
+                set(
+                    iss["edge_id"]
+                    for iss in all_issues
+                    if iss.get("severity") == "error"
+                )
+            ),
         },
     }
 

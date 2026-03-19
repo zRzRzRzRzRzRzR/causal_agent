@@ -124,6 +124,31 @@ def _extract_role_queries(edge: Dict) -> Dict[str, str]:
     return queries
 
 
+def check_population_consistency(edges: List[Dict]) -> List[Dict]:
+    """
+    All edges from the same paper should have the same Pi (population).
+    Flag inconsistency.
+    """
+    issues = []
+    pi_values = set()
+    for e in edges:
+        pi = e.get("epsilon", {}).get("Pi", "")
+        if pi:
+            pi_values.add(pi)
+
+    if len(pi_values) > 1:
+        issues.append({
+            "type": "population_inconsistency",
+            "severity": "error",
+            "message": (
+                f"Edges have inconsistent Pi values: {pi_values}. "
+                f"All edges from the same paper should share one population label."
+            ),
+        })
+
+    return issues
+
+
 def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
     """
     Check for issues across the full set of edges from one paper.
@@ -132,6 +157,9 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
     issues: List[Dict] = []
     if not edges:
         return issues
+
+    # -- Population consistency --
+    issues.extend(check_population_consistency(edges))
 
     # -- Exact duplicate detection (original) --
     edge_sigs: List[Tuple[int, Tuple[str, str, str]]] = []

@@ -126,27 +126,34 @@ def _check_covariate_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, 
 
 def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, Any]]:
     """
-    A2: Check that key numeric values (theta_hat, CI, reported values)
-    appear in the paper text.
+    A2: Check that key numeric values appear in the paper text.
+
+    HARDENED VERSION:
+    - reported_effect_value and reported_ci are ALWAYS checked
+    - theta_hat on difference scale is ERROR (not warning) if missing
+    - For continuous outcomes without CI, verify group means exist in text
     """
     issues = []
     lit = edge.get("literature_estimate", {})
     efr = edge.get("equation_formula_reported", {})
+    mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})
 
-    # Check reported_effect_value
+    # --- Check reported_effect_value (ALWAYS, regardless of scale) ---
     rev = efr.get("reported_effect_value")
     if rev is not None and not _number_appears_in_text(rev, pdf_text):
         issues.append(
             {
                 "check": "numeric_hallucination",
-                "severity": "error",
+                "severity": "error",  # UPGRADED from flag_for_review
                 "field": "equation_formula_reported.reported_effect_value",
                 "value": rev,
-                "message": f"reported_effect_value={rev} not found in paper text.",
-                "action": "flag_for_review",
+                "message": f"reported_effect_value={rev} not found in paper text. "
+                           f"BLOCKING: this value may be hallucinated.",
+                "action": "nullify",  # NEW action: set to null
             }
         )
 
+    # --- Check reported_ci (ALWAYS) ---
     rci = efr.get("reported_ci")
     if isinstance(rci, list):
         for i, bound in enumerate(rci):
@@ -159,28 +166,56 @@ def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, An
                         "field": f"equation_formula_reported.reported_ci[{i}]",
                         "value": bound,
                         "message": f"CI {label} bound={bound} not found in paper text.",
-                        "action": "flag_for_review",
+                        "action": "nullify",
                     }
                 )
 
-    mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})
+    # --- Check theta_hat ---
     theta = lit.get("theta_hat")
-    if mu.get("scale") != "log" and theta is not None:
-        if not _number_appears_in_text(theta, pdf_text):
-            issues.append(
-                {
-                    "check": "numeric_hallucination",
-                    "severity": "warning",
-                    "field": "literature_estimate.theta_hat",
-                    "value": theta,
-                    "message": (
-                        f"theta_hat={theta} not found in paper text "
-                        f"(difference scale)."
-                    ),
-                    "action": "flag_for_review",
-                }
-            )
+    if theta is not None:
+        if mu.get("scale") == "log":
+            # For log-scale: check the ORIGINAL scale value (exp(theta))
+            import math
+            try:
+                original = round(math.exp(theta), 2)
+                if not _number_appears_in_text(original, pdf_text):
+                    # Also try with more decimal places
+                    original_3 = round(math.exp(theta), 3)
+                    if not _number_appears_in_text(original_3, pdf_text):
+                        issues.append(
+                            {
+                                "check": "numeric_hallucination",
+                                "severity": "error",
+                                "field": "literature_estimate.theta_hat",
+                                "value": theta,
+                                "original_scale": original,
+                                "message": (
+                                    f"theta_hat={theta} (exp={original}) — "
+                                    f"original-scale value not found in paper text."
+                                ),
+                                "action": "nullify",
+                            }
+                        )
+            except (OverflowError, ValueError):
+                pass
+        else:
+            # For difference scale: theta_hat itself should appear in text
+            if not _number_appears_in_text(theta, pdf_text):
+                issues.append(
+                    {
+                        "check": "numeric_hallucination",
+                        "severity": "error",  # UPGRADED from warning
+                        "field": "literature_estimate.theta_hat",
+                        "value": theta,
+                        "message": (
+                            f"theta_hat={theta} not found in paper text "
+                            f"(difference scale). BLOCKING: likely hallucinated."
+                        ),
+                        "action": "nullify",
+                    }
+                )
 
+    # --- Check literature_estimate.ci on difference scale ---
     ci = lit.get("ci")
     if isinstance(ci, list) and mu.get("scale") != "log":
         for i, bound in enumerate(ci):
@@ -189,13 +224,101 @@ def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, An
                 issues.append(
                     {
                         "check": "numeric_hallucination",
-                        "severity": "warning",
+                        "severity": "error",  # UPGRADED from warning
                         "field": f"literature_estimate.ci[{i}]",
                         "value": bound,
                         "message": f"CI {label}={bound} not found in paper text.",
-                        "action": "flag_for_review",
+                        "action": "nullify",
                     }
                 )
+
+    return issues
+
+
+def _check_cross_edge_theta_duplication(edges: List[Dict]) -> List[Dict[str, Any]]:
+    """
+    A6: Detect when multiple edges with DIFFERENT Y variables share
+    the exact same theta_hat. This is a strong signal of LLM copy-paste.
+    """
+    issues = []
+    theta_to_edges = {}
+
+    for i, edge in enumerate(edges):
+        lit = edge.get("literature_estimate", {})
+        theta = lit.get("theta_hat")
+        if theta is None:
+            continue
+        y_name = edge.get("epsilon", {}).get("rho", {}).get("Y", "")
+
+        key = round(float(theta), 6) if isinstance(theta, (int, float)) else theta
+        if key not in theta_to_edges:
+            theta_to_edges[key] = []
+        theta_to_edges[key].append((i, edge.get("edge_id", f"#{i+1}"), y_name))
+
+    for theta_val, edge_list in theta_to_edges.items():
+        if len(edge_list) < 2:
+            continue
+        # Check if Y variables are different
+        y_names = set(info[2] for info in edge_list)
+        if len(y_names) > 1:
+            edge_ids = [info[1] for info in edge_list]
+            for idx, eid, y in edge_list:
+                issues.append(
+                    {
+                        "check": "cross_edge_theta_duplication",
+                        "severity": "error",
+                        "field": "literature_estimate.theta_hat",
+                        "edge_id": eid,
+                        "edge_index": idx,
+                        "value": theta_val,
+                        "message": (
+                            f"theta_hat={theta_val} is identical across edges "
+                            f"{edge_ids} but they have different Y variables "
+                            f"({y_names}). Likely LLM copy-paste hallucination."
+                        ),
+                        "action": "nullify",
+                    }
+                )
+
+    return issues
+
+
+def _check_computed_cohort_values(edge: Dict, pdf_text: str) -> List[Dict[str, Any]]:
+    """
+    A7: For study_cohort fields marked is_reported=True, verify the
+    EXACT string (not just individual numbers) can be traced to the paper.
+    Catches LLM-computed averages that don't appear in the text.
+    """
+    issues = []
+    cohort = edge.get("study_cohort", {})
+
+    age_data = cohort.get("age", {})
+    if isinstance(age_data, dict) and age_data.get("is_reported"):
+        val = age_data.get("value", "")
+        if isinstance(val, str):
+            # Extract the core number(s)
+            import re
+            numbers = re.findall(r"[\d.]+", val)
+            for num_str in numbers:
+                try:
+                    num = float(num_str)
+                    if num > 1 and not _number_appears_in_text(num, pdf_text):
+                        issues.append(
+                            {
+                                "check": "computed_cohort_value",
+                                "severity": "error",
+                                "field": "study_cohort.age.value",
+                                "value": num_str,
+                                "message": (
+                                    f"Age value '{num_str}' in study_cohort.age "
+                                    f"not found in paper text. May be an LLM-computed "
+                                    f"average of per-group values."
+                                ),
+                                "action": "flag_for_review",
+                            }
+                        )
+                except ValueError:
+                    pass
 
     return issues
 
@@ -362,12 +485,17 @@ def phase_a_audit(
         edge_issues.extend(_check_sample_data(edge, pdf_text))
         edge_issues.extend(_check_hpp_variable_leakage(edge, pdf_text))
         edge_issues.extend(_check_extra_fields(edge))
+        edge_issues.extend(_check_computed_cohort_values(edge, pdf_text))  # NEW
 
         for iss in edge_issues:
             iss["edge_id"] = edge_id
             iss["edge_index"] = i
 
         all_issues.extend(edge_issues)
+
+    # Cross-edge checks (run on full set)
+    cross_issues = _check_cross_edge_theta_duplication(edges)  # NEW
+    all_issues.extend(cross_issues)
 
     # Summary
     severity_counts = {}
@@ -394,11 +522,10 @@ def apply_phase_a_fixes(
     issues: List[Dict],
 ) -> Tuple[List[Dict], List[Dict]]:
     """
-    Apply automatic fixes for Phase A issues with action='remove'.
+    Apply automatic fixes for Phase A issues.
 
-    Currently handles:
-      - covariate_hallucination: remove variable from Z and adjustment_set
-      - extra_field: remove forbidden fields
+    NEW action: "nullify" — set the field value to null.
+    This is used for hallucinated numeric values that fail hard-match.
 
     Returns:
         (fixed_edges, applied_fixes)
@@ -418,74 +545,108 @@ def apply_phase_a_fixes(
         edge = fixed_edges[idx]
 
         for iss in edge_issues:
-            if iss.get("action") != "remove":
-                continue
+            action = iss.get("action")
 
-            check = iss["check"]
-
-            if check == "covariate_hallucination":
-                var = iss["variable"]
-                # Remove from rho.Z
-                rho_z = edge.get("epsilon", {}).get("rho", {}).get("Z", [])
-                if isinstance(rho_z, list) and var in rho_z:
-                    rho_z.remove(var)
-                    applied_fixes.append(
-                        {
+            if action == "remove":
+                check = iss["check"]
+                if check == "covariate_hallucination":
+                    var = iss["variable"]
+                    rho_z = edge.get("epsilon", {}).get("rho", {}).get("Z", [])
+                    if isinstance(rho_z, list) and var in rho_z:
+                        rho_z.remove(var)
+                        applied_fixes.append({
                             "edge_id": iss["edge_id"],
                             "action": "removed_from_rho_Z",
                             "variable": var,
-                        }
-                    )
-                # Remove from adjustment_set
-                adj = edge.get("literature_estimate", {}).get("adjustment_set", [])
-                if isinstance(adj, list) and var in adj:
-                    adj.remove(var)
-                    applied_fixes.append(
-                        {
+                        })
+                    adj = edge.get("literature_estimate", {}).get("adjustment_set", [])
+                    if isinstance(adj, list) and var in adj:
+                        adj.remove(var)
+                        applied_fixes.append({
                             "edge_id": iss["edge_id"],
                             "action": "removed_from_adjustment_set",
                             "variable": var,
-                        }
-                    )
-                # Also remove from hpp_mapping.Z
-                hm_z = edge.get("hpp_mapping", {}).get("Z", [])
-                if isinstance(hm_z, list):
-                    edge["hpp_mapping"]["Z"] = [
-                        z
-                        for z in hm_z
-                        if not (isinstance(z, dict) and z.get("name") == var)
-                    ]
-
-            elif check == "extra_field":
-                field_path = iss["field"]
-                # Parse field path like "literature_estimate.subgroup"
-                parts = field_path.split(".")
-                if len(parts) == 2:
-                    container = edge.get(parts[0], {})
-                    if isinstance(container, dict) and parts[1] in container:
-                        del container[parts[1]]
-                        applied_fixes.append(
-                            {
+                        })
+                    hm_z = edge.get("hpp_mapping", {}).get("Z", [])
+                    if isinstance(hm_z, list):
+                        edge["hpp_mapping"]["Z"] = [
+                            z for z in hm_z
+                            if not (isinstance(z, dict) and z.get("name") == var)
+                        ]
+                elif check == "extra_field":
+                    field_path = iss["field"]
+                    parts = field_path.split(".")
+                    if len(parts) == 2:
+                        container = edge.get(parts[0], {})
+                        if isinstance(container, dict) and parts[1] in container:
+                            del container[parts[1]]
+                            applied_fixes.append({
                                 "edge_id": iss["edge_id"],
                                 "action": "removed_extra_field",
                                 "field": field_path,
-                            }
-                        )
-                elif "extra_keys" in iss:
-                    # hpp_mapping role extra keys
-                    role = parts[-1] if len(parts) >= 2 else ""
-                    entry = edge.get("hpp_mapping", {}).get(role, {})
-                    if isinstance(entry, dict):
-                        for key in iss["extra_keys"]:
-                            entry.pop(key, None)
-                        applied_fixes.append(
-                            {
+                            })
+                    elif "extra_keys" in iss:
+                        role = parts[-1] if len(parts) >= 2 else ""
+                        entry = edge.get("hpp_mapping", {}).get(role, {})
+                        if isinstance(entry, dict):
+                            for key in iss["extra_keys"]:
+                                entry.pop(key, None)
+                            applied_fixes.append({
                                 "edge_id": iss["edge_id"],
                                 "action": "removed_extra_hpp_keys",
                                 "field": field_path,
                                 "keys": iss["extra_keys"],
-                            }
-                        )
+                            })
+
+            elif action == "nullify":
+                # NEW: Set hallucinated values to null
+                field_path = iss.get("field", "")
+
+                if field_path == "equation_formula_reported.reported_effect_value":
+                    efr = edge.get("equation_formula_reported", {})
+                    old_val = efr.get("reported_effect_value")
+                    efr["reported_effect_value"] = None
+                    applied_fixes.append({
+                        "edge_id": iss.get("edge_id", "?"),
+                        "action": "nullified_hallucinated_value",
+                        "field": field_path,
+                        "old_value": old_val,
+                        "reason": iss["message"],
+                    })
+
+                elif field_path.startswith("equation_formula_reported.reported_ci"):
+                    efr = edge.get("equation_formula_reported", {})
+                    old_ci = efr.get("reported_ci")
+                    efr["reported_ci"] = [None, None]
+                    applied_fixes.append({
+                        "edge_id": iss.get("edge_id", "?"),
+                        "action": "nullified_hallucinated_ci",
+                        "field": "equation_formula_reported.reported_ci",
+                        "old_value": old_ci,
+                    })
+
+                elif field_path == "literature_estimate.theta_hat":
+                    lit = edge.get("literature_estimate", {})
+                    old_theta = lit.get("theta_hat")
+                    lit["theta_hat"] = None
+                    applied_fixes.append({
+                        "edge_id": iss.get("edge_id", "?"),
+                        "action": "nullified_hallucinated_theta",
+                        "field": field_path,
+                        "old_value": old_theta,
+                        "reason": iss["message"],
+                    })
+
+                elif field_path.startswith("literature_estimate.ci"):
+                    lit = edge.get("literature_estimate", {})
+                    old_ci = lit.get("ci")
+                    lit["ci"] = [None, None]
+                    applied_fixes.append({
+                        "edge_id": iss.get("edge_id", "?"),
+                        "action": "nullified_hallucinated_lit_ci",
+                        "field": "literature_estimate.ci",
+                        "old_value": old_ci,
+                    })
 
     return fixed_edges, applied_fixes
 

@@ -22,10 +22,12 @@ Key changes from v2:
 """
 
 import json
+import math
+import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .audit import run_step4_audit
 from .edge_prevalidator import prevalidate_edges
@@ -241,6 +243,176 @@ def step1_5_prevalidate(
 # ---------------------------------------------------------------------------
 
 
+def extract_anchor_numbers(pdf_text: str) -> Set[str]:
+    """
+    Extract ALL numbers that appear in the paper text.
+    Returns a set of string representations for fast lookup.
+
+    This is the "ground truth" set — any numeric value in the
+    final output must trace back to one of these numbers.
+    """
+    text_clean = pdf_text.replace("\n", " ").replace("\t", " ")
+
+    # Match numbers in various formats: 0.40, 158, 14.7, <0.001, etc.
+    raw_numbers = re.findall(
+        r'(?<![a-zA-Z])(\d+\.?\d*)',
+        text_clean
+    )
+
+    anchor_set = set()
+    for n in raw_numbers:
+        anchor_set.add(n)
+        # Also add common transformations
+        try:
+            val = float(n)
+            # Add various string representations
+            anchor_set.add(f"{val:.1f}")
+            anchor_set.add(f"{val:.2f}")
+            anchor_set.add(f"{val:.3f}")
+            if val == int(val) and abs(val) < 100000:
+                anchor_set.add(str(int(val)))
+            # For values like 0.40, also store "0.4" and ".40"
+            if 0 < abs(val) < 1:
+                anchor_set.add(f"{val:.2f}".lstrip("0"))
+                anchor_set.add(f"{val:.3f}".lstrip("0"))
+        except ValueError:
+            pass
+
+    return anchor_set
+
+
+def hard_match_value(val: Any, anchor_set: Set[str], pdf_text: str) -> bool:
+    """
+    Check if a numeric value can be traced to the paper.
+
+    For ratio measures (OR/HR/RR), also checks if exp(val)
+    appears in the paper (since theta_hat is on log scale).
+    """
+    if val is None:
+        return True
+
+    try:
+        num = float(val)
+    except (ValueError, TypeError):
+        return True  # Non-numeric, skip
+
+    # Direct match
+    candidates = [
+        f"{num:.1f}", f"{num:.2f}", f"{num:.3f}", f"{num:g}",
+    ]
+    if num == int(num) and abs(num) < 100000:
+        candidates.append(str(int(num)))
+    if 0 < abs(num) < 1:
+        candidates.append(f"{num:.2f}".lstrip("0"))
+        candidates.append(f"{num:.3f}".lstrip("0"))
+
+    for c in candidates:
+        if c in anchor_set:
+            return True
+
+    # Try exp() for log-scale values
+    try:
+        exp_val = math.exp(num)
+        exp_candidates = [
+            f"{exp_val:.1f}", f"{exp_val:.2f}", f"{exp_val:.3f}", f"{exp_val:g}",
+        ]
+        if 0 < exp_val < 1:
+            exp_candidates.append(f"{exp_val:.2f}".lstrip("0"))
+        for c in exp_candidates:
+            if c in anchor_set:
+                return True
+    except (OverflowError, ValueError):
+        pass
+
+    # Fallback: search in raw text
+    text_collapsed = pdf_text.replace(" ", "").replace("\n", "")
+    for c in candidates:
+        if c in text_collapsed:
+            return True
+
+    return False
+
+
+def post_step2_hard_match(
+    filled: Dict,
+    anchor_set: Set[str],
+    pdf_text: str,
+) -> Dict:
+    """
+    After Step 2 LLM fills the template, verify all numeric values
+    against the paper's anchor numbers. Nullify any that can't be traced.
+
+    This is the CRITICAL fix — it prevents hallucinated numbers
+    from surviving into the final output.
+    """
+    changes = []
+
+    efr = filled.get("equation_formula_reported", {})
+    lit = filled.get("literature_estimate", {})
+    mu = filled.get("epsilon", {}).get("mu", {}).get("core", {})
+
+    # Check reported_effect_value
+    rev = efr.get("reported_effect_value")
+    if rev is not None and not hard_match_value(rev, anchor_set, pdf_text):
+        changes.append(f"reported_effect_value={rev} -> null (not in paper)")
+        efr["reported_effect_value"] = None
+
+    # Check reported_ci
+    rci = efr.get("reported_ci", [])
+    if isinstance(rci, list):
+        new_ci = []
+        for bound in rci:
+            if bound is not None and not hard_match_value(bound, anchor_set, pdf_text):
+                changes.append(f"reported_ci bound={bound} -> null")
+                new_ci.append(None)
+            else:
+                new_ci.append(bound)
+        efr["reported_ci"] = new_ci
+
+    # Check theta_hat (only for non-log scales, since log is derived)
+    theta = lit.get("theta_hat")
+    if theta is not None and mu.get("scale") != "log":
+        if not hard_match_value(theta, anchor_set, pdf_text):
+            changes.append(f"theta_hat={theta} -> null (difference scale, not in paper)")
+            lit["theta_hat"] = None
+
+    # For log scale: verify the original-scale value exists
+    if theta is not None and mu.get("scale") == "log":
+        try:
+            original = math.exp(theta)
+            if not hard_match_value(original, anchor_set, pdf_text):
+                changes.append(
+                    f"theta_hat={theta} (exp={original:.4f}) -> null "
+                    f"(original scale not in paper)"
+                )
+                lit["theta_hat"] = None
+        except (OverflowError, ValueError):
+            pass
+
+    # Check literature_estimate.ci on non-log scale
+    lit_ci = lit.get("ci", [])
+    if isinstance(lit_ci, list) and mu.get("scale") != "log":
+        new_ci = []
+        for bound in lit_ci:
+            if bound is not None and not hard_match_value(bound, anchor_set, pdf_text):
+                changes.append(f"lit ci bound={bound} -> null")
+                new_ci.append(None)
+            else:
+                new_ci.append(bound)
+        lit["ci"] = new_ci
+
+    if changes:
+        # Store changes in internal metadata for logging
+        filled.setdefault("_hard_match", {})["nullified"] = changes
+
+    return filled
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Fill one edge (simplified -- no retry loop)
+# ---------------------------------------------------------------------------
+
+
 def step2_fill_one_edge(
     client: GLMClient,
     pdf_text: str,
@@ -331,6 +503,19 @@ def step2_fill_one_edge(
 
     # Apply pre-validated overrides (deterministic corrections)
     filled = _apply_prevalidation_overrides(filled, preval)
+
+    # --- Hard-match gate: nullify any hallucinated numbers ---
+    anchor_set = extract_anchor_numbers(pdf_text)
+    filled = post_step2_hard_match(filled, anchor_set, pdf_text)
+
+    if filled.get("_hard_match", {}).get("nullified"):
+        print(
+            f"  [Hard-Match] Nullified {len(filled['_hard_match']['nullified'])} "
+            f"values not found in paper",
+            file=sys.stderr,
+        )
+        for change in filled["_hard_match"]["nullified"]:
+            print(f"    {change}", file=sys.stderr)
 
     # Run semantic validation (for reporting only, no retry)
     semantic_issues = validate_semantics(filled, evidence_type=evidence_type)

@@ -172,6 +172,43 @@ Evidence type: {evidence_type}
 
 ---
 
+## ⛔ 硬匹配规则（Hard-Match Rules）
+
+> 这些规则优先于所有其他填充指令。违反任何一条都会导致该值被管道自动清零。
+
+### R1: 所有数值必须可追溯到论文原文
+- `reported_effect_value`、`reported_ci`、`theta_hat`（差异尺度）、`literature_estimate.ci`（差异尺度）中的每个数值，**必须**能在论文的 Table、Figure 或正文中找到原始出处。
+- 如果论文**只报告了 group means**（如 403.2 vs 45.9 nmol/L）而**没有报告 mean difference / beta / regression coefficient**，则：
+  - `reported_effect_value` = **null**
+  - `theta_hat` = **null**
+  - `ci` = [null, null]
+  - **不要**自己计算差值。管道会在后处理中计算。
+
+### R2: 百分比变化 ≠ 绝对差值
+- 如果论文报告 "decreased by 38.3% (95% CI 27.0-49.6)"，这是一个**百分比差异**，不是 mean difference。
+- 对于百分比差异，`effect_measure` 应为 `"percent_change"` 或标注 `source: "percent_difference"`
+- **不要**将百分比差异值直接填入 `theta_hat` 当作 mean difference。
+
+### R3: 禁止跨边复制数值
+- 每个 edge 的 `theta_hat`、`reported_effect_value`、`ci` 必须独立从论文中对应的 Table/正文行提取。
+- 如果你发现自己给多个不同 Y 变量填入了相同的 theta_hat，这几乎一定是错误。
+
+### R4: fold-change 不是 beta coefficient
+- 如果论文报告 "13.5-fold increase" 或 "9.5-fold vs baseline"，这是 fold-change，不是 linear regression beta。
+- 对于 fold-change 结果：`reported_effect_value` = fold-change 值，`effect_measure` = `"fold_change"`
+- **不要**将 fold-change 转换为 log 值填入 theta_hat，除非你能验证转换后的值。
+
+### R5: is_reported 只能用于论文直报值
+- `study_cohort.age.is_reported = true` 意味着论文**原文中有这个确切数值**
+- 如果论文分别报告了 "维生素组 45.8 (7.0)，安慰剂组 46.2 (8.1)"，**不要**计算一个合并平均值 "46.0 (7.6)" 然后标记为 `is_reported = true`
+- 正确做法：直接引用论文的原始表述，如 "45.8 (SD 7.0) in vitamin group, 46.2 (SD 8.1) in placebo group"
+
+### R6: disease_indication 是参与者的实际状态
+- 如果参与者是**健康人**（即使他们有疾病家族史），`disease_indication` 应反映"healthy"
+- "healthy siblings of patients with premature atherothrombotic disease" 的 disease_indication 是 **"healthy (family history of premature atherothrombotic disease)"**，不是 "subclinical atherosclerosis"
+
+---
+
 ## 输出要求
 
 输出**一个完整的JSON对象**。它必须：

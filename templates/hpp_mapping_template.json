@@ -1,4 +1,4 @@
-{
+﻿{
     // ─── 唯一边 ID ───
     // 格式: EV-{发表年份}-{研究简称}#{边编号}
     // 一篇论文可能有多条因果边（多个效应），用 #1, #2, #3... 区分
@@ -265,7 +265,7 @@
     // 从以下 6 种中选择一个，LLM 需根据论文的统计方法和研究设计判断：
     //
     // E1 — 静态原子方程 (Type I)
-    //   公式: g(E[Y|do(X=x),Z]) = α + β_X·T_X(x) + γᵀZ
+    //   公式: g(E[Y|do(X=x),Z]) = α +   β_X·T_X(x) + γᵀZ
     //   效应: ΔY(x₁,x₀) = E[Y|do(x₁)] - E[Y|do(x₀)]
     //   适用: logistic, linear, ANCOVA, Poisson, MR/IVW
     //   参数: β_X (效应系数), γ (协变量系数), g (连接函数: identity/log/logit)
@@ -308,21 +308,25 @@
     "equation_type": "E1/E2/E3/E4/E5/E6",
     // ─── 本地构建方程（基于 E1-6 框架）───
     // 根据论文的统计方法，选择对应的 E1-6 方程模板，填入具体变量
-    // 格式示例: "λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γ₁·Age + γ₂·Sex)"
+    // ⚠ 如果当前效应值来自未调整比较/直接比较/列联表/Fisher/t-test/Model 1=no adjustments，
+    //    不要为了套模板强行补 γᵀZ。此时方程应写成无协变量版本。
+    // 格式示例: "λ(t|do(X=x)) = λ₀(t)·exp(β_X·T_X(x))"
     // 作用: 管线执行时使用此方程
     "equation_formula": "基于E1-6框架构建的数学公式字符串",
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // ─── equation_formula_reported（独立字段）───
     // 用于与 equation_formula (E1-6 框架方程) 进行双重校验 (dual-check)
     // 此方程独立于 E1-6 框架，不必与 E1-6 模板格式相同
-    // ⚠ 所有子字段不允许为 null，尽量使用枚举值/短标签/数值
+    // ⚠ 不要为了“填满模板”臆造统计细节。
+    //    如果论文未明确报告某项（尤其是 reported_p、reported_ci、Z），
+    //    允许使用 null 或空数组 []，不要从常见模板变量（Age/Sex/BMI/TDI）反推。
     //
     // source = "extracted" → 论文有明确方程，直接摘录
     // source = "reconstructed" → 论文无方程，根据方法描述重构
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     "equation_formula_reported": {
-        // 数学方程字符串（不允许 null / 文字描述）
-        "equation": "h(t) = h₀(t)·exp(β·X + γ₁·Z₁ + γ₂·Z₂)",
+        // 数学方程字符串（如论文未给显式方程，可重构；未调整分析时不要强加 Z）
+        "equation": "h(t) = h₀(t)·exp(β·X)",
         // "extracted" | "reconstructed"
         "source": "extracted",
         // "Cox" | "logistic" | "linear" | "Poisson" | "neg_binomial" |
@@ -344,6 +348,8 @@
             0.90
         ],
         // 论文报告的 p 值（字符串，如 "< 0.001" 或 "0.035"）
+        // ⚠ 仅当论文明确报告时填写；未报告则填 null
+        //    不允许根据 CI、显著性、Bonferroni 阈值等反推
         "reported_p": "< 0.001",
         // ─── 通路节点（此 reported_effect_value 的 X→Y 及协变量）───
         // X: 暴露/自变量短标签（= epsilon.rho.X）
@@ -351,11 +357,9 @@
         // Y: 结局/因变量短标签（= epsilon.rho.Y）
         "Y": "Hypertension",
         // Z: 协变量列表（= epsilon.rho.Z）
-        "Z": [
-            "Age",
-            "Sex"
-        ],
-        // 这些变量不一定存在，可能需要删掉，比如很多场景是没有 "TDI"的。
+        // ⚠ 默认应为空数组 []。只有当论文对“当前这一条效应值”明确报告了调整变量时才填写。
+        //    基线表中的 Age/Sex/BMI/TDI 不能因为“常见”就默认写入。
+        "Z": []
     },
     "epsilon": {
         // ─── Pi: 人群标签 ───
@@ -423,15 +427,15 @@
         // X: 暴露/处理变量名（与 iota.core.name 一致）
         // Y: 结局变量名（与 o.name 一致）
         // Z: 协变量/调整变量列表（论文 adjustment set）
+        // ⚠ 默认应为空数组 []。
+        //    只有当论文对当前效应值明确报告了调整变量时才填写。
+        //    如果当前结果来自未调整比较，必须保持 []。
         // IV: 工具变量（仅孟德尔随机化需要，其他设 null）
         // M: 中介变量名（仅 E4 需要，其他可省略）
         "rho": {
             "X": "暴露变量名称",
             "Y": "结局变量名称",
-            "Z": [
-                "协变量1",
-                "协变量2"
-            ],
+            "Z": [],
             "IV": null
         }
     },
@@ -452,7 +456,7 @@
         "ci_level": 0.95,
         // p_value: 论文报告的 p 值（字符串，保留论文原文写法，如 "< 0.001" 或 "0.035"）
         // 与 equation_formula_reported.reported_p 格式一致
-        // 如经过验证但没有明确数字，可以通过ci_level和theta_hat推算，然后填入，比如对约 22 种疾病做 Bonferroni 校正，阈值为 0.05 / 22 ≈ 0.00227。校正后显著意味着原始 p 一定 < 0.0023。
+        // ⚠ 仅当论文明确报告时填写；不允许根据 ci_level、theta_hat 或校正阈值反推
         "p_value": "< 0.001",
         // n: 总样本量
         "n": 170000,
@@ -473,11 +477,8 @@
         //   E6: "interaction_model", "factorial"
         "model": "logistic",
         // adjustment_set: 调整变量列表（应与 epsilon.rho.Z 一致）
-        "adjustment_set": [
-            "age",
-            "sex",
-            "BMI"
-        ]
+        // ⚠ 默认应为空数组 []。只能填写“当前采用的这条效应值”实际使用的调整变量。
+        "adjustment_set": []
     },
     // ─── HPP 数据集映射 ───
     // 每个变量映射到 HPP 的 {dataset, field} 对
@@ -510,48 +511,22 @@
         // ─── Z: 协变量/调整变量的 HPP 字段映射 ───
         // 对应 epsilon.rho.Z 和 literature_estimate.adjustment_set 中列出的每个变量
         // 结构与 X/Y 保持一致: {dataset, field, status}
-        // 管线在执行 adjustment 时会验证这些字段存在于 HPP 数据集中
+        // ⚠ 如果论文未明确报告当前结果的调整变量，则此处必须为 []
+        // ⚠ 不能因为 HPP 里能找到 age/sex/bmi，就反过来把它们写成论文协变量
         // 注意: epsilon.rho.Z、literature_estimate.adjustment_set、hpp_mapping.Z
         //       三处列表必须保持一致，否则管线应产生 warning flag
-        "Z": [
-            {
-                "name": "协变量1名称",
-                "dataset": "001-demographics",
-                "field": "age_at_research_stage",
-                "status": "exact"
-            },
-            {
-                "name": "协变量2名称",
-                "dataset": "001-demographics",
-                "field": "sex",
-                "status": "exact"
-            },
-            {
-                "name": "协变量3名称",
-                "dataset": "002-anthropometrics",
-                "field": "bmi",
-                "status": "exact"
-            }
-        ],
+        "Z": [],
         // ─── M: 中介变量（equation_type="E4" 时必需！）───
         // 如果缺失，管线将产生 flag: "mediator_mapping_missing_for_E4"
         // E4 估计器会验证 data["M"] 列存在
         // "__required_when": "equation_type == E4"
-        "M": {
-            "name": "中介变量名称",
-            "dataset": "016-blood_tests",
-            "field": "bt__crp_float_value",
-            "status": "exact"
-        },
+        "M": null,
         // ─── X2: 第二处理变量（equation_type="E6" 时必需！）───
         // 如果缺失，管线将产生 flag: "x2_mapping_missing_for_E6"
         // E6 估计器会验证 data["X2"] 列存在
         // "__required_when": "equation_type == E6"
-        "X2": {
-            "name": "第二处理变量名称",
-            "dataset": "015-medications",
-            "field": "med__statin_use",
-            "status": "exact"
-        }
+        "X2": null
     }
 }
+
+

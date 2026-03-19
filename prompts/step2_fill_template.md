@@ -1,4 +1,4 @@
-# 步骤 2: 为单个边填充HPP模板
+﻿# 步骤 2: 为单个边填充HPP模板
 
 你是一名医学信息学研究员。你收到：
 
@@ -71,7 +71,11 @@ Evidence type: {evidence_type}
 
 ### 2. equation_formula 和 equation_formula_reported
 - `equation_formula`: 使用预确定的equation_type框架编写特定的模型公式。如果提供了公式骨架，作为指导使用。
-- `equation_formula_reported`: 填充所有子字段（equation、source、model_type、link_function、effect_measure、reported_effect_value、reported_ci、reported_p、X、Y、Z）
+  如果当前效应值来自未调整比较/直接比较/列联表/Fisher/t-test/Model 1=no adjustments，则不要为了套公式强行加入 `+ gamma^T * Z`。
+- `equation_formula_reported`: 填充子字段，但**不得为了填满模板而臆造统计细节**。如果论文未明确报告某项，优先使用 `null` 或 `[]`，而不是猜测。
+- **Z 硬规则**：如果当前 edge 对应的是未调整结果，或论文只做了 direct comparison / contingency tables / difference in proportions / exact test，那么以下四处必须同时为 `[]`：
+  `equation_formula_reported.Z`、`epsilon.rho.Z`、`literature_estimate.adjustment_set`、`hpp_mapping.Z`
+- 如果论文同时报告多个模型（如 Model 1 / Model 2 / Model 3），**只能**填写与你当前 edge 的 estimate / CI / p_value 对应的那个模型的调整变量；不能混用别的模型的协变量。
 
 ### 3. epsilon字段（来自论文）
 - `epsilon.Pi`: 人群标签 — `"adult_general"`（成人一般人群）、`"cvd"`（心血管疾病）、`"diabetes"`（糖尿病）、`"oncology"`（肿瘤）、`"pediatric"`（儿科）
@@ -82,14 +86,14 @@ Evidence type: {evidence_type}
 - `epsilon.mu.core.type`: 对于比率度量（HR/OR/RR），**必须使用log前缀**：`"logHR"`, `"logOR"`, `"logRR"`（因为theta_hat在对数尺度上）。对于差异度量：`"MD"`, `"BETA"`, `"SMD"`
 - `epsilon.alpha.assumptions`: 选择适用的：`"exchangeability"`（可交换性）、`"positivity"`（正性）、`"consistency"`（一致性）。**不要**包含 `"proportional_hazards"`
 - `epsilon.alpha.status`: `"identified"`（已识别，RCT）/ `"partially_identified"`（部分识别，观察性）/ `"not_identified"`（未识别）
-- `epsilon.rho`: 变量角色 — X（使用简洁名称，与iota.core.name一致）、Y、Z（调整变量列表， Z应该尽量少，避免幻觉）、IV（仅MR，否则为null）
+- `epsilon.rho`: 变量角色 — X（使用简洁名称，与iota.core.name一致）、Y、Z（调整变量列表）。**默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。不要把 baseline table 中的 Age/Sex/BMI/TDI 当成调整变量。IV（仅MR，否则为null）
 
 ### 4. literature_estimate（剩余字段）
 - `n`: 总样本量
 - `design`: `"RCT"` / `"cohort"`（队列）/ `"cross-sectional"`（横断面）/ `"case-control"`（病例对照）/ `"meta-analysis"`（荟萃分析）/ `"MR"`
 - `grade`: `"A"`（高质量RCT）、`"B"`（中等）、`"C"`（低质量/未调整）
-- `adjustment_set`: 调整变量列表（必须匹配rho.Z）
-- `p_value`: 如论文中所报告
+- `adjustment_set`: 调整变量列表（必须匹配rho.Z）。**默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。
+- `p_value`: 仅在论文明确报告时填写；**不要**根据 CI、显著性、Bonferroni 校正或常识反推。
 - `ci_level`: 通常为0.95
 
 ⚠️ **literature_estimate 只包含以下字段**：`theta_hat`, `ci`, `ci_level`, `p_value`, `n`, `design`, `grade`, `model`, `adjustment_set`。**禁止**添加 `subgroup`, `control_reference`, `reported_HR`, `reported_CI_HR`, `group_means`, `notes` 等额外字段。
@@ -122,7 +126,7 @@ Evidence type: {evidence_type}
 - `M`: 仅当 equation_type = E4 时填写，否则**必须为** `null`
 - `X2`: 仅当 equation_type = E6 时填写，否则**必须为** `null`
 - **M 和 X2 必须始终出现**在 hpp_mapping 中（作为 `null` 或映射对象）
-- `Z`: 斜变量需要在论文中出现，才能写上，比如很多论文就没有模板中的`"TDI"`，就不能写入。
+- `Z`: 协变量必须在论文中作为**当前效应值的调整变量**明确出现，才能写上。若当前结果未调整，则 `hpp_mapping.Z` 必须为 `[]`。不要因为 HPP 里存在 age/sex/bmi 字段，就反向把它们写成论文协变量。
 - **数据集ID使用连字符格式**：`"009-sleep"`、`"002-anthropometrics"`、`"021-medical_conditions"`（编号和名称之间用连字符`-`连接）
 - 对于复合变量（如 Healthy Lifestyle Score），X.name 使用简洁名称（如 `"Healthy Lifestyle Score"`），X.field 中用 `+` 连接多个字段（如 `"smoking_status + activity_minutes + alcohol_frequency + diet_*"`），status 标为 `"tentative"`
 - 对于需要从现有字段计算/推导的变量，status 必须标为 `"tentative"` 而非 `"exact"`
@@ -143,7 +147,7 @@ Evidence type: {evidence_type}
 |---|-------|------|
 | C1 | X一致性  | `epsilon.iota.core.name` == `epsilon.rho.X` == `hpp_mapping.X.name` |
 | C2 | Y一致性  | `epsilon.o.name` == `epsilon.rho.Y` == `hpp_mapping.Y.name` |
-| C3 | Z一致性  | `epsilon.rho.Z` == `literature_estimate.adjustment_set` |
+| C3 | Z一致性  | `equation_formula_reported.Z` == `epsilon.rho.Z` == `literature_estimate.adjustment_set` == `hpp_mapping.Z[*].name`（若未调整则四处都为空） |
 | C4 | M条件   | `hpp_mapping.M`非null仅当equation_type = "E4" |
 | C5 | X2条件  | `hpp_mapping.X2`非null仅当equation_type = "E6" |
 | C6 | 单个边   | JSON恰好描述一个X→Y边 |
@@ -184,3 +188,7 @@ Evidence type: {evidence_type}
 10. `epsilon.mu.core.type` 对于比率度量必须使用log前缀（`logHR`/`logOR`/`logRR`）
 11. `epsilon.iota.core.name` 和 `epsilon.rho.X` 使用简洁变量名
 12. 恰好描述**一个**边
+13. 如果当前结果未调整，则 `equation_formula_reported.Z`、`epsilon.rho.Z`、`literature_estimate.adjustment_set`、`hpp_mapping.Z` 必须全部为 `[]`
+14. 不允许根据 baseline characteristics、常见协变量模板、或 HPP 候选字段反推 Z
+15. 不允许反推 `reported_p` 或 `literature_estimate.p_value`
+16. 如果论文有多个模型，只能使用与当前 edge 的 estimate / CI / p_value 对应的那个模型

@@ -82,7 +82,7 @@ Evidence type: {evidence_type}
 - `epsilon.mu.core.type`: 对于比率度量（HR/OR/RR），**必须使用log前缀**：`"logHR"`, `"logOR"`, `"logRR"`（因为theta_hat在对数尺度上）。对于差异度量：`"MD"`, `"BETA"`, `"SMD"`
 - `epsilon.alpha.assumptions`: 选择适用的：`"exchangeability"`（可交换性）、`"positivity"`（正性）、`"consistency"`（一致性）。**不要**包含 `"proportional_hazards"`
 - `epsilon.alpha.status`: `"identified"`（已识别，RCT）/ `"partially_identified"`（部分识别，观察性）/ `"not_identified"`（未识别）
-- `epsilon.rho`: 变量角色 — X（使用简洁名称，与iota.core.name一致）、Y、Z（调整变量列表）、IV（仅MR，否则为null）
+- `epsilon.rho`: 变量角色 — X（使用简洁名称，与iota.core.name一致）、Y、Z（调整变量列表， Z应该尽量少，避免幻觉）、IV（仅MR，否则为null）
 
 ### 4. literature_estimate（剩余字段）
 - `n`: 总样本量
@@ -122,6 +122,7 @@ Evidence type: {evidence_type}
 - `M`: 仅当 equation_type = E4 时填写，否则**必须为** `null`
 - `X2`: 仅当 equation_type = E6 时填写，否则**必须为** `null`
 - **M 和 X2 必须始终出现**在 hpp_mapping 中（作为 `null` 或映射对象）
+- `Z`: 斜变量需要在论文中出现，才能写上，比如很多论文就没有模板中的`"TDI"`，就不能写入。
 - **数据集ID使用连字符格式**：`"009-sleep"`、`"002-anthropometrics"`、`"021-medical_conditions"`（编号和名称之间用连字符`-`连接）
 - 对于复合变量（如 Healthy Lifestyle Score），X.name 使用简洁名称（如 `"Healthy Lifestyle Score"`），X.field 中用 `+` 连接多个字段（如 `"smoking_status + activity_minutes + alcohol_frequency + diet_*"`），status 标为 `"tentative"`
 - 对于需要从现有字段计算/推导的变量，status 必须标为 `"tentative"` 而非 `"exact"`

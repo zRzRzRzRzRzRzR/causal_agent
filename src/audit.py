@@ -678,13 +678,9 @@ def run_step4_audit(
     phase_b_issues: List[Dict] = []
     if client is not None:
         print("[Step 4] Phase B: LLM content audit ...", file=sys.stderr)
-
-        # Process in batches
         for batch_start in range(0, len(fixed_edges), max_edges_per_llm_call):
             batch_end = min(batch_start + max_edges_per_llm_call, len(fixed_edges))
             batch = fixed_edges[batch_start:batch_end]
-
-            # Get Phase A flags for this batch
             batch_flags = [
                 iss
                 for iss in phase_a_issues
@@ -698,25 +694,19 @@ def run_step4_audit(
                 max_edges_per_call=max_edges_per_llm_call,
             )
 
-            try:
-                result = client.call_json(
-                    prompt,
-                    system_prompt=_PHASE_B_SYSTEM_PROMPT,
-                    max_tokens=8192,
-                )
-                batch_issues = parse_phase_b_response(result)
-                phase_b_issues.extend(batch_issues)
-                print(
-                    f"  Batch {batch_start//max_edges_per_llm_call + 1}: "
-                    f"{len(batch_issues)} issues found",
-                    file=sys.stderr,
-                )
-            except Exception as e:
-                print(
-                    f"  Batch {batch_start//max_edges_per_llm_call + 1}: "
-                    f"LLM call failed: {e}",
-                    file=sys.stderr,
-                )
+            result = client.call_json(
+                prompt,
+                system_prompt=_PHASE_B_SYSTEM_PROMPT,
+                max_tokens=16384, # enough
+            )
+            batch_issues = parse_phase_b_response(result)
+            phase_b_issues.extend(batch_issues)
+            print(
+                f"  Batch {batch_start//max_edges_per_llm_call + 1}: "
+                f"{len(batch_issues)} issues found",
+                file=sys.stderr,
+            )
+
     else:
         print("[Step 4] Phase B: Skipped (no LLM client)", file=sys.stderr)
 

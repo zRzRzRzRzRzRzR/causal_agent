@@ -1,4 +1,4 @@
-# 证据边缘提取工具 2.20
+# 证据边缘提取工具 3.20
 
 从学术论文 PDF 中自动提取因果关系边，并映射到 HPP（Human Phenotype Project）数据字典，生成符合统一模板的 JSON 输出。
 
@@ -10,54 +10,81 @@
 PDF 论文
    │
    ▼
-┌──────────────────────┐
-│  Step 0: 分类         │  → interventional / causal / mechanistic / associational
-└────────┬─────────────┘
+┌──────────────────────────┐
+│  Step 0: 分类             │  → interventional / causal / mechanistic / associational
+└────────┬─────────────────┘
          │
          ▼
-┌──────────────────────┐
-│  Step 1: 提取边       │  → 枚举所有 X→Y 统计关系边
-│  + 模糊去重           │  → 基于 token overlap 移除近重复边
-└────────┬─────────────┘
+┌──────────────────────────┐
+│  Step 1: 提取边           │  → 枚举所有 X→Y 统计关系边
+│  + baseline 过滤          │  → 移除 Table 1 不显著的人口统计行
+│  + 模糊去重               │  → 基于 token Jaccard overlap 移除近重复边
+└────────┬─────────────────┘
          │  edges: [{X, Y, Z, estimate, ci, ...}]
          ▼
-┌──────────────────────┐
-│  HPP RAG 检索         │  → 为每条边检索相关的 HPP 数据集字段
-└────────┬─────────────┘
-         │  每条边附带精简的 hpp_context（~1-3K tokens）
+┌──────────────────────────┐
+│  Step 1.5: 预验证（无 LLM）│  → Phase A: 数值硬核验（论文原文中能否找到）
+│                          │  → Phase B: 确定性推导 equation_type/model/mu/theta
+│                          │  → 预计算 theta_hat 和 CI（对数尺度转换）
+└────────┬─────────────────┘
+         │  每条边附带 _prevalidation 元数据
          ▼
-┌──────────────────────┐
-│  Step 2: 填充模板     │  → 用论文信息 + HPP 映射上下文填充 HPP 模板
-│  + 语义验证 + 重试     │  → 10 项语义检查，发现错误自动打回 LLM 修正
-└────────┬─────────────┘
+┌──────────────────────────┐
+│  Step 2: 填充模板         │  → HPP RAG 检索（每条边独立检索相关字段）
+│  + 预验证值强制覆盖       │  → LLM 单次调用填充模板（无重试）
+│  + 语义验证（仅报告）      │  → 10 项语义检查，结果写入 _validation
+└────────┬─────────────────┘
          │
          ▼
-┌──────────────────────┐
-│  Step 3: 审查         │  → HPP Rerank + 跨边一致性 + 模糊重复检测
-│  + 抽查 + 质量报告     │  → Spot-check 数值 + 生成 action items
-└────────┬─────────────┘
+┌──────────────────────────┐
+│  Step 3: 审查             │  → 3a: HPP Rerank（LLM 精排映射候选）
+│                          │  → 3b: 跨边一致性检查 + 模糊重复检测
+│                          │  → 3c: Spot-check（LLM 核对抽样数值）
+│                          │  → 3d: 质量报告 + action items
+└────────┬─────────────────┘
          │
          ▼
-   edges.json + review.json
+┌──────────────────────────┐
+│  Step 4: 内容审计         │  → Phase A: 确定性检查（协变量/数值/HPP 幻觉检测）
+│                          │  → Phase A 自动修复（移除幻觉协变量、多余字段）
+│                          │  → Phase B: LLM 审计（Y 标签、协变量语义、样本量）
+└────────┬─────────────────┘
+         │
+         ▼
+┌──────────────────────────┐
+│  最终 schema 清洗         │  → 删除内部元数据、规范化 dataset ID、
+│                          │    限制字段白名单、mu.type 前缀标准化
+└────────┬─────────────────┘
+         │
+         ▼
+   edges.json + step3_review.json + step4_audit.json
 ```
 
-输出结果流程图
+### 数据流概览
+
 ```
+Step 1.5 预验证输出
+  → 每条边附带 _prevalidation（equation_type, model, mu, theta_hat, ci, id_strategy）
+  ↓
 Step 2 每条边的输出
-  → 符合模板结构的 JSON
-  → Step 1.5 预验证强制覆盖（equation_type, model, mu, theta_hat, ci）
-  → 附加 _validation 元数据
+  → LLM 填充模板结构 JSON
+  → 预验证值强制覆盖（equation_type, model, mu, theta_hat, ci, adjustment_set）
+  → 附加 _validation 元数据（语义检查结果，仅报告不触发重试）
   ↓
 所有边汇总成列表
   ↓
-step2_edges_raw.json  ← 【新增】保存检查点（rerank 之前的状态）
+Step 3a rerank → 原地修改 hpp_mapping.X 和 hpp_mapping.Y 的 dataset/field
+Step 3b 一致性检查 + 模糊重复检测 → 只读
+Step 3c 抽查数值 → 只读（批量失败时自动降级为逐边检查）
   ↓
-Step 3a rerank → 【原地修改】hpp_mapping.X 和 hpp_mapping.Y 的 dataset/field
-Step 3b 一致性检查 → 只读，不改边
-Step 3c 抽查数值 → 只读，不改边
+Step 4 Phase A → 自动移除幻觉协变量和多余字段
+Step 4 Phase B → LLM 审计，生成 issues 列表
   ↓
-edges.json  ← 最终输出（包含 rerank 后的 hpp_mapping）
-step3_review.json  ← 质量报告（改了什么、哪些有问题）
+最终 schema 清洗 → 删除 _validation 等内部字段，执行白名单过滤
+  ↓
+edges.json         ← 最终输出
+step3_review.json  ← Step 3 质量报告
+step4_audit.json   ← Step 4 审计报告
 ```
 
 ### 单边约束
@@ -72,23 +99,26 @@ step3_review.json  ← 质量报告（改了什么、哪些有问题）
 .
 ├── src/
 │   ├── __init__.py            # 公共导出
-│   ├── pipeline.py            # 四步流水线（Step 0/1/2/3），含语义验证重试
+│   ├── pipeline.py            # 六步流水线（Step 0/1/1.5/2/3/4）+ 最终 schema 清洗
 │   ├── llm_client.py          # LLM 客户端（OpenAI 兼容 API）
 │   ├── ocr.py                 # PDF → 图片 → GLM-OCR → Markdown
 │   ├── xml_reader.py          # JATS/NLM XML 文本提取（跳过 OCR）
 │   ├── hpp_mapper.py          # HPP 数据字典 RAG 检索模块
 │   ├── template_utils.py      # 模板加载、合并、校验、自动修复
-│   ├── edge_prevalidator.py   # Step 1.5 预验证：强制覆盖确定性字段
+│   ├── edge_prevalidator.py   # Step 1.5 预验证：硬核验 + 确定性元数据推导
 │   ├── semantic_validator.py  # 语义正确性验证 + 公式检查 + 边去重
 │   ├── review.py              # Step 3 审查：rerank、一致性检查、spot-check、质量报告
-│   └── utils.py               # 工具函数（PDF 转图、base64、保存 JSON）
+│   └── audit.py               # Step 4 内容审计：确定性 Phase A + LLM Phase B
 ├── prompts/                   # LLM 提示词模板（.md 文件）
 │   ├── step0_classify.md
 │   ├── step1_edges.md
-│   └── step2_fill_template.md
+│   ├── step2_fill_template.md
+│   └── step4_content_audit.md
 ├── templates/                 # HPP 模板和数据字典
 │   ├── hpp_mapping_template.json                    # 带 // 注释的模板（LLM 阅读用）
 │   └── pheno_ai_data_dictionaries_simplified.json   # HPP 数据字典（35 datasets, ~2779 fields）
+├── reference/                 # 参考数据
+│   └── error_patterns.json    # Step 4 Phase B 的常见错误模式（来自 GT 标注）
 ├── batch_run.py               # 批处理脚本（支持子文件夹 batch 模式）
 ├── requirements.txt
 └── .env                       # API 配置
@@ -118,7 +148,7 @@ cp .env.example .env
 ### 单个 PDF 处理
 
 ```bash
-# 完整流程（Step 0 + 1 + 2 + 3）
+# 完整流程（Step 0 + 1 + 1.5 + 2 + 3 + 4）
 python src/main.py full paper.pdf -o ./output
 
 # 指定 HPP 数据字典（启用 RAG 检索 + LLM Rerank）
@@ -131,6 +161,7 @@ python src/main.py full paper.pdf --type associational -o ./output
 # 单独运行某个步骤
 python src/main.py classify paper.pdf
 python src/main.py edges paper.pdf
+python src/main.py audit paper.pdf -o ./output     # 单独运行 Step 4
 ```
 
 ### 批量处理
@@ -182,14 +213,6 @@ python batch_run.py -i /mnt/nature_causal_pdf/S --batches 98 99
 # 组合：只跑 98，每批 3 个，4 个并发 worker
 python batch_run.py -i /mnt/nature_causal_pdf/S --batches 98 --batch-size 3 --max-workers 4
 
-# 指定 HPP 字典 + 控制重试次数
-python batch_run.py -i /mnt/nature_causal_pdf/S -o ./results \
-  --hpp-dict templates/pheno_ai_data_dictionaries_simplified.json \
-  --max-retries 3
-
-# 不做语义重试（退回原始行为）
-python batch_run.py --max-retries 0
-
 # 强制指定类型
 python batch_run.py --type interventional
 ```
@@ -207,7 +230,6 @@ python batch_run.py --type interventional
 | `--api-key`           | 覆盖环境变量中的 API Key                            |
 | `--base-url`          | 覆盖环境变量中的 Base URL                           |
 | `--hpp-dict`          | HPP 数据字典 JSON 路径（启用 RAG + Rerank）           |
-| `--max-retries`       | 语义验证失败时最大重试次数（默认 2，设 0 关闭）                  |
 | `--ocr-dir`           | OCR 缓存目录（默认 `./cache_ocr`）                  |
 | `--dpi`               | PDF 转图片 DPI（默认 200）                         |
 | `--no-validate-pages` | 跳过 OCR 尾页过滤                                 |
@@ -223,40 +245,69 @@ python batch_run.py --type interventional
 ```
 output/
 └── paper_name/
-    ├── step0_classification.json   # 论文分类结果
-    ├── step1_edges.json            # Step 1 提取的边列表（已去重）+ 论文元数据
-    ├── edges.json                  # Step 2 完整的 HPP 模板 JSON（每条边含 _validation 元数据）
-    └── step3_review.json           # Step 3 质量报告（一致性检查、spot-check、action items）
+    ├── step0_classification.json     # 论文分类结果
+    ├── step1_edges.json              # Step 1 提取的边列表（已去重）+ 论文元数据
+    ├── step1_5_prevalidation.json    # Step 1.5 预验证报告（硬核验 + 软核验 + equation_type 分布）
+    ├── edges.json                    # 最终输出（经 Step 2/3/4 + schema 清洗后的干净 JSON）
+    ├── step3_review.json             # Step 3 质量报告（一致性检查、spot-check、action items）
+    └── step4_audit.json              # Step 4 审计报告（Phase A + Phase B issues + 自动修复记录）
 ```
 
 批量处理额外生成 `_batch_summary.json`。
 
-### `_validation` 元数据
+### `_validation` 元数据（中间态）
 
-每条填充后的边附带验证元数据：
+Step 2 填充后，每条边附带验证元数据（最终输出前会被剥离）：
 
 ```json
 {
   "_validation": {
     "is_format_valid": true,
     "is_semantically_valid": true,
-    "retries_used": 1,
+    "retries_used": 0,
     "fill_rate": 0.85,
     "semantic_issues": [],
-    "format_issues": []
+    "format_issues": [],
+    "prevalidation": {
+      "equation_type": "E2",
+      "model": "Cox",
+      "hard_check_passed": true
+    }
   }
 }
 ```
+
+> **注意**：`_validation` 是 pipeline 内部的中间状态。最终写入 `edges.json` 前，`_final_schema_enforcement` 会剥离所有以 `_` 开头的字段。
 
 ---
 
 ## 关键模块详解
 
-### 语义验证与重试（`semantic_validator.py`，新增）
+### Step 1.5 预验证（`edge_prevalidator.py`）
 
-**解决的问题**：原有 pipeline 仅做格式检查（字段是否存在、类型是否正确），不验证 LLM 输出的**逻辑正确性**。例如 LLM 可能将 Cox 模型的 equation_type 标为 E1（应为 E2），或写出与 equation_type 矛盾的公式。
+**解决的问题**：原有 pipeline 在 Step 2 依赖 LLM 推导 equation_type、model、mu 等元数据，容易出错且需要昂贵的重试循环。v3 将这些确定性推导前移到 Step 1.5，完全无需 LLM 调用。
 
-**10 项语义检查**：
+**两阶段验证**：
+
+Phase A（硬核验）对每条边的报告数值（estimate、CI、p_value）在论文原文中做字符串匹配，支持多种数值格式（整数、小数、前导零省略等），未找到的数值标记为 missing。
+
+Phase B（软核验）基于 edge 的 effect_scale、outcome_type、statistical_method 等字段确定性推导元数据，推导优先级为：特殊类型关键词（mediation→E4、interaction→E6、longitudinal→E3） > statistical_method > effect_scale > outcome_type。同时预计算 theta_hat 和 CI 到正确尺度（比率指标自动 log 变换）。
+
+推导结果写入 `edge["_prevalidation"]`，Step 2 的 LLM 调用会将这些值作为 guidance 注入 prompt，且在 LLM 输出后通过 `_apply_prevalidation_overrides` 强制覆盖，确保关键字段不受 LLM 幻觉影响。
+
+### Step 2 模板填充（`pipeline.py` + `template_utils.py`）
+
+v3 的 Step 2 对每条边做**单次 LLM 调用**，不再有重试循环。核心逻辑：
+
+1. 为每条边独立调用 HPP RAG 检索，获取精简的字段上下文（~1-3K tokens）
+2. 将预验证 guidance、模板（含注释）、HPP 上下文、论文全文组装为 prompt
+3. LLM 输出后，通过 `build_filled_edge` 合并到模板结构
+4. 强制覆盖预验证值（equation_type、model、mu、theta_hat、ci、id_strategy、adjustment_set）
+5. 运行语义验证（10 项检查），结果写入 `_validation` 但不触发重试
+
+### 语义验证（`semantic_validator.py`）
+
+10 项语义检查用于评估 LLM 输出的逻辑正确性（在 v3 中仅用于报告，不触发重试）：
 
 | 编号 | 检查项 | 说明 |
 |------|--------|------|
@@ -271,8 +322,6 @@ output/
 | 9 | alpha ↔ evidence_type | id_strategy 与论文分类一致 |
 | 10 | rho.Z ↔ adjustment_set | 两处协变量列表内容一致 |
 
-**重试机制**：当语义检查发现 blocking error 时，自动构造修正 prompt（包含具体错误描述和期望值），重新调用 LLM 修正，最多重试 `max_retries` 次（默认 2）。
-
 ### 边去重（`semantic_validator.py`）
 
 **两级去重**：
@@ -286,9 +335,39 @@ output/
 |--------|------|
 | 3a | HPP Rerank：LLM 从 top-6 RAG 候选中精排最佳映射 |
 | 3b | 跨边一致性：精确重复检测、metadata 一致性、model↔equation_type 跨边矛盾、theta 量级/符号检查 |
-| 3b+ | 模糊重复检测（新增）：token overlap 近重复边警告 |
-| 3c | Spot-check：LLM 核对抽样边的数值是否与论文原文一致 |
+| 3b+ | 模糊重复检测：token overlap 近重复边警告 |
+| 3c | Spot-check：LLM 核对抽样边的数值是否与论文原文一致（批量失败时自动降级为逐边检查） |
 | 3d | 质量报告：汇总所有检查结果，生成 action items（含语义错误标记） |
+
+### Step 4 内容审计（`audit.py`）
+
+**解决的问题**：格式校验和语义验证无法捕捉**内容层面**的错误——例如 LLM 幻觉出论文中不存在的协变量，或将数值填到了错误的 Y 变量下。Step 4 在 Step 3 之后运行，专注于内容准确性。
+
+**Phase A（确定性，无 LLM）**：
+
+| 检查 | 说明 |
+|------|------|
+| A1 协变量幻觉 | Z / adjustment_set 中每个变量名必须在论文原文中出现（支持下划线替换、token 60% 匹配） |
+| A2 数值幻觉 | reported_effect_value、reported_ci、theta_hat（非 log 尺度时）、CI 必须在原文中能找到 |
+| A3 样本数据验证 | study_cohort 中标记为 is_reported 的数值必须在原文出现 |
+| A4 HPP 变量泄漏 | X/Y 变量名必须来自论文而非 HPP 字典字段名 |
+| A5 多余字段检测 | literature_estimate 和 hpp_mapping 中不允许的字段 |
+
+Phase A 检测到的 `action=remove` 问题会自动修复：幻觉协变量从 rho.Z、adjustment_set、hpp_mapping.Z 中移除；多余字段直接删除。
+
+**Phase B（LLM 审计）**：
+
+以 few-shot 方式调用 LLM 对照论文原文逐字段核验，重点检查四类高频错误：Y 标签混淆（数值填到了错误的结局变量下）、协变量语义错误（matching/分层变量被误标为 regression covariates）、样本量混淆（筛选阶段人数 vs 最终分析样本）、统计方法误判。支持分批处理（`max_edges_per_llm_call` 控制每次 LLM 调用的边数）。
+
+### 最终 Schema 清洗（`_final_schema_enforcement`）
+
+在写入 `edges.json` 前，对每条边执行确定性清洗：
+
+- 剥离所有 `_` 前缀的内部字段（`_validation`、`_prevalidation` 等）
+- `hpp_mapping`：仅保留 X/Y/Z/M/X2 顶层 key，每个映射对象仅保留 name/dataset/field/status；E4 以外的边强制 M=null，E6 以外的边强制 X2=null
+- `literature_estimate`：仅保留 theta_hat/ci/ci_level/p_value/n/design/grade/model/adjustment_set
+- Dataset ID 格式规范化（下划线 → 连字符，如 `021_medical` → `021-medical`）
+- mu.core.type 标准化（HR + log scale → logHR）
 
 ### HPP RAG 检索（`hpp_mapper.py`）
 
@@ -317,17 +396,6 @@ RAG 检索：每条边 ~1,500-3,000 tokens → 29 条边 = ~50-87K tokens
 1. **加载模板**：读取 `hpp_mapping_template.json`（含 `//` 注释作为 LLM 提示）
 2. **预填确定性字段**：`edge_id`、`literature_estimate` 部分值、`alpha.id_strategy` 等
 3. **LLM 填充**：将模板 + 论文文本 + HPP 上下文发送给 LLM
-4. **灵活合并**：LLM 输出覆盖模板占位符，允许添加额外字段（`mapping_notes`、`reported_HR` 等）
+4. **灵活合并**：LLM 输出覆盖模板占位符，允许添加额外字段
 5. **自动修复**：数据集 ID 下划线规范化、theta_hat 对数尺度转换、CI 自动转换、M/X2 条件删除
 6. **校验**：关键字段完整性检查、命名一致性检查、类型检查
-
----
-
-
-### TODO(不一定做)
-
-- [ ] **Step 2 拆分**：将模板填充拆为 2a（论文信息提取）+ 2b（HPP 映射），每步 prompt 更短更聚焦
-- [ ] **评估框架**：对比 RAG vs 全量注入的映射准确率；对比不同 LLM 的填充质量
-- [ ] **向量检索升级**：对字段描述做 embedding，在关键词检索效果不佳时回退到语义检索
-- [ ] **Step 3 自动修复**：对 spot-check 发现的 incorrect 数值自动触发单边重填
-- [ ] **去重策略优化**：结合 effect_scale + estimate 数值相似度做更精确的重复判定

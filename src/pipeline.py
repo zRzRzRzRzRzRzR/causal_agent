@@ -49,7 +49,6 @@ from .template_utils import (
     prepare_template_for_prompt,
     prepare_template_with_comments,
 )
-from .utils import save_json
 
 _SRC_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _SRC_DIR.parent
@@ -59,6 +58,12 @@ _DEFAULT_HPP_DICT = _TEMPLATES_DIR / "pheno_ai_data_dictionaries_simplified.json
 _DEFAULT_TEMPLATE = _TEMPLATES_DIR / "hpp_mapping_template.json"
 _REFERENCE_DIR = _PROJECT_DIR / "reference"
 _DEFAULT_ERROR_PATTERNS = _REFERENCE_DIR / "error_patterns.json"
+
+
+def save_json(path: Path, data: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print(f"  -> Saved: {path}", file=sys.stderr)
 
 
 def _load_prompt(name: str) -> str:

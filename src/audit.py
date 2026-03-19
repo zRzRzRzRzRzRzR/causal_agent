@@ -697,7 +697,7 @@ def run_step4_audit(
             result = client.call_json(
                 prompt,
                 system_prompt=_PHASE_B_SYSTEM_PROMPT,
-                max_tokens=16384, # enough
+                max_tokens=16384,  # enough
             )
             batch_issues = parse_phase_b_response(result)
             phase_b_issues.extend(batch_issues)

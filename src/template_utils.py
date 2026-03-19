@@ -29,10 +29,6 @@ import json5
 
 
 def load_template(template_path: str) -> Dict:
-    """
-    Load hpp_mapping_template.json, stripping JS-style comments.
-    The template uses // comments which aren't valid JSON, so we strip them.
-    """
     with open(template_path, "r", encoding="utf-8") as f:
         raw = f.read()
     lines = raw.split("\n")
@@ -61,7 +57,6 @@ def load_template(template_path: str) -> Dict:
 
 
 def strip_comments(obj: Any) -> Any:
-    """Remove _comment keys recursively."""
     if isinstance(obj, dict):
         return {k: strip_comments(v) for k, v in obj.items() if k != "_comment"}
     elif isinstance(obj, list):
@@ -70,7 +65,6 @@ def strip_comments(obj: Any) -> Any:
 
 
 def get_clean_skeleton(template: Dict) -> Dict:
-    """Get a clean skeleton from the template, removing _comment keys."""
     return strip_comments(copy.deepcopy(template))
 
 
@@ -216,10 +210,6 @@ def _recursive_merge(target: Dict, source: Dict) -> None:
             target[key] = copy.deepcopy(source[key])
 
 
-# ---------------------------------------------------------------------------
-# 4. Validation
-# ---------------------------------------------------------------------------
-
 _CRITICAL_FIELDS = [
     "edge_id",
     "equation_type",
@@ -344,11 +334,6 @@ def _count_leaves(obj: Any) -> Tuple[int, int]:
     else:
         is_filled = obj is not None and not _is_placeholder(obj) and obj != ""
         return 1, (1 if is_filled else 0)
-
-
-# ---------------------------------------------------------------------------
-# 5. Auto-fix common LLM mistakes
-# ---------------------------------------------------------------------------
 
 
 def auto_fix(edge_json: Dict) -> Dict:
@@ -513,11 +498,6 @@ def _normalize_dataset_ids(mapping: Dict) -> None:
                         item["dataset"] = ds
 
 
-# ---------------------------------------------------------------------------
-# 6. Prepare template for LLM prompt
-# ---------------------------------------------------------------------------
-
-
 def prepare_template_for_prompt(template: Dict) -> str:
     """
     Prepare the template for inclusion in the LLM prompt.
@@ -537,11 +517,6 @@ def prepare_template_with_comments(template_path: str) -> str:
     """
     with open(template_path, "r", encoding="utf-8") as f:
         return f.read()
-
-
-# ---------------------------------------------------------------------------
-# 7. Full pipeline: skeleton -> prefill -> merge -> fix -> validate
-# ---------------------------------------------------------------------------
 
 
 def build_filled_edge(

@@ -2,7 +2,6 @@ import argparse
 import json
 import sys
 import time
-import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -10,7 +9,6 @@ from src.llm_client import GLMClient
 from src.ocr import get_pdf_text
 from src.ocr import init_extractor as init_ocr
 from src.pipeline import EdgeExtractionPipeline
-from src.xml_reader import extract_text_from_xml
 
 
 def is_file_completed(file_path: Path, output_dir: Path) -> bool:
@@ -31,20 +29,14 @@ def process_single_file(
     resume: bool = False,
 ) -> dict:
     t0 = time.time()
-    status = "success"
-    error_msg = None
-    n_edges = 0
 
     # ── File-level skip: if edges.json already exists, skip entirely ──
     if resume and is_file_completed(file_path, output_dir):
         # Read existing edges count for accurate reporting
         edges_file = output_dir / file_path.stem / "edges.json"
-        try:
-            with open(edges_file, "r", encoding="utf-8") as f:
-                existing_edges = json.load(f)
-            n_edges = len(existing_edges) if isinstance(existing_edges, list) else 0
-        except Exception:
-            n_edges = 0
+        with open(edges_file, "r", encoding="utf-8") as f:
+            existing_edges = json.load(f)
+        n_edges = len(existing_edges) if isinstance(existing_edges, list) else 0
 
         return {
             "file": file_path.name,
@@ -54,40 +46,31 @@ def process_single_file(
             "error": None,
         }
 
-    try:
-        edges = pipeline.run(
-            pdf_path=str(file_path),
-            force_type=force_type,
-            output_dir=str(output_dir),
-            resume=resume,
-        )
-        n_edges = len(edges) if edges else 0
-
-    except Exception as e:
-        status = "failed"
-        error_msg = f"{type(e).__name__}: {e}"
-        traceback.print_exc(file=sys.stderr)
+    edges = pipeline.run(
+        pdf_path=str(file_path),
+        force_type=force_type,
+        output_dir=str(output_dir),
+        resume=resume,
+    )
+    n_edges = len(edges) if edges else 0
 
     elapsed = round(time.time() - t0, 1)
 
     return {
         "file": file_path.name,
-        "status": status,
+        "status": "success",
         "n_edges": n_edges,
         "elapsed_sec": elapsed,
-        "error": error_msg,
+        "error": None,
     }
 
 
-def collect_files_from_dir(directory: Path, xml_mode: bool) -> list[Path]:
+def collect_files_from_dir(directory: Path) -> list[Path]:
     """Collect input files from a single directory."""
-    if xml_mode:
-        return sorted(list(directory.glob("*.nxml")) + list(directory.glob("*.xml")))
-    else:
-        return sorted(directory.glob("*.pdf"))
+    return sorted(directory.glob("*.pdf"))
 
 
-def collect_batches(input_dir: Path, xml_mode: bool) -> dict[str, list[Path]]:
+def collect_batches(input_dir: Path) -> dict[str, list[Path]]:
     """
     Detect directory structure and collect files.
 
@@ -99,13 +82,13 @@ def collect_batches(input_dir: Path, xml_mode: bool) -> dict[str, list[Path]]:
     # Check sub-directories first
     subdirs = sorted([d for d in input_dir.iterdir() if d.is_dir()])
     for subdir in subdirs:
-        files = collect_files_from_dir(subdir, xml_mode)
+        files = collect_files_from_dir(subdir)
         if files:
             batches[subdir.name] = files
 
     # If no sub-folder batches found, fall back to flat mode
     if not batches:
-        files = collect_files_from_dir(input_dir, xml_mode)
+        files = collect_files_from_dir(input_dir)
         if files:
             batches["_root"] = files
 
@@ -192,16 +175,7 @@ def process_batch(
             }
             for future in as_completed(future_to_file):
                 file_path = future_to_file[future]
-                try:
-                    summary = future.result()
-                except Exception as e:
-                    summary = {
-                        "file": file_path.name,
-                        "status": "failed",
-                        "n_edges": 0,
-                        "elapsed_sec": 0,
-                        "error": str(e),
-                    }
+                summary = future.result()
                 summary["batch"] = batch_name
                 results.append(summary)
                 tag = (
@@ -255,11 +229,6 @@ def main():
         action="store_true",
         help="Skip files whose edges.json already exists, and skip steps whose cache exists",
     )
-    parser.add_argument(
-        "--xml",
-        action="store_true",
-        help="Input files are JATS/NLM XML (.nxml/.xml) — skip OCR entirely",
-    )
     # ── Batch control ──
     parser.add_argument(
         "--batch-size",
@@ -281,26 +250,18 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    fmt_label = "XML" if args.xml else "PDF"
-
-    # ── Collect batches (sub-folder → files) ──
-    all_batches = collect_batches(input_dir, args.xml)
-
-    # Filter batches if --batches specified
+    all_batches = collect_batches(input_dir)
     if args.batches is not None:
         selected = set(args.batches)
         all_batches = {k: v for k, v in all_batches.items() if k in selected}
 
     total_found = sum(len(v) for v in all_batches.values())
-
-    # ── If --resume, filter out already-completed files BEFORE applying batch-size ──
     n_skipped_completed = 0
     if args.resume:
         all_batches, n_skipped_completed = filter_completed_files(
             all_batches, output_dir
         )
 
-    # Apply --batch-size as a global cap across remaining (pending) files
     if args.batch_size > 0:
         capped: dict[str, list[Path]] = {}
         remaining = args.batch_size
@@ -319,7 +280,7 @@ def main():
     print(f"Batch Evidence Edge Extraction", file=sys.stderr)
     print(f"  Input:   {input_dir.resolve()}", file=sys.stderr)
     print(f"  Output:  {output_dir.resolve()}", file=sys.stderr)
-    print(f"  Format:  {fmt_label}", file=sys.stderr)
+    print(f"  Format:  {"PDF"}", file=sys.stderr)
     print(
         f"  Batches: {len(all_batches)} ({', '.join(all_batches.keys()) if all_batches else 'none'})",
         file=sys.stderr,
@@ -347,17 +308,10 @@ def main():
 
     client = GLMClient(api_key=args.api_key, base_url=args.base_url, model=args.model)
 
-    if args.xml:
-        text_func = extract_text_from_xml
-        init_func = None
-    else:
-        text_func = get_pdf_text
-        init_func = init_ocr
-
     pipeline = EdgeExtractionPipeline(
         client=client,
-        ocr_text_func=text_func,
-        ocr_init_func=init_func,
+        ocr_text_func=get_pdf_text,
+        ocr_init_func=init_ocr,
         ocr_output_dir=args.ocr_dir,
         ocr_dpi=args.dpi,
         ocr_validate_pages=not args.no_validate_pages,
@@ -373,7 +327,7 @@ def main():
         print(f"\n{'━'*60}", file=sys.stderr)
         print(
             f"  BATCH [{batch_idx}/{len(all_batches)}]: {batch_name} "
-            f"({len(files)} {fmt_label}s)",
+            f"({len(files)} {"PDF"}s)",
             file=sys.stderr,
         )
         print(f"{'━'*60}", file=sys.stderr)
@@ -419,7 +373,7 @@ def main():
         "total_files_found": total_found,
         "total_files_processed": total_files,
         "total_batches": len(all_batches),
-        "format": fmt_label,
+        "format": "PDF",
         "success": n_success,
         "skipped": n_skipped + n_skipped_completed,
         "failed": n_failed,

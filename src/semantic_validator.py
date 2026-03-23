@@ -131,7 +131,12 @@ def validate_semantics(
     eq_type = edge_json.get("equation_type", "")
     lit = edge_json.get("literature_estimate", {})
     model = str(lit.get("model", "")).strip()
-    formula = str(edge_json.get("equation_formula", ""))
+    # NEW: equation_formula is now a dict with {formula, parameters}
+    ef_raw = edge_json.get("equation_formula", "")
+    if isinstance(ef_raw, dict):
+        formula = str(ef_raw.get("formula", ""))
+    else:
+        formula = str(ef_raw)
     mu = edge_json.get("epsilon", {}).get("mu", {}).get("core", {})
     alpha = edge_json.get("epsilon", {}).get("alpha", {})
     rho = edge_json.get("epsilon", {}).get("rho", {})
@@ -167,6 +172,42 @@ def validate_semantics(
 
     # -- Check 10: rho.Z <-> adjustment_set consistency --
     issues.extend(_check_rho_z_adjustment(rho, lit))
+
+    # -- Check 11 (NEW): lit.equation_type <-> top-level equation_type --
+    lit_eq = lit.get("equation_type", "")
+    if lit_eq and eq_type and lit_eq != eq_type:
+        issues.append(
+            {
+                "check": "lit_eq_type_mismatch",
+                "severity": "error",
+                "message": (
+                    f"literature_estimate.equation_type='{lit_eq}' differs from "
+                    f"top-level equation_type='{eq_type}'. These must be identical."
+                ),
+                "field": "literature_estimate.equation_type",
+                "expected": eq_type,
+                "actual": lit_eq,
+            }
+        )
+
+    # -- Check 12 (NEW): efr.model_type <-> lit.model --
+    efr = edge_json.get("equation_formula_reported", {})
+    if isinstance(efr, dict):
+        efr_model = efr.get("model_type", "")
+        if efr_model and model and efr_model.lower() != model.lower():
+            issues.append(
+                {
+                    "check": "efr_model_type_mismatch",
+                    "severity": "warning",
+                    "message": (
+                        f"equation_formula_reported.model_type='{efr_model}' differs from "
+                        f"literature_estimate.model='{model}'."
+                    ),
+                    "field": "equation_formula_reported.model_type",
+                    "expected": model,
+                    "actual": efr_model,
+                }
+            )
 
     return issues
 

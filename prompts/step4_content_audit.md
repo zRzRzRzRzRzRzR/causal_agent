@@ -34,6 +34,29 @@
 **症状**: X 或 Y 的名称不是论文中的术语，而是 HPP 数据字典中的字段名。
 **检查方法**: X 和 Y 的名称应该在论文原文中能找到（或是其直接同义词）。
 
+### 模式 6: 参数溯源虚假 (Parameter Source Fabrication)
+**症状**: `parameters[].source` 中引用的 Table/Figure 编号在论文中不存在，或 source 中引用的数值在论文中找不到。
+**检查方法**:
+  - 检查 equation_formula.parameters 和 equation_formula_reported.parameters 中每个参数的 source 字段
+  - 验证 source 中引用的 Table/Figure 编号是否在论文中存在
+  - 验证 source 中引用的数值（如 "HR=0.84"）是否在论文对应位置能找到
+  - 如果 source 引用了不存在的 Table 或不存在的数值，标为 `severity: error`
+
+### 模式 7: 双方程不一致 (Dual Equation Inconsistency)
+**症状**: equation_formula_reported 和 literature_estimate 中的对应字段不一致。
+**检查方法**:
+  - `equation_formula_reported.model_type` 应等于 `literature_estimate.model`
+  - 顶层 `equation_type` 应等于 `literature_estimate.equation_type`
+  - `reported_effect_value` 与 `theta_hat` 的换算关系应正确（ratio 类: theta_hat = ln(reported_effect_value)）
+  - `equation_formula_reported.X/Y` 应等于 `epsilon.rho.X/Y`
+
+### 模式 8: reason 引用不实 (Reason Citation Fabrication)
+**症状**: `reason` 字段中引用的论文位置（页码、段落、表号）不正确或不存在。
+**检查方法**:
+  - 阅读 equation_formula_reported.reason 和 literature_estimate.reason
+  - 验证其中引用的每个论文位置是否真实存在
+  - 如果 reason 说 "Methods p.5 描述 Cox model"，检查论文 p.5 是否真的有这段描述
+
 ---
 
 ## 审核示例 (Few-shot)
@@ -161,4 +184,6 @@
 2. 每个 finding 必须引用论文中的具体位置
 3. 如果论文未报告某信息但也不能确定edge是错的，标为 warning
 4. 不要检查格式问题（格式已验证通过）
-5. 重点关注上述 5 类高频错误模式
+5. 重点关注上述 8 类错误模式（模式 1-5 是内容错误，模式 6-8 是溯源错误）
+6. 对于 parameters[].source，逐个验证引用的 Table/Figure/页码是否真实存在
+7. 对于 reason 字段，验证论文引用是否准确，是否能在原文中找到对应描述

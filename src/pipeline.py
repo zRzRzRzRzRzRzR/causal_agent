@@ -254,10 +254,7 @@ def extract_anchor_numbers(pdf_text: str) -> Set[str]:
     text_clean = pdf_text.replace("\n", " ").replace("\t", " ")
 
     # Match numbers in various formats: 0.40, 158, 14.7, <0.001, etc.
-    raw_numbers = re.findall(
-        r'(?<![a-zA-Z])(\d+\.?\d*)',
-        text_clean
-    )
+    raw_numbers = re.findall(r"(?<![a-zA-Z])(\d+\.?\d*)", text_clean)
 
     anchor_set = set()
     for n in raw_numbers:
@@ -298,7 +295,10 @@ def hard_match_value(val: Any, anchor_set: Set[str], pdf_text: str) -> bool:
 
     # Direct match
     candidates = [
-        f"{num:.1f}", f"{num:.2f}", f"{num:.3f}", f"{num:g}",
+        f"{num:.1f}",
+        f"{num:.2f}",
+        f"{num:.3f}",
+        f"{num:g}",
     ]
     if num == int(num) and abs(num) < 100000:
         candidates.append(str(int(num)))
@@ -314,7 +314,10 @@ def hard_match_value(val: Any, anchor_set: Set[str], pdf_text: str) -> bool:
     try:
         exp_val = math.exp(num)
         exp_candidates = [
-            f"{exp_val:.1f}", f"{exp_val:.2f}", f"{exp_val:.3f}", f"{exp_val:g}",
+            f"{exp_val:.1f}",
+            f"{exp_val:.2f}",
+            f"{exp_val:.3f}",
+            f"{exp_val:g}",
         ]
         if 0 < exp_val < 1:
             exp_candidates.append(f"{exp_val:.2f}".lstrip("0"))
@@ -373,7 +376,9 @@ def post_step2_hard_match(
     theta = lit.get("theta_hat")
     if theta is not None and mu.get("scale") != "log":
         if not hard_match_value(theta, anchor_set, pdf_text):
-            changes.append(f"theta_hat={theta} -> null (difference scale, not in paper)")
+            changes.append(
+                f"theta_hat={theta} -> null (difference scale, not in paper)"
+            )
             lit["theta_hat"] = None
 
     # For log scale: verify the original-scale value exists
@@ -584,6 +589,13 @@ def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
     lines.append(f"- **id_strategy**: `{preval.get('id_strategy', '?')}`")
     lines.append(f"- **formula_skeleton**: `{preval.get('formula_skeleton', '?')}`")
 
+    # NEW: Include reasoning chain so LLM can reference it in its own `reason` field
+    reasoning = preval.get("reasoning_chain", [])
+    if reasoning:
+        lines.append("\n**Derivation reasoning** (for your `reason` field reference):")
+        for step in reasoning:
+            lines.append(f"  - {step}")
+
     lines.append(
         "\n**IMPORTANT**: Use the pre-validated equation_type, model, mu, "
         "theta_hat, and ci values above. Do NOT re-derive these -- they have "
@@ -722,11 +734,44 @@ def _final_schema_enforcement(edge: Dict) -> None:
         "grade",
         "model",
         "adjustment_set",
+        "equation_type",  # NEW: dual-check
+        "equation_formula",  # NEW: dual-check
+        "reason",  # NEW: traceability
     }
     lit = edge.get("literature_estimate", {})
     for k in list(lit.keys()):
         if k not in _ALLOWED_LIT_KEYS:
             del lit[k]
+
+    # 4b. equation_formula_reported: strip extra fields
+    _ALLOWED_EFR_KEYS = {
+        "equation",
+        "source",
+        "model_type",
+        "link_function",
+        "effect_measure",
+        "reported_effect_value",
+        "reported_ci",
+        "reported_p",
+        "X",
+        "Y",
+        "Z",
+        "parameters",
+        "reason",
+    }
+    efr = edge.get("equation_formula_reported", {})
+    if isinstance(efr, dict):
+        for k in list(efr.keys()):
+            if k not in _ALLOWED_EFR_KEYS:
+                del efr[k]
+
+    # 4c. equation_formula: allow formula + parameters
+    ef = edge.get("equation_formula", {})
+    if isinstance(ef, dict):
+        _ALLOWED_EF_KEYS = {"formula", "parameters"}
+        for k in list(ef.keys()):
+            if k not in _ALLOWED_EF_KEYS:
+                del ef[k]
 
     # 5. Normalize mu.core.type to use log prefix for ratio measures
     mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})

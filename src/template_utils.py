@@ -400,11 +400,75 @@ def auto_fix(edge_json: Dict) -> Dict:
         "grade",
         "model",
         "adjustment_set",
+        "equation_type",  # NEW: dual-check field
+        "equation_formula",  # NEW: dual-check field
+        "reason",  # NEW: traceability
     }
     lit = edge_json.get("literature_estimate", {})
     extra_lit_keys = set(lit.keys()) - _ALLOWED_LIT_KEYS
     for k in extra_lit_keys:
         del lit[k]
+
+    # --- Strip forbidden fields from equation_formula_reported ---
+    _ALLOWED_EFR_KEYS = {
+        "equation",
+        "source",
+        "model_type",
+        "link_function",
+        "effect_measure",
+        "reported_effect_value",
+        "reported_ci",
+        "reported_p",
+        "X",
+        "Y",
+        "Z",
+        "parameters",
+        "reason",
+    }
+    efr = edge_json.get("equation_formula_reported", {})
+    if isinstance(efr, dict):
+        extra_efr_keys = set(efr.keys()) - _ALLOWED_EFR_KEYS
+        for k in extra_efr_keys:
+            del efr[k]
+
+    # --- Ensure parameters is well-formed in both formula sections ---
+    for formula_key in ("equation_formula", "equation_formula_reported"):
+        formula = edge_json.get(formula_key, {})
+        if not isinstance(formula, dict):
+            continue
+        params = formula.get("parameters")
+        if isinstance(params, list):
+            for p in params:
+                if isinstance(p, dict):
+                    p.setdefault("symbol", "")
+                    p.setdefault("value", "")
+                    p.setdefault("source", "")
+        elif params is None:
+            formula["parameters"] = []
+
+    # --- Ensure reason fields exist ---
+    for section_key in ("equation_formula_reported", "literature_estimate"):
+        section = edge_json.get(section_key, {})
+        if isinstance(section, dict) and "reason" not in section:
+            section["reason"] = ""
+
+    # --- Ensure study_cohort sub-fields have is_reported ---
+    cohort = edge_json.get("study_cohort", {})
+    if isinstance(cohort, dict):
+        for field_name in (
+            "sample_size",
+            "age",
+            "sex",
+            "disease_indication",
+            "study_design",
+            "country_or_region",
+            "data_source",
+            "follow_up_duration",
+        ):
+            fd = cohort.get(field_name)
+            if isinstance(fd, dict):
+                fd.setdefault("is_reported", False)
+                fd.setdefault("value", "")
 
     # --- theta_hat: try to coerce string to number ---
     theta = lit.get("theta_hat")

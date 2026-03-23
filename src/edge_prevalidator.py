@@ -263,6 +263,7 @@ def derive_equation_metadata(
     outcome_type = str(edge.get("outcome_type", "")).strip()
     stat_method = str(edge.get("statistical_method", "")).strip().lower()
     issues = []
+    reasoning_chain = []  # NEW: trace every derivation decision
 
     # Step 0: If Step 1 provided statistical_method, use it as primary signal
     method_to_eq: Dict[str, Tuple[str, str]] = {
@@ -285,24 +286,50 @@ def derive_equation_metadata(
     # Step 2: Derive equation_type — priority: special > stat_method > effect_scale > outcome_type
     if special_eq:
         eq_type = special_eq
+        reasoning_chain.append(
+            f"[eq_type] special keyword detection → '{special_eq}' "
+            f"(found mediation/interaction/longitudinal keywords in edge fields)"
+        )
     elif stat_method in method_to_eq:
         eq_type = method_to_eq[stat_method][0]
+        reasoning_chain.append(
+            f"[eq_type] statistical_method='{stat_method}' → "
+            f"({method_to_eq[stat_method][0]}, {method_to_eq[stat_method][1]}) via method_to_eq"
+        )
     elif effect_scale in EFFECT_SCALE_TO_EQUATION_TYPE:
         eq_type = EFFECT_SCALE_TO_EQUATION_TYPE[effect_scale]
+        reasoning_chain.append(
+            f"[eq_type] effect_scale='{effect_scale}' → "
+            f"'{eq_type}' via EFFECT_SCALE_TO_EQUATION_TYPE"
+        )
     elif outcome_type == "survival":
         eq_type = "E2"
         if not effect_scale:
             effect_scale = "HR"
+        reasoning_chain.append(
+            f"[eq_type] outcome_type='survival' → 'E2', default effect_scale='HR'"
+        )
     elif outcome_type == "binary":
         eq_type = "E1"
         if not effect_scale:
             effect_scale = "OR"
+        reasoning_chain.append(
+            f"[eq_type] outcome_type='binary' → 'E1', default effect_scale='OR'"
+        )
     elif outcome_type == "continuous":
         eq_type = "E1"
         if not effect_scale:
             effect_scale = "beta"
+        reasoning_chain.append(
+            f"[eq_type] outcome_type='continuous' → 'E1', default effect_scale='beta'"
+        )
     else:
         eq_type = "E1"
+        reasoning_chain.append(
+            f"[eq_type] FALLBACK: statistical_method='{stat_method}', "
+            f"effect_scale='{effect_scale}', outcome_type='{outcome_type}' "
+            f"→ default 'E1'"
+        )
         issues.append(
             {
                 "check": "derive_eq_type_fallback",
@@ -317,24 +344,41 @@ def derive_equation_metadata(
     # Step 3: Derive model — priority: stat_method > equation_type + effect_scale
     if stat_method in method_to_eq:
         model = method_to_eq[stat_method][1]
+        reasoning_chain.append(
+            f"[model] statistical_method='{stat_method}' → model='{model}'"
+        )
     elif eq_type == "E2":
         model = "Cox"
+        reasoning_chain.append(f"[model] eq_type='E2' → model='Cox'")
     elif eq_type == "E3":
         model = "LMM"
+        reasoning_chain.append(f"[model] eq_type='E3' → model='LMM'")
     elif eq_type == "E4":
         model = "mediation"
+        reasoning_chain.append(f"[model] eq_type='E4' → model='mediation'")
     elif eq_type == "E6":
         model = "interaction_model"
+        reasoning_chain.append(f"[model] eq_type='E6' → model='interaction_model'")
     else:
         model_key = f"{eq_type}_{effect_scale}"
         if model_key in EQUATION_TYPE_TO_MODEL:
             model = EQUATION_TYPE_TO_MODEL[model_key]
+            reasoning_chain.append(
+                f"[model] key '{model_key}' → model='{model}' via EQUATION_TYPE_TO_MODEL"
+            )
         elif outcome_type == "binary":
             model = "logistic"
+            reasoning_chain.append(f"[model] outcome_type='binary' → model='logistic'")
         elif outcome_type == "continuous":
             model = "linear"
+            reasoning_chain.append(
+                f"[model] outcome_type='continuous' → model='linear'"
+            )
         else:
             model = "linear"
+            reasoning_chain.append(
+                f"[model] FALLBACK: eq_type='{eq_type}', effect_scale='{effect_scale}' → default 'linear'"
+            )
             issues.append(
                 {
                     "check": "derive_model_fallback",
@@ -349,10 +393,20 @@ def derive_equation_metadata(
     # Step 4: Derive mu
     if effect_scale in EFFECT_SCALE_TO_MU:
         mu = EFFECT_SCALE_TO_MU[effect_scale].copy()
+        reasoning_chain.append(
+            f"[mu] effect_scale='{effect_scale}' → "
+            f"family='{mu['family']}', type='{mu['type']}', scale='{mu['scale']}'"
+        )
     elif eq_type == "E2":
         mu = {"family": "ratio", "type": "HR", "scale": "log"}
+        reasoning_chain.append(
+            f"[mu] eq_type='E2' → ratio/HR/log (default for survival)"
+        )
     else:
         mu = {"family": "difference", "type": "BETA", "scale": "identity"}
+        reasoning_chain.append(
+            f"[mu] FALLBACK: effect_scale='{effect_scale}' → difference/BETA/identity"
+        )
         issues.append(
             {
                 "check": "derive_mu_fallback",
@@ -371,11 +425,17 @@ def derive_equation_metadata(
         id_strategy = "observational"
     else:
         id_strategy = "observational"
+    reasoning_chain.append(
+        f"[id_strategy] evidence_type='{evidence_type}' → id_strategy='{id_strategy}'"
+    )
 
     # Step 6: Build formula skeleton
     x_name = str(edge.get("X", "X")).replace(" ", "_")
     y_name = str(edge.get("Y", "Y")).replace(" ", "_")
     formula = _build_formula_skeleton(eq_type, model, x_name, y_name, effect_scale)
+    reasoning_chain.append(
+        f"[formula] built skeleton for eq_type='{eq_type}', model='{model}'"
+    )
 
     return {
         "equation_type": eq_type,
@@ -384,6 +444,7 @@ def derive_equation_metadata(
         "formula_skeleton": formula,
         "id_strategy": id_strategy,
         "issues": issues,
+        "reasoning_chain": reasoning_chain,
     }
 
 
@@ -588,6 +649,7 @@ def prevalidate_edges(
             "hard_check": hard_result,
             "soft_issues": soft_result["issues"],
             "adjustment_variables": edge.get("adjustment_variables", []),
+            "reasoning_chain": soft_result.get("reasoning_chain", []),
         }
 
         enriched.append(edge)

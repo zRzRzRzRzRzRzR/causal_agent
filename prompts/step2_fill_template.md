@@ -69,15 +69,56 @@ Evidence type: {evidence_type}
 - `paper_title`: 完整的论文标题，空格替换为下划线
 - `paper_abstract`: 简要摘要（1-3句话：设计、样本量、主要发现），空格替换为下划线
 
-### 2. equation_formula 和 equation_formula_reported
-- `equation_formula`: 使用预确定的equation_type框架编写特定的模型公式。如果提供了公式骨架，作为指导使用。
+### 2. equation_formula（E1-6 框架方程）
+
+`equation_formula` 现在是一个**对象**，包含 `formula` 和 `parameters` 两个子字段：
+
+```json
+{
+  "formula": "λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γ₁·Age + γ₂·Sex)",
+  "parameters": [
+    {"symbol": "β_X", "value": "ln(0.84) ≈ -0.174", "source": "Table 2, Model 2, HLS 列: HR=0.84 (95% CI 0.78-0.90)"},
+    {"symbol": "γ₁", "value": "Age", "source": "Table 2 脚注: 'adjusted for age, sex, and TDI'"},
+    {"symbol": "λ₀(t)", "value": "baseline hazard function (not reported)", "source": "Cox 模型标准基线风险函数，论文未单独报告"}
+  ]
+}
+```
+
+- `formula`: 使用预确定的 equation_type 框架编写数学公式。**必须使用数学符号**（β, γ, λ 等），严禁纯文字描述。
   如果当前效应值来自未调整比较/直接比较/列联表/Fisher/t-test/Model 1=no adjustments，则不要为了套公式强行加入 `+ gamma^T * Z`。
-- `equation_formula_reported`: 填充子字段，但**不得为了填满模板而臆造统计细节**。如果论文未明确报告某项，优先使用 `null` 或 `[]`，而不是猜测。
+- `parameters`: 公式中**每一个**数学符号都要列出，每个参数包含：
+  - `symbol`: 数学符号（如 `"β_X"`, `"γ₁"`, `"λ₀(t)"`）
+  - `value`: 参数值（效应系数填数值，协变量填变量名，未报告的函数填描述）
+  - `source`: **论文原文出处**（必须可在 PDF 中 Ctrl+F 搜索到）。格式示例：`"Table 2, Model 2, HLS 列: HR=0.84 (95% CI 0.78-0.90)"`
+
+### 3. equation_formula_reported（论文报告方程 — 独立于 E1-6 框架）
+
+此字段用于与 equation_formula 做**双重校验**。新增了 `parameters` 和 `reason` 子字段：
+
+- `equation`: 数学公式字符串（必须使用数学符号，严禁纯文字描述）
+- `source`: `"extracted"`（论文有明确方程）或 `"reconstructed"`（论文无方程，根据方法描述重构）
+- `model_type`: `"Cox"` / `"logistic"` / `"linear"` / `"Poisson"` 等
+- `link_function`: `"log"` / `"logit"` / `"identity"` 等
+- `effect_measure`: `"HR"` / `"OR"` / `"RR"` / `"MD"` / `"BETA"` 等
+- `reported_effect_value`: 论文原始尺度效应值（ratio 类填原值如 0.84，difference 类填原值如 -3.2）
+- `reported_ci`: 论文原始尺度 CI `[下界, 上界]`
+- `reported_p`: 论文报告的 p 值字符串
+- `X`, `Y`, `Z`: 通路节点，必须与 `epsilon.rho` 一致
+- `parameters`: 与 equation_formula 相同格式，列出公式中所有参数的 `{symbol, value, source}`
+- `reason`: **逐字段解释取值依据**，必须引用论文具体位置（页码/表号/段落）。格式为编号列表，每个字段一条。
+
+**reason 示例**：
+```
+"1. equation: 论文 Methods Section 2.3 (p.5) 描述 'Cox proportional hazards models were used'，据此构建 h(t)=h₀(t)·exp(β·X+γ₁·Z₁+γ₂·Z₂)。\n2. source='reconstructed': 论文未给出完整数学方程，根据 Methods 描述重构。\n3. model_type='Cox': Methods p.5 第 2 段: 'We fitted Cox proportional hazards models'。\n4. effect_measure='HR': Table 2 标题: 'Hazard ratios (95% CI)'。\n5. reported_effect_value=0.84: Table 2, Model 2, HLS 列: HR=0.84。\n6. reported_ci=[0.78, 0.90]: Table 2, Model 2, 95% CI (0.78-0.90)。\n7. reported_p='< 0.001': Table 2, Model 2, p<0.001。\n8. X/Y/Z: X 来自 Methods Exposure 定义; Y 来自 Methods Outcome 定义; Z 来自 Table 2 脚注。"
+```
+
+**⚠ reason 中的论文引用必须是可在 PDF 中 Ctrl+F 搜索到的原文片段。**
+
 - **Z 硬规则**：如果当前 edge 对应的是未调整结果，或论文只做了 direct comparison / contingency tables / difference in proportions / exact test，那么以下四处必须同时为 `[]`：
   `equation_formula_reported.Z`、`epsilon.rho.Z`、`literature_estimate.adjustment_set`、`hpp_mapping.Z`
 - 如果论文同时报告多个模型（如 Model 1 / Model 2 / Model 3），**只能**填写与你当前 edge 的 estimate / CI / p_value 对应的那个模型的调整变量；不能混用别的模型的协变量。
 
-### 3. epsilon字段（来自论文）
+### 4. epsilon字段（来自论文）
 - `epsilon.Pi`: 人群标签 — `"adult_general"`（成人一般人群）、`"cvd"`（心血管疾病）、`"diabetes"`（糖尿病）、`"oncology"`（肿瘤）、`"pediatric"`（儿科）
 - `epsilon.iota.core.name`: 暴露变量的**简洁名称**（例如 `"Healthy Lifestyle Score"` 而非 `"Healthy Lifestyle Score 4 (Never smoking, Physically active, ...)"）`。必须匹配rho.X
 - `epsilon.o.name`: 结局变量名称（必须匹配rho.Y）
@@ -88,17 +129,25 @@ Evidence type: {evidence_type}
 - `epsilon.alpha.status`: `"identified"`（已识别，RCT）/ `"partially_identified"`（部分识别，观察性）/ `"not_identified"`（未识别）
 - `epsilon.rho`: 变量角色 — X（使用简洁名称，与iota.core.name一致）、Y、Z（调整变量列表）。**默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。不要把 baseline table 中的 Age/Sex/BMI/TDI 当成调整变量。IV（仅MR，否则为null）
 
-### 4. literature_estimate（剩余字段）
+### 5. literature_estimate（剩余字段）
 - `n`: 总样本量
 - `design`: `"RCT"` / `"cohort"`（队列）/ `"cross-sectional"`（横断面）/ `"case-control"`（病例对照）/ `"meta-analysis"`（荟萃分析）/ `"MR"`
 - `grade`: `"A"`（高质量RCT）、`"B"`（中等）、`"C"`（低质量/未调整）
 - `adjustment_set`: 调整变量列表（必须匹配rho.Z）。**默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。
 - `p_value`: 仅在论文明确报告时填写；**不要**根据 CI、显著性、Bonferroni 校正或常识反推。
 - `ci_level`: 通常为0.95
+- `equation_type`: 必须与顶层 `equation_type` 相同（用于双重校验）
+- `equation_formula`: 必须与顶层 `equation_formula.formula` 相同或高度相似（用于双重校验）
+- `reason`: **逐字段解释取值依据**，格式同 `equation_formula_reported.reason`。必须引用论文具体位置。
 
-⚠️ **literature_estimate 只包含以下字段**：`theta_hat`, `ci`, `ci_level`, `p_value`, `n`, `design`, `grade`, `model`, `adjustment_set`。**禁止**添加 `subgroup`, `control_reference`, `reported_HR`, `reported_CI_HR`, `group_means`, `notes` 等额外字段。
+**reason 示例**：
+```
+"1. equation_type='E2': 论文使用 Cox 比例风险模型 (Methods p.5)，属生存分析，对应 E2。\n2. theta_hat=-0.174: Table 2, Model 2 报告 HR=0.84，theta_hat=ln(0.84)≈-0.174。\n3. ci=[-0.248, -0.105]: 论文 CI [0.78, 0.90] → log 尺度 [ln(0.78), ln(0.90)]。\n4. n=502490: Results 第 1 段: 'A total of 502,490 participants'。\n5. design='cohort': Methods p.3: 'This prospective cohort study'。\n6. grade='B': 前瞻性队列属观察性研究，证据等级 B。\n7. model='Cox': Methods p.5 明确描述。\n8. adjustment_set: Table 2 脚注 'adjusted for age, sex, and TDI'。"
+```
 
-### 5. hpp_mapping（关键 — 这决定了管道能否运行）
+⚠️ **literature_estimate 只包含以下字段**：`theta_hat`, `ci`, `ci_level`, `p_value`, `n`, `design`, `grade`, `model`, `adjustment_set`, `equation_type`, `equation_formula`, `reason`。**禁止**添加 `subgroup`, `control_reference`, `reported_HR`, `reported_CI_HR`, `group_means`, `notes` 等额外字段。
+
+### 6. hpp_mapping（关键 — 这决定了管道能否运行）
 
 ⚠️ **hpp_mapping 结构必须严格遵循以下模式，不允许添加任何额外字段。**
 
@@ -220,7 +269,7 @@ Evidence type: {evidence_type}
 5. 数据集ID使用**连字符**格式（例如，`009-sleep`、`055-lifestyle_and_environment`）
 6. **hpp_mapping中每个变量映射只允许4个字段**：`name`, `dataset`, `field`, `status`。**禁止**添加 `mapping_notes`、`composite_components`、`subgroup_mapping` 等。
 7. **hpp_mapping必须包含** `M` 和 `X2` 键（值为 `null` 除非 E4/E6）
-8. **literature_estimate只允许**：`theta_hat`, `ci`, `ci_level`, `p_value`, `n`, `design`, `grade`, `model`, `adjustment_set`。**禁止** `reported_HR`, `reported_CI_HR`, `subgroup`, `control_reference`, `notes`, `group_means` 等。
+8. **literature_estimate只允许**：`theta_hat`, `ci`, `ci_level`, `p_value`, `n`, `design`, `grade`, `model`, `adjustment_set`, `equation_type`, `equation_formula`, `reason`。**禁止** `reported_HR`, `reported_CI_HR`, `subgroup`, `control_reference`, `notes`, `group_means` 等。
 9. **不要**在输出中包含`//`注释、`_comment`键、`_validation`键
 10. `epsilon.mu.core.type` 对于比率度量必须使用log前缀（`logHR`/`logOR`/`logRR`）
 11. `epsilon.iota.core.name` 和 `epsilon.rho.X` 使用简洁变量名
@@ -229,3 +278,9 @@ Evidence type: {evidence_type}
 14. 不允许根据 baseline characteristics、常见协变量模板、或 HPP 候选字段反推 Z
 15. 不允许反推 `reported_p` 或 `literature_estimate.p_value`
 16. 如果论文有多个模型，只能使用与当前 edge 的 estimate / CI / p_value 对应的那个模型
+17. `equation_formula` 必须是对象 `{formula, parameters}`，不是字符串
+18. `equation_formula_reported` 必须包含 `parameters` 和 `reason` 字段
+19. `literature_estimate` 必须包含 `equation_type`、`equation_formula`、`reason` 字段
+20. `study_cohort` 的每个子字段必须包含 `value`（字符串）和 `is_reported`（布尔值）
+21. 所有 `parameters[].source` 必须引用论文中可 Ctrl+F 搜索到的原文片段
+22. 所有 `reason` 必须按编号列表逐字段解释，引用论文具体位置

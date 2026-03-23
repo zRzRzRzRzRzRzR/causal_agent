@@ -148,7 +148,7 @@ def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, An
                 "field": "equation_formula_reported.reported_effect_value",
                 "value": rev,
                 "message": f"reported_effect_value={rev} not found in paper text. "
-                           f"BLOCKING: this value may be hallucinated.",
+                f"BLOCKING: this value may be hallucinated.",
                 "action": "nullify",  # NEW action: set to null
             }
         )
@@ -176,6 +176,7 @@ def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, An
         if mu.get("scale") == "log":
             # For log-scale: check the ORIGINAL scale value (exp(theta))
             import math
+
             try:
                 original = round(math.exp(theta), 2)
                 if not _number_appears_in_text(original, pdf_text):
@@ -298,6 +299,7 @@ def _check_computed_cohort_values(edge: Dict, pdf_text: str) -> List[Dict[str, A
         if isinstance(val, str):
             # Extract the core number(s)
             import re
+
             numbers = re.findall(r"[\d.]+", val)
             for num_str in numbers:
                 try:
@@ -465,6 +467,197 @@ def _check_extra_fields(edge: Dict) -> List[Dict[str, Any]]:
     return issues
 
 
+def _check_parameter_source_traceability(
+    edge: Dict, pdf_text: str
+) -> List[Dict[str, Any]]:
+    """
+    A8: Verify that parameters[].source references can be found in paper text.
+    Checks both equation_formula and equation_formula_reported.
+
+    Two sub-checks:
+      - Table/Figure references cited in source actually exist in paper
+      - Numeric values cited in source actually appear in paper
+    """
+    issues = []
+    for formula_key in ("equation_formula", "equation_formula_reported"):
+        formula = edge.get(formula_key, {})
+        if not isinstance(formula, dict):
+            continue
+        params = formula.get("parameters", [])
+        if not isinstance(params, list):
+            continue
+
+        for p in params:
+            if not isinstance(p, dict):
+                continue
+            source = p.get("source", "")
+            symbol = p.get("symbol", "")
+
+            if not source or "not reported" in source.lower() or "标准" in source:
+                continue
+
+            # Sub-check 1: Table/Figure reference exists in paper
+            table_match = re.search(
+                r"(Table\s*\d+|Figure\s*\d+)", source, re.IGNORECASE
+            )
+            if table_match:
+                ref = table_match.group(1).lower().replace(" ", "")
+                text_lower = pdf_text.lower().replace(" ", "")
+                if ref not in text_lower:
+                    issues.append(
+                        {
+                            "check": "parameter_source_ref_missing",
+                            "severity": "warning",
+                            "field": f"{formula_key}.parameters[{symbol}].source",
+                            "value": source,
+                            "message": (
+                                f"Parameter '{symbol}' source references "
+                                f"'{table_match.group(1)}' but not found in paper text."
+                            ),
+                            "action": "flag_for_review",
+                        }
+                    )
+
+            # Sub-check 2: Numeric values cited in source exist in paper
+            nums_in_source = re.findall(r"\d+\.\d+", source)
+            for num_str in nums_in_source:
+                try:
+                    if not _number_appears_in_text(float(num_str), pdf_text):
+                        issues.append(
+                            {
+                                "check": "parameter_source_num_missing",
+                                "severity": "error",
+                                "field": f"{formula_key}.parameters[{symbol}].source",
+                                "value": num_str,
+                                "message": (
+                                    f"Parameter '{symbol}' source cites value {num_str} "
+                                    f"but this number not found in paper text."
+                                ),
+                                "action": "flag_for_review",
+                            }
+                        )
+                except (ValueError, TypeError):
+                    pass
+
+    return issues
+
+
+def _check_dual_equation_consistency(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A9: Verify consistency between equation_formula, equation_formula_reported,
+    and literature_estimate dual-check fields.
+
+    Checks:
+      1. model_type consistency (efr.model_type == lit.model)
+      2. equation_type consistency (top-level == lit.equation_type)
+      3. reported_effect_value <-> theta_hat scale consistency
+      4. X/Y name consistency (efr.X/Y == rho.X/Y)
+    """
+    issues = []
+    import math as _math
+
+    efr = edge.get("equation_formula_reported", {})
+    if not isinstance(efr, dict):
+        efr = {}
+    lit = edge.get("literature_estimate", {})
+    top_eq = edge.get("equation_type", "")
+    mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})
+
+    # 1. model_type consistency
+    efr_model = efr.get("model_type", "")
+    lit_model = lit.get("model", "")
+    if efr_model and lit_model:
+        if efr_model.lower() != lit_model.lower():
+            issues.append(
+                {
+                    "check": "dual_model_type_mismatch",
+                    "severity": "error",
+                    "field": "equation_formula_reported.model_type",
+                    "message": (
+                        f"equation_formula_reported.model_type='{efr_model}' != "
+                        f"literature_estimate.model='{lit_model}'"
+                    ),
+                    "action": "flag_for_review",
+                }
+            )
+
+    # 2. equation_type consistency
+    lit_eq = lit.get("equation_type", "")
+    if top_eq and lit_eq and top_eq != lit_eq:
+        issues.append(
+            {
+                "check": "dual_equation_type_mismatch",
+                "severity": "error",
+                "field": "literature_estimate.equation_type",
+                "message": (
+                    f"Top-level equation_type='{top_eq}' != "
+                    f"literature_estimate.equation_type='{lit_eq}'"
+                ),
+                "action": "flag_for_review",
+            }
+        )
+
+    # 3. reported_effect_value <-> theta_hat scale consistency
+    rev = efr.get("reported_effect_value")
+    theta = lit.get("theta_hat")
+    if rev is not None and theta is not None:
+        try:
+            rev_f = float(rev)
+            theta_f = float(theta)
+            if mu.get("scale") == "log" and rev_f > 0:
+                expected = round(_math.log(rev_f), 4)
+                if abs(theta_f - expected) > 0.02:
+                    issues.append(
+                        {
+                            "check": "theta_reported_value_mismatch",
+                            "severity": "error",
+                            "field": "literature_estimate.theta_hat",
+                            "message": (
+                                f"theta_hat={theta_f} but "
+                                f"ln(reported_effect_value={rev_f})={expected}"
+                            ),
+                            "action": "flag_for_review",
+                        }
+                    )
+            elif mu.get("scale") == "identity":
+                if abs(theta_f - rev_f) > 0.01:
+                    issues.append(
+                        {
+                            "check": "theta_reported_value_mismatch",
+                            "severity": "error",
+                            "field": "literature_estimate.theta_hat",
+                            "message": (
+                                f"theta_hat={theta_f} != "
+                                f"reported_effect_value={rev_f} on identity scale"
+                            ),
+                            "action": "flag_for_review",
+                        }
+                    )
+        except (ValueError, TypeError):
+            pass
+
+    # 4. X/Y name consistency between efr and rho
+    rho = edge.get("epsilon", {}).get("rho", {})
+    for role in ("X", "Y"):
+        efr_val = efr.get(role, "")
+        rho_val = rho.get(role, "")
+        if efr_val and rho_val and efr_val != rho_val:
+            issues.append(
+                {
+                    "check": f"dual_{role}_name_mismatch",
+                    "severity": "warning",
+                    "field": f"equation_formula_reported.{role}",
+                    "message": (
+                        f"equation_formula_reported.{role}='{efr_val}' != "
+                        f"epsilon.rho.{role}='{rho_val}'"
+                    ),
+                    "action": "flag_for_review",
+                }
+            )
+
+    return issues
+
+
 def phase_a_audit(
     edges: List[Dict], pdf_text: str
 ) -> Tuple[List[Dict], Dict[str, Any]]:
@@ -485,7 +678,9 @@ def phase_a_audit(
         edge_issues.extend(_check_sample_data(edge, pdf_text))
         edge_issues.extend(_check_hpp_variable_leakage(edge, pdf_text))
         edge_issues.extend(_check_extra_fields(edge))
-        edge_issues.extend(_check_computed_cohort_values(edge, pdf_text))  # NEW
+        edge_issues.extend(_check_computed_cohort_values(edge, pdf_text))
+        edge_issues.extend(_check_parameter_source_traceability(edge, pdf_text))  # A8
+        edge_issues.extend(_check_dual_equation_consistency(edge))  # A9
 
         for iss in edge_issues:
             iss["edge_id"] = edge_id
@@ -554,23 +749,28 @@ def apply_phase_a_fixes(
                     rho_z = edge.get("epsilon", {}).get("rho", {}).get("Z", [])
                     if isinstance(rho_z, list) and var in rho_z:
                         rho_z.remove(var)
-                        applied_fixes.append({
-                            "edge_id": iss["edge_id"],
-                            "action": "removed_from_rho_Z",
-                            "variable": var,
-                        })
+                        applied_fixes.append(
+                            {
+                                "edge_id": iss["edge_id"],
+                                "action": "removed_from_rho_Z",
+                                "variable": var,
+                            }
+                        )
                     adj = edge.get("literature_estimate", {}).get("adjustment_set", [])
                     if isinstance(adj, list) and var in adj:
                         adj.remove(var)
-                        applied_fixes.append({
-                            "edge_id": iss["edge_id"],
-                            "action": "removed_from_adjustment_set",
-                            "variable": var,
-                        })
+                        applied_fixes.append(
+                            {
+                                "edge_id": iss["edge_id"],
+                                "action": "removed_from_adjustment_set",
+                                "variable": var,
+                            }
+                        )
                     hm_z = edge.get("hpp_mapping", {}).get("Z", [])
                     if isinstance(hm_z, list):
                         edge["hpp_mapping"]["Z"] = [
-                            z for z in hm_z
+                            z
+                            for z in hm_z
                             if not (isinstance(z, dict) and z.get("name") == var)
                         ]
                 elif check == "extra_field":
@@ -580,23 +780,27 @@ def apply_phase_a_fixes(
                         container = edge.get(parts[0], {})
                         if isinstance(container, dict) and parts[1] in container:
                             del container[parts[1]]
-                            applied_fixes.append({
-                                "edge_id": iss["edge_id"],
-                                "action": "removed_extra_field",
-                                "field": field_path,
-                            })
+                            applied_fixes.append(
+                                {
+                                    "edge_id": iss["edge_id"],
+                                    "action": "removed_extra_field",
+                                    "field": field_path,
+                                }
+                            )
                     elif "extra_keys" in iss:
                         role = parts[-1] if len(parts) >= 2 else ""
                         entry = edge.get("hpp_mapping", {}).get(role, {})
                         if isinstance(entry, dict):
                             for key in iss["extra_keys"]:
                                 entry.pop(key, None)
-                            applied_fixes.append({
-                                "edge_id": iss["edge_id"],
-                                "action": "removed_extra_hpp_keys",
-                                "field": field_path,
-                                "keys": iss["extra_keys"],
-                            })
+                            applied_fixes.append(
+                                {
+                                    "edge_id": iss["edge_id"],
+                                    "action": "removed_extra_hpp_keys",
+                                    "field": field_path,
+                                    "keys": iss["extra_keys"],
+                                }
+                            )
 
             elif action == "nullify":
                 # NEW: Set hallucinated values to null
@@ -606,47 +810,55 @@ def apply_phase_a_fixes(
                     efr = edge.get("equation_formula_reported", {})
                     old_val = efr.get("reported_effect_value")
                     efr["reported_effect_value"] = None
-                    applied_fixes.append({
-                        "edge_id": iss.get("edge_id", "?"),
-                        "action": "nullified_hallucinated_value",
-                        "field": field_path,
-                        "old_value": old_val,
-                        "reason": iss["message"],
-                    })
+                    applied_fixes.append(
+                        {
+                            "edge_id": iss.get("edge_id", "?"),
+                            "action": "nullified_hallucinated_value",
+                            "field": field_path,
+                            "old_value": old_val,
+                            "reason": iss["message"],
+                        }
+                    )
 
                 elif field_path.startswith("equation_formula_reported.reported_ci"):
                     efr = edge.get("equation_formula_reported", {})
                     old_ci = efr.get("reported_ci")
                     efr["reported_ci"] = [None, None]
-                    applied_fixes.append({
-                        "edge_id": iss.get("edge_id", "?"),
-                        "action": "nullified_hallucinated_ci",
-                        "field": "equation_formula_reported.reported_ci",
-                        "old_value": old_ci,
-                    })
+                    applied_fixes.append(
+                        {
+                            "edge_id": iss.get("edge_id", "?"),
+                            "action": "nullified_hallucinated_ci",
+                            "field": "equation_formula_reported.reported_ci",
+                            "old_value": old_ci,
+                        }
+                    )
 
                 elif field_path == "literature_estimate.theta_hat":
                     lit = edge.get("literature_estimate", {})
                     old_theta = lit.get("theta_hat")
                     lit["theta_hat"] = None
-                    applied_fixes.append({
-                        "edge_id": iss.get("edge_id", "?"),
-                        "action": "nullified_hallucinated_theta",
-                        "field": field_path,
-                        "old_value": old_theta,
-                        "reason": iss["message"],
-                    })
+                    applied_fixes.append(
+                        {
+                            "edge_id": iss.get("edge_id", "?"),
+                            "action": "nullified_hallucinated_theta",
+                            "field": field_path,
+                            "old_value": old_theta,
+                            "reason": iss["message"],
+                        }
+                    )
 
                 elif field_path.startswith("literature_estimate.ci"):
                     lit = edge.get("literature_estimate", {})
                     old_ci = lit.get("ci")
                     lit["ci"] = [None, None]
-                    applied_fixes.append({
-                        "edge_id": iss.get("edge_id", "?"),
-                        "action": "nullified_hallucinated_lit_ci",
-                        "field": "literature_estimate.ci",
-                        "old_value": old_ci,
-                    })
+                    applied_fixes.append(
+                        {
+                            "edge_id": iss.get("edge_id", "?"),
+                            "action": "nullified_hallucinated_lit_ci",
+                            "field": "literature_estimate.ci",
+                            "old_value": old_ci,
+                        }
+                    )
 
     return fixed_edges, applied_fixes
 

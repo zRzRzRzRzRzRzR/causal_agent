@@ -137,14 +137,16 @@ def check_population_consistency(edges: List[Dict]) -> List[Dict]:
             pi_values.add(pi)
 
     if len(pi_values) > 1:
-        issues.append({
-            "type": "population_inconsistency",
-            "severity": "error",
-            "message": (
-                f"Edges have inconsistent Pi values: {pi_values}. "
-                f"All edges from the same paper should share one population label."
-            ),
-        })
+        issues.append(
+            {
+                "type": "population_inconsistency",
+                "severity": "error",
+                "message": (
+                    f"Edges have inconsistent Pi values: {pi_values}. "
+                    f"All edges from the same paper should share one population label."
+                ),
+            }
+        )
 
     return issues
 

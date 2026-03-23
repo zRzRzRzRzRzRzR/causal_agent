@@ -930,15 +930,26 @@ def build_phase_b_prompt(
     phase_a_flags: List[Dict],
     max_edges_per_call: int = 5,
     max_text_chars: int = 25000,
+    error_patterns_context: str = "",  # NEW: from GT error patterns
 ) -> str:
     """
     Build the Phase B LLM prompt.
 
     Includes:
+      - Historical error patterns from GT cases (if available)
       - Phase A flagged issues (for focused checking)
       - Edge JSONs (stripped of internal metadata)
       - Paper text (truncated)
     """
+    # Build error patterns section (from GT reference)
+    error_patterns_section = ""
+    if error_patterns_context:
+        error_patterns_section = (
+            "## 历史错误模式参考（从 GT 标注案例中提取）\n\n"
+            "以下错误模式在过去的人工审核中高频出现，请重点关注：\n\n"
+            f"{error_patterns_context}\n\n"
+        )
+
     # Build Phase A summary for context
     flagged_summary = []
     for iss in phase_a_flags:
@@ -975,6 +986,7 @@ def build_phase_b_prompt(
         truncated_text += "\n\n[... truncated ...]"
 
     prompt = (
+        f"{error_patterns_section}"
         f"{phase_a_section}"
         f"## 待审核的证据卡\n\n{edges_section}\n\n"
         f"## 论文原文\n\n{truncated_text}\n\n"
@@ -1019,6 +1031,7 @@ def run_step4_audit(
     pdf_text: str,
     client=None,  # GLMClient instance, None to skip Phase B
     max_edges_per_llm_call: int = 5,
+    error_patterns_path: str = None,  # NEW: path to error_patterns.json
 ) -> Tuple[List[Dict], Dict[str, Any]]:
     """
     Run full Step 4 audit.
@@ -1029,6 +1042,24 @@ def run_step4_audit(
     import sys
 
     print(f"\n[Step 4] Auditing {len(edges)} edges ...", file=sys.stderr)
+
+    # ── Load error patterns context (if available) ──
+    error_patterns_context = ""
+    if error_patterns_path:
+        try:
+            from .gt_loader import build_error_patterns_context, load_error_patterns
+
+            patterns = load_error_patterns(error_patterns_path)
+            if patterns:
+                error_patterns_context = build_error_patterns_context(patterns)
+                print(
+                    f"[Step 4] Loaded error patterns: "
+                    f"{patterns.get('total_patterns', 0)} patterns from "
+                    f"{patterns.get('num_cases', 0)} GT cases",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(f"[Step 4] Failed to load error patterns: {e}", file=sys.stderr)
 
     # ── Phase A ──
     print("[Step 4] Phase A: Deterministic checks ...", file=sys.stderr)
@@ -1065,6 +1096,7 @@ def run_step4_audit(
                 pdf_text,
                 batch_flags,
                 max_edges_per_call=max_edges_per_llm_call,
+                error_patterns_context=error_patterns_context,  # NEW
             )
 
             result = client.call_json(

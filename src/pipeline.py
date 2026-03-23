@@ -428,6 +428,7 @@ def step2_fill_one_edge(
     pdf_name: str,
     template_path: Optional[str] = None,
     hpp_dict_path: Optional[str] = None,
+    gt_fewshot_context: Optional[str] = None,  # NEW: GT few-shot examples
 ) -> Dict:
     """
     Fill a single edge into the HPP template.
@@ -484,11 +485,18 @@ def step2_fill_one_edge(
 
     # Inject pre-validated equation metadata as guidance
     preval_guidance = _build_prevalidation_guidance(edge, preval)
+
+    # Build GT few-shot section (if available)
+    gt_fewshot_section = ""
+    if gt_fewshot_context:
+        gt_fewshot_section = f"---\n\n" f"{gt_fewshot_context}\n\n"
+
     full_prompt = (
         f"{prompt_template}\n\n"
         f"---\n\n"
         f"## Pre-validated equation metadata (use these values)\n\n"
         f"{preval_guidance}\n\n"
+        f"{gt_fewshot_section}"
         f"---\n\n**Paper**\n\n{pdf_text}"
     )
 
@@ -976,6 +984,8 @@ class EdgeExtractionPipeline:
         enable_step4_llm: bool = True,
         step4_max_edges_per_call: int = 5,
         error_patterns_path: Optional[str] = None,
+        # Reference GT options (NEW)
+        reference_dir: Optional[str] = None,
     ):
         self.client = client
         self.ocr_text_func = ocr_text_func
@@ -1015,6 +1025,34 @@ class EdgeExtractionPipeline:
                 f"patterns={self.error_patterns_path})",
                 file=sys.stderr,
             )
+
+        # Reference GT directory (NEW)
+        if reference_dir:
+            self.reference_dir = reference_dir
+        elif _REFERENCE_DIR.exists():
+            self.reference_dir = str(_REFERENCE_DIR)
+        else:
+            self.reference_dir = None
+
+        # Pre-load GT few-shot context (once, reused across edges)
+        self._gt_fewshot_cache: Dict[str, str] = {}  # eq_type -> context
+        if self.reference_dir:
+            try:
+                from .gt_loader import load_gt_cases
+
+                self._gt_cases = load_gt_cases(self.reference_dir, max_cases=3)
+                if self._gt_cases:
+                    n_c = len(self._gt_cases)
+                    n_e = sum(len(edges) for _, edges in self._gt_cases)
+                    print(
+                        f"[Pipeline] Loaded {n_e} GT edges from {n_c} reference cases",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                print(f"[Pipeline] Failed to load GT cases: {e}", file=sys.stderr)
+                self._gt_cases = []
+        else:
+            self._gt_cases = []
 
         if ocr_init_func is not None:
             ocr_init_func(
@@ -1109,6 +1147,20 @@ class EdgeExtractionPipeline:
         )
         all_filled_edges: List[Dict] = []
 
+        # Build GT few-shot context once (reuse across edges)
+        gt_fewshot_context = None
+        if self._gt_cases:
+            try:
+                from .gt_loader import build_fewshot_context
+
+                gt_fewshot_context = build_fewshot_context(
+                    self._gt_cases,
+                    max_edges=2,
+                    equation_type_filter=None,  # will be set per-edge below
+                )
+            except Exception as e:
+                print(f"  [GT] Failed to build few-shot context: {e}", file=sys.stderr)
+
         for i, edge in enumerate(edges_list):
             idx = edge.get("edge_index", i + 1)
             y_short = str(edge.get("Y", ""))[:60]
@@ -1118,6 +1170,22 @@ class EdgeExtractionPipeline:
                 f"(pre-validated: {eq_pre}) ...",
                 file=sys.stderr,
             )
+
+            # Per-edge: try to get equation_type-specific GT example
+            edge_gt_context = gt_fewshot_context
+            if self._gt_cases and eq_pre != "?":
+                try:
+                    from .gt_loader import build_fewshot_context as _bfc
+
+                    typed_ctx = _bfc(
+                        self._gt_cases,
+                        max_edges=1,
+                        equation_type_filter=eq_pre,
+                    )
+                    if typed_ctx:
+                        edge_gt_context = typed_ctx
+                except Exception:
+                    pass  # fallback to generic context
 
             filled = step2_fill_one_edge(
                 client=self.client,
@@ -1129,6 +1197,7 @@ class EdgeExtractionPipeline:
                 pdf_name=pdf_name,
                 template_path=self.template_path,
                 hpp_dict_path=self.hpp_dict_path,
+                gt_fewshot_context=edge_gt_context,  # NEW
             )
 
             all_filled_edges.append(filled)
@@ -1165,6 +1234,7 @@ class EdgeExtractionPipeline:
                 pdf_text=pdf_text,
                 client=self.client if self.enable_step4_llm else None,
                 max_edges_per_llm_call=self.step4_max_edges_per_call,
+                error_patterns_path=self.error_patterns_path,  # NEW
             )
             if pdf_dir:
                 save_json(pdf_dir / "step4_audit.json", audit_report)

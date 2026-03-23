@@ -243,6 +243,16 @@ def main():
         default=None,
         help="Only process these sub-folder names (e.g. --batches 98 99). Default: all.",
     )
+    parser.add_argument(
+        "--reference-dir",
+        default=None,
+        help="Path to reference GT directory (default: auto-detect ./reference/)",
+    )
+    parser.add_argument(
+        "--error-patterns",
+        default=None,
+        help="Path to error_patterns.json (default: auto-detect ./reference/error_patterns.json)",
+    )
 
     args = parser.parse_args()
 
@@ -317,6 +327,8 @@ def main():
         ocr_validate_pages=not args.no_validate_pages,
         hpp_dict_path=args.hpp_dict,
         max_retries=args.max_retries,
+        reference_dir=args.reference_dir,
+        error_patterns_path=args.error_patterns,
     )
 
     all_results = []

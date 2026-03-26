@@ -732,6 +732,8 @@ def _final_schema_enforcement(edge: Dict) -> None:
         # Normalize: EV_2001_Scurr#1 -> EV-2001-Scurr#1
         # Pattern: EV followed by separator then year then separator then name#num
         eid = _re.sub(r"^EV[_\-](\d{4})[_\-]", r"EV-\1-", eid)
+        # Also fix EV-NA-... or EV-None-... (year was missing from step1)
+        eid = _re.sub(r"^EV-(NA|None|null|YYYY)-", r"EV-YYYY-", eid)
         edge["edge_id"] = eid
 
     # 2. hpp_mapping: enforce strict structure
@@ -747,6 +749,24 @@ def _final_schema_enforcement(edge: Dict) -> None:
             for k in list(mapping.keys()):
                 if k not in _ALLOWED_MAPPING_KEYS:
                     del mapping[k]
+
+    # Backfill missing 'name' in hpp_mapping X/Y from epsilon.rho
+    rho = edge.get("epsilon", {}).get("rho", {})
+    iota_name = edge.get("epsilon", {}).get("iota", {}).get("core", {}).get("name", "")
+    o_name = edge.get("epsilon", {}).get("o", {}).get("name", "")
+    for role, fallback in [
+        ("X", rho.get("X") or iota_name),
+        ("Y", rho.get("Y") or o_name),
+    ]:
+        mapping = hm.get(role)
+        if isinstance(mapping, dict):
+            if not mapping.get("name") and fallback:
+                mapping["name"] = fallback
+            # Ensure all 4 required keys exist
+            mapping.setdefault("name", "")
+            mapping.setdefault("dataset", "")
+            mapping.setdefault("field", "")
+            mapping.setdefault("status", "missing")
 
     # Strip forbidden fields from Z list items
     z_list = hm.get("Z")
@@ -797,9 +817,8 @@ def _final_schema_enforcement(edge: Dict) -> None:
         "grade",
         "model",
         "adjustment_set",
-        "equation_type",  # dual-check
-        "equation_formula",  # dual-check
-        "reason",  # traceability
+        "equation_type",
+        "equation_formula",
     }
     lit = edge.get("literature_estimate", {})
     for k in list(lit.keys()):
@@ -851,7 +870,7 @@ def _final_schema_enforcement(edge: Dict) -> None:
             }
             lit["model"] = _eq_to_default.get(eq_type, "linear")
 
-    # 4b. equation_formula_reported: strip extra fields
+    # 4b. equation_formula_reported: strip extra fields — STRICTLY follow template
     _ALLOWED_EFR_KEYS = {
         "equation",
         "source",
@@ -864,8 +883,6 @@ def _final_schema_enforcement(edge: Dict) -> None:
         "X",
         "Y",
         "Z",
-        "parameters",
-        "reason",
     }
     efr = edge.get("equation_formula_reported", {})
     if isinstance(efr, dict):
@@ -873,41 +890,15 @@ def _final_schema_enforcement(edge: Dict) -> None:
             if k not in _ALLOWED_EFR_KEYS:
                 del efr[k]
 
-    # ── FIX: Ensure efr.model_type is consistent with lit.model ──
-    if isinstance(efr, dict) and lit.get("model"):
-        efr_model = efr.get("model_type", "")
-        lit_model = lit.get("model", "")
-        # If efr.model_type is "other" but lit.model is specific, sync
-        # Also sync if they are completely mismatched
-        if efr_model and lit_model:
-            # Normalize for comparison
-            efr_lower = efr_model.lower().strip()
-            lit_lower = lit_model.lower().strip()
-            if efr_lower != lit_lower and efr_lower != "other":
-                # Only override if clearly wrong, not if "other" is intentional
-                pass  # Leave as-is for now; the prompt instructs LLM correctly
-
-    # 4c. equation_formula: allow formula + parameters
+    # 4c. equation_formula: ONLY "formula" key per template
     ef = edge.get("equation_formula", {})
     if isinstance(ef, dict):
-        _ALLOWED_EF_KEYS = {"formula", "parameters"}
+        _ALLOWED_EF_KEYS = {"formula"}
         for k in list(ef.keys()):
             if k not in _ALLOWED_EF_KEYS:
                 del ef[k]
     elif isinstance(ef, str):
-        # FIX: If equation_formula is still a string (old format), wrap it
-        edge["equation_formula"] = {"formula": ef, "parameters": []}
-
-    # 4d. Ensure equation_formula_reported has parameters and reason
-    if isinstance(efr, dict):
-        if "parameters" not in efr:
-            efr["parameters"] = []
-        if "reason" not in efr:
-            efr["reason"] = ""
-
-    # 4e. Ensure literature_estimate has reason
-    if "reason" not in lit:
-        lit["reason"] = ""
+        edge["equation_formula"] = {"formula": ef}
 
     # 5. Normalize mu.core.type to use log prefix for ratio measures
     mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})

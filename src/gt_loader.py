@@ -1,49 +1,16 @@
-"""
-gt_loader.py -- Load reference GT cases and build compact context for prompts.
-
-Reference directory structure:
-    reference/
-    ├── case_1/
-    │   ├── 10683000_combined.md        (paper OCR text -- NOT loaded into prompts)
-    │   └── 10683000_edges_verified.json (human-verified GT edges)
-    ├── case_2/
-    │   └── ...
-    ├── error_patterns.json             (aggregated from extract_error_patterns.py)
-    └── ...
-
-Two types of context are produced:
-
-1. **GT few-shot examples** (for Step 2 prompt):
-   - Pick 1-2 representative edges from GT cases
-   - Truncate to key fields only (equation_formula_reported with reason, parameters)
-   - Keeps prompt within token budget
-
-2. **Error patterns summary** (for Step 4 Phase B prompt):
-   - Load error_patterns.json (pre-built by extract_error_patterns.py)
-   - Inject category distribution + top examples into audit prompt
-"""
-
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# ---------------------------------------------------------------------------
-# 1. Load error_patterns.json (for Step 4)
-# ---------------------------------------------------------------------------
-
 
 def load_error_patterns(patterns_path: str) -> Optional[Dict]:
-    """Load the aggregated error patterns catalog."""
     if not os.path.exists(patterns_path):
         return None
-    try:
-        with open(patterns_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"[GT] Failed to load error_patterns: {e}", file=sys.stderr)
-        return None
+    with open(patterns_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def build_error_patterns_context(patterns: Dict, max_examples_per_cat: int = 2) -> str:
@@ -94,11 +61,6 @@ def build_error_patterns_context(patterns: Dict, max_examples_per_cat: int = 2) 
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# 2. Load GT edges for few-shot (for Step 2)
-# ---------------------------------------------------------------------------
-
-# Fields to keep in a truncated GT edge for few-shot
 _FEWSHOT_KEEP_FIELDS = {
     "edge_id",
     "equation_type",
@@ -176,9 +138,6 @@ def load_gt_cases(
             ):
                 try:
                     raw = f.read_text(encoding="utf-8")
-                    # Strip JS-style comments for .jsonc
-                    import re
-
                     clean = re.sub(r"//[^\n]*", "", raw)
                     clean = re.sub(r",\s*([}\]])", r"\1", clean)
                     data = json.loads(clean)
@@ -202,16 +161,9 @@ def build_fewshot_context(
     max_edges: int = 2,
     equation_type_filter: Optional[str] = None,
 ) -> str:
-    """
-    Build a compact few-shot context from GT cases for Step 2 prompt.
-
-    Selects representative edges (diverse equation_types preferred),
-    truncates to essential fields, returns formatted JSON block.
-    """
     if not gt_cases:
         return ""
 
-    # Collect all GT edges with case_id
     all_edges = []
     for case_id, edges in gt_cases:
         for e in edges:
@@ -220,11 +172,9 @@ def build_fewshot_context(
     if not all_edges:
         return ""
 
-    # Select diverse examples: prefer different equation_types
     selected = []
     seen_eq_types = set()
 
-    # If filter specified, prioritize matching edges
     if equation_type_filter:
         for case_id, e in all_edges:
             if e.get("equation_type") == equation_type_filter:
@@ -233,7 +183,6 @@ def build_fewshot_context(
                 if len(selected) >= max_edges:
                     break
 
-    # Fill remaining slots with diverse types
     if len(selected) < max_edges:
         for case_id, e in all_edges:
             eq = e.get("equation_type", "")
@@ -241,13 +190,11 @@ def build_fewshot_context(
                 selected.append((case_id, e))
                 seen_eq_types.add(eq)
 
-    # Still not enough? just take first available
     if len(selected) < max_edges:
         for case_id, e in all_edges:
             if (case_id, e) not in selected and len(selected) < max_edges:
                 selected.append((case_id, e))
 
-    # Build output
     lines = [
         "## GT 参考示例（人工验证过的正确输出）\n",
         "以下是经过人工验证的正确 edge 填充示例，请参考其 `parameters`、`reason` 的格式和详细程度：\n",
@@ -262,31 +209,16 @@ def build_fewshot_context(
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# 3. Convenience: get both contexts
-# ---------------------------------------------------------------------------
-
-
 def get_reference_contexts(
     reference_dir: str,
     error_patterns_path: Optional[str] = None,
     equation_type_filter: Optional[str] = None,
 ) -> Dict[str, str]:
-    """
-    Load all reference materials and return ready-to-inject context strings.
-
-    Returns:
-        {
-            "fewshot_context": str,     # For Step 2 prompt
-            "error_patterns_context": str,  # For Step 4 Phase B prompt
-        }
-    """
     result = {
         "fewshot_context": "",
         "error_patterns_context": "",
     }
 
-    # Few-shot from GT cases
     if os.path.isdir(reference_dir):
         gt_cases = load_gt_cases(reference_dir, max_cases=3)
         if gt_cases:
@@ -302,7 +234,6 @@ def get_reference_contexts(
                 file=sys.stderr,
             )
 
-    # Error patterns
     if error_patterns_path and os.path.exists(error_patterns_path):
         patterns = load_error_patterns(error_patterns_path)
         if patterns:

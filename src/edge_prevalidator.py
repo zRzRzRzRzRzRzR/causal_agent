@@ -1,19 +1,3 @@
-"""
-edge_prevalidator.py -- Pre-validation of extracted edges BEFORE template filling.
-
-Runs between Step 1 (edge enumeration) and Step 2 (template filling).
-Catches formula/model/equation_type errors early so Step 2 only does
-template filling without expensive retry loops.
-
-Two validation phases:
-  Phase A (hard_check): Verify reported numeric values exist in paper text.
-  Phase B (soft_check): Deterministically derive equation_type, model, formula
-                        from edge metadata and validate internal consistency.
-
-If Phase B detects issues, it auto-corrects the edge metadata so Step 2
-receives clean, pre-validated inputs.
-"""
-
 import math
 from typing import Any, Dict, List, Optional, Tuple
 

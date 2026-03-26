@@ -67,30 +67,15 @@ def strip_comments(obj: Any) -> Any:
 def get_clean_skeleton(template: Dict) -> Dict:
     """
     Get a clean skeleton from the template (no _comment keys).
-    Also ensures all fields referenced in the Step 2 prompt exist in the
-    skeleton so merge_with_template can properly handle LLM output.
+    Strictly follows the template structure — does NOT inject fields
+    that the template doesn't have.
     """
     skeleton = strip_comments(copy.deepcopy(template))
 
-    # ── Ensure equation_formula has parameters field ──
+    # ── Ensure equation_formula is a dict (not string) ──
     ef = skeleton.get("equation_formula", {})
-    if isinstance(ef, dict):
-        ef.setdefault("parameters", [])
-    elif isinstance(ef, str):
-        skeleton["equation_formula"] = {"formula": ef, "parameters": []}
-
-    # ── Ensure equation_formula_reported has parameters and reason ──
-    efr = skeleton.get("equation_formula_reported", {})
-    if isinstance(efr, dict):
-        efr.setdefault("parameters", [])
-        efr.setdefault("reason", "")
-
-    # ── Ensure literature_estimate has reason ──
-    lit = skeleton.get("literature_estimate", {})
-    if isinstance(lit, dict):
-        lit.setdefault("reason", "")
-        lit.setdefault("equation_type", "")
-        lit.setdefault("equation_formula", "")
+    if isinstance(ef, str):
+        skeleton["equation_formula"] = {"formula": ef}
 
     # ── Ensure study_cohort sub-fields have is_reported ──
     cohort = skeleton.get("study_cohort", {})
@@ -130,14 +115,31 @@ def prefill_skeleton(
     result = copy.deepcopy(skeleton)
 
     # ---- edge_id ----
-    year = paper_info.get("year", "YYYY")
-    author = str(paper_info.get("first_author", "AUTHOR"))
-    short_title = paper_info.get("short_title", "")
+    year = paper_info.get("year")
+    # Guard against None, "NA", "None", empty string, non-integer
+    if year is None or str(year).strip().lower() in ("", "na", "none", "yyyy", "null"):
+        # Fallback: try to extract year from DOI (e.g. "10.1001/jama.2023.12345")
+        doi = str(paper_info.get("doi", "") or "")
+        import re as _re
+
+        doi_year_match = _re.search(r"(19|20)\d{2}", doi)
+        if doi_year_match:
+            year = doi_year_match.group(0)
+        else:
+            # Fallback: try pdf_name (often contains year)
+            name_year_match = _re.search(r"(19|20)\d{2}", pdf_name)
+            if name_year_match:
+                year = name_year_match.group(0)
+            else:
+                year = "YYYY"
+    else:
+        year = str(year).strip()
+
+    author = str(paper_info.get("first_author") or "AUTHOR").strip()
+    short_title = paper_info.get("short_title") or ""
     study_tag = f"{author}{short_title}".replace(" ", "")
     idx = edge.get("edge_index", 1)
     result["edge_id"] = f"EV-{year}-{study_tag}#{idx}"
-    if paper_info.get("short_title"):
-        pass
 
     lit = result.get("literature_estimate", {})
 
@@ -420,6 +422,28 @@ def auto_fix(edge_json: Dict) -> Dict:
             extra_keys = set(mapping.keys()) - _ALLOWED_MAPPING_KEYS
             for k in extra_keys:
                 del mapping[k]
+
+    # --- Backfill missing required fields in hpp_mapping X/Y ---
+    rho = edge_json.get("epsilon", {}).get("rho", {})
+    iota_name = (
+        edge_json.get("epsilon", {}).get("iota", {}).get("core", {}).get("name", "")
+    )
+    o_name = edge_json.get("epsilon", {}).get("o", {}).get("name", "")
+
+    for role, fallback_name in [
+        ("X", rho.get("X") or iota_name),
+        ("Y", rho.get("Y") or o_name),
+    ]:
+        mapping = hm.get(role)
+        if isinstance(mapping, dict):
+            # Ensure 'name' exists — most common LLM omission
+            if not mapping.get("name") and fallback_name:
+                mapping["name"] = fallback_name
+            # Ensure all 4 required keys exist
+            mapping.setdefault("name", "")
+            mapping.setdefault("dataset", "")
+            mapping.setdefault("field", "")
+            mapping.setdefault("status", "missing")
     # Strip Z entries too
     z_list = hm.get("Z")
     if isinstance(z_list, list):
@@ -435,6 +459,7 @@ def auto_fix(edge_json: Dict) -> Dict:
         del hm[k]
 
     # --- Strip forbidden fields from literature_estimate ---
+    # STRICTLY follow template: only these keys exist in the template
     _ALLOWED_LIT_KEYS = {
         "theta_hat",
         "ci",
@@ -445,9 +470,8 @@ def auto_fix(edge_json: Dict) -> Dict:
         "grade",
         "model",
         "adjustment_set",
-        "equation_type",  # NEW: dual-check field
-        "equation_formula",  # NEW: dual-check field
-        "reason",  # NEW: traceability
+        "equation_type",
+        "equation_formula",
     }
     lit = edge_json.get("literature_estimate", {})
     extra_lit_keys = set(lit.keys()) - _ALLOWED_LIT_KEYS
@@ -455,6 +479,7 @@ def auto_fix(edge_json: Dict) -> Dict:
         del lit[k]
 
     # --- Strip forbidden fields from equation_formula_reported ---
+    # STRICTLY follow template: only these keys exist in the template
     _ALLOWED_EFR_KEYS = {
         "equation",
         "source",
@@ -467,8 +492,6 @@ def auto_fix(edge_json: Dict) -> Dict:
         "X",
         "Y",
         "Z",
-        "parameters",
-        "reason",
     }
     efr = edge_json.get("equation_formula_reported", {})
     if isinstance(efr, dict):
@@ -476,36 +499,20 @@ def auto_fix(edge_json: Dict) -> Dict:
         for k in extra_efr_keys:
             del efr[k]
 
-    # --- Ensure equation_formula is dict {formula, parameters}, not string ---
+    # --- Ensure equation_formula is dict {formula}, not string ---
+    # Template only has "formula" key, no "parameters"
     ef = edge_json.get("equation_formula")
     if isinstance(ef, str):
-        edge_json["equation_formula"] = {"formula": ef, "parameters": []}
+        edge_json["equation_formula"] = {"formula": ef}
     elif isinstance(ef, dict):
         ef.setdefault("formula", "")
-        ef.setdefault("parameters", [])
+        # Strip keys not in template (e.g. "parameters" added by LLM)
+        _ALLOWED_EF_KEYS = {"formula"}
+        for k in list(ef.keys()):
+            if k not in _ALLOWED_EF_KEYS:
+                del ef[k]
     elif ef is None:
-        edge_json["equation_formula"] = {"formula": "", "parameters": []}
-
-    # --- Ensure parameters is well-formed in both formula sections ---
-    for formula_key in ("equation_formula", "equation_formula_reported"):
-        formula = edge_json.get(formula_key, {})
-        if not isinstance(formula, dict):
-            continue
-        params = formula.get("parameters")
-        if isinstance(params, list):
-            for p in params:
-                if isinstance(p, dict):
-                    p.setdefault("symbol", "")
-                    p.setdefault("value", "")
-                    p.setdefault("source", "")
-        elif params is None:
-            formula["parameters"] = []
-
-    # --- Ensure reason fields exist ---
-    for section_key in ("equation_formula_reported", "literature_estimate"):
-        section = edge_json.get(section_key, {})
-        if isinstance(section, dict) and "reason" not in section:
-            section["reason"] = ""
+        edge_json["equation_formula"] = {"formula": ""}
 
     # --- Ensure literature_estimate has dual-check fields ---
     if "equation_type" not in lit:

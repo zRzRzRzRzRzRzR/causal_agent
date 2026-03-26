@@ -333,14 +333,6 @@
     //     α      — 截距 (role: baseline)
     //     X₂     — 第二处理变量 (需在 hpp_mapping.X2 中映射)
     //
-    // ─── parameters 字段说明 ───
-    // 每个参数包含三个子字段:
-    //   symbol — 数学符号（如 β_X, γ₁, λ₀(t)）
-    //   value  — 参数值（效应系数填数值，协变量填变量名，函数/未报告填描述）
-    //   source — 该参数/值在论文中的原文出处（用于 Ctrl+F 在 PDF 中定位）
-    //            必须是论文中的逐字引用，包含表号、页码等定位信息
-    //            如论文未报告该参数的具体值，source 填推导依据或模型默认说明
-    //
     "equation_type": "E1/E2/E3/E4/E5/E6",
     // ─── 本地构建方程（基于 E1-6 框架）───
     // 根据论文的统计方法，选择对应的 E1-6 方程模板，填入具体变量
@@ -350,37 +342,9 @@
     // ✓ 正确: "λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γ₁·Age + γ₂·Sex)"
     // ✗ 错误: "a Cox proportional hazards model adjusted for age and sex"
     //
-    // parameters 列出公式中所有参数及其值和论文出处
-    // 每个参数: { symbol, value, source }
-    //   symbol — 数学符号
-    //   value  — 参数值（效应系数填数值，协变量填变量名，函数/未报告填描述）
-    //   source — 论文原文引用（供 Ctrl+F 定位 PDF）
     "equation_formula": {
         // 数学公式字符串（必须使用数学符号，如 β, γ, λ, Σ, ∫ 等）
-        "formula": "λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γ₁·Age + γ₂·Sex)",
-        // 公式中所有参数的结构化列表
-        "parameters": [
-            {
-                "symbol": "β_X",
-                "value": "ln(0.84) ≈ -0.174",
-                "source": "Table 2, Model 2, HLS 列: HR=0.84 (95% CI 0.78-0.90)"
-            },
-            {
-                "symbol": "γ₁",
-                "value": "Age",
-                "source": "Table 2 脚注: 'adjusted for age, sex, and TDI'"
-            },
-            {
-                "symbol": "γ₂",
-                "value": "Sex",
-                "source": "Table 2 脚注: 'adjusted for age, sex, and TDI'"
-            },
-            {
-                "symbol": "λ₀(t)",
-                "value": "baseline hazard function (not reported)",
-                "source": "Cox 模型标准基线风险函数，论文未单独报告"
-            }
-        ]
+        "formula": "λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γ₁·Age + γ₂·Sex)"
     },
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // ─── equation_formula_reported（独立字段）───
@@ -408,13 +372,12 @@
         // 论文原始尺度的效应值（可直接回论文核对）
         //   ratio 类: 原始值 (如 HR=0.84)，literature_estimate.theta_hat 存的是 ln(0.84)
         //   difference 类: 原始值 (如 β=-3.2)，与 theta_hat 相同
-        // ⚠ 此值应与 parameters 中效应系数的 value 保持一致
-        //   ratio 类: reported_effect_value = exp(β)，如 HR=0.84 → β=ln(0.84)
-        //   difference 类: reported_effect_value = β，如 β=-3.2
+        // ⚠ 数据类型: number | null（论文未报告时填 null，严禁填字符串）
         "reported_effect_value": 0.84,
         // 论文原始尺度 CI [下界, 上界]
         //   ratio 类: 原始值 (如 [0.78, 0.90])，literature_estimate.ci 存的是 log 值
         //   difference 类: 原始值，与 literature_estimate.ci 相同
+        // ⚠ 数据类型: [number, number] | [null, null]（论文未报告时填 [null, null]）
         "reported_ci": [
             0.78,
             0.90
@@ -427,74 +390,7 @@
         // Y: 结局/因变量短标签（= epsilon.rho.Y）
         "Y": "Hypertension",
         // Z: 协变量列表（= epsilon.rho.Z）
-        "Z": [
-            "Age",
-            "Sex",
-            "TDI"
-        ],
-        // ─── parameters: 公式中所有参数及其值和论文出处 ───
-        // 列出 equation 字段中出现的所有参数
-        // 每个参数: { symbol, value, source }
-        //   symbol — 数学符号
-        //   value  — 参数值（效应系数填数值，协变量填变量名，函数/未报告填描述）
-        //   source — 论文原文引用（供 Ctrl+F 定位 PDF），必须是论文逐字引用
-        "parameters": [
-            {
-                "symbol": "β",
-                "value": "ln(0.84) ≈ -0.174, exp(β) = HR = 0.84",
-                "source": "Table 2, Model 2, HLS 列: HR=0.84 (95% CI 0.78-0.90)"
-            },
-            {
-                "symbol": "γ₁",
-                "value": "Z₁ (协变量系数，论文未单独报告)",
-                "source": "Table 2 脚注: 'adjusted for age, sex, and TDI'"
-            },
-            {
-                "symbol": "γ₂",
-                "value": "Z₂ (协变量系数，论文未单独报告)",
-                "source": "Table 2 脚注: 'adjusted for age, sex, and TDI'"
-            },
-            {
-                "symbol": "h₀(t)",
-                "value": "baseline hazard function (not reported)",
-                "source": "Cox 模型标准基线风险函数，论文未单独报告"
-            }
-        ],
-        // ─── reason: LLM 给出设值依据 ───
-        // 逐字段解释每个字段的取值原因及论文出处
-        // 必须引用论文中的具体段落 (页码/段落)、表格 (表号+列)、或图 (图号)
-        //
-        // 示例:
-        // "1. equation='h(t) = h₀(t)·exp(β·X + γ₁·Z₁ + γ₂·Z₂)':
-        //     论文 Methods Section 2.3 (p.5) 写道 'Cox proportional hazards regression
-        //     models were used to estimate hazard ratios (HRs) for the association
-        //     between healthy lifestyle score and incident hypertension, adjusting for
-        //     age, sex, and Townsend deprivation index'。据此构建方程，β 为 HLS 的
-        //     效应系数，γ₁ 和 γ₂ 分别为 Age、Sex、TDI 的调整系数。
-        //  2. source='extracted':
-        //     论文 Table 2 脚注 a 明确写出了模型的完整数学规格 (原文: 'Model 2:
-        //     h(t)=h₀(t)exp(β₁X+γ₁Age+γ₂Sex+γ₃TDI)')，属于直接摘录而非重构。
-        //  3. model_type='Cox':
-        //     Methods p.5 第 2 段: 'We fitted Cox proportional hazards models'。
-        //  4. link_function='log':
-        //     Cox 模型的标准连接函数为 log（对应 h(t)=h₀(t)·exp(…) 中的 exp 结构）。
-        //  5. effect_measure='HR':
-        //     Results p.7 Table 2 标题: 'Hazard ratios (95% CI) for incident
-        //     hypertension'，报告的效应指标为 hazard ratio。
-        //  6. reported_effect_value=0.84:
-        //     Table 2, Model 2, HLS 列: HR=0.84。
-        //  7. reported_ci=[0.78, 0.90]:
-        //     Table 2, Model 2, HLS 列: 95% CI (0.78-0.90)。
-        //  8. reported_p='< 0.001':
-        //     Table 2, Model 2, HLS 列 p-value 标注: p<0.001。
-        //  9. X/Y/Z:
-        //     X='Healthy Lifestyle Score' — Methods p.4 Exposure 定义;
-        //     Y='Hypertension' — Methods p.4 Outcome 定义;
-        //     Z=['Age','Sex','TDI'] — Table 2 脚注 a: 'adjusted for age, sex, and TDI'。
-        // 10. parameters:
-        //     根据 equation 中出现的所有符号逐一列出，β/γ₁/γ₂ 来自 Table 2 脚注，
-        //     h₀(t) 为 Cox 模型的标准基线风险函数。"
-        "reason": "1. equation: 论文 Methods Section X (p.X) 描述使用 Cox 比例风险模型，Table X 脚注给出完整模型规格，据此构建 h(t)=h₀(t)·exp(β·X+γ₁·Z₁+γ₂·Z₂)。\n2. source='extracted': Table X 脚注直接给出模型公式，属于摘录。\n3. model_type='Cox': Methods p.X 第 X 段明确写道 'Cox proportional hazards model'。\n4. link_function='log': Cox 模型标准连接函数。\n5. effect_measure='HR': Table X 标题/正文报告 hazard ratio。\n6. reported_effect_value=0.84: Table X Model X 中 HLS 行 HR=0.84。\n7. reported_ci=[0.78,0.90]: 同表同行 95%CI(0.78-0.90)。\n8. reported_p='<0.001': 同表同行 p<0.001。\n9. X/Y/Z: X 定义见 Methods Exposure 段，Y 定义见 Methods Outcome 段，Z 列表见 Table X 脚注。\n10. parameters: 根据 equation 中符号逐一匹配，β 为 HLS 效应系数(exp(β)=HR)，γ₁/γ₂ 为调整变量系数，h₀(t) 为 Cox 基线风险。"
+        "Z": []
     },
     "epsilon": {
         // ─── Pi: 人群标签 ───
@@ -567,10 +463,7 @@
         "rho": {
             "X": "暴露变量名称",
             "Y": "结局变量名称",
-            "Z": [
-                "协变量1",
-                "协变量2"
-            ],
+            "Z": [],
             "IV": null
         }
     },
@@ -579,16 +472,15 @@
         // theta_hat: 效应估计值
         //   ratio 类: 填 log 值（如 HR=1.5 → theta_hat=ln(1.5)≈0.405）
         //   difference 类: 填原值（如 MD=-3.2 → theta_hat=-3.2）
-        // ⚠ theta_hat 对应 parameters 中效应系数（如 β_X）的数值（log/identity 尺度）
-        //   应与 equation_formula.parameters 和 equation_formula_reported.parameters
-        //   中效应系数的 value 字段保持一致
         //   与 equation_formula_reported.reported_effect_value 的关系:
         //     ratio 类: theta_hat = ln(reported_effect_value)
         //     difference 类: theta_hat = reported_effect_value
+        // ⚠ 数据类型: number | null（论文未报告时填 null，严禁填字符串）
         "theta_hat": -0.223,
         // ci: 95% 置信区间 [下界, 上界]
         //   与 theta_hat 同 scale（log/identity）
         //   如论文报告 HR 的 CI，需转为 log 值: [ln(CI_lower), ln(CI_upper)]
+        // ⚠ 数据类型: [number, number] | [null, null]（论文未报告时填 [null, null]）
         "ci": [
             -0.30,
             -0.15
@@ -618,47 +510,14 @@
         //   E6: "interaction_model", "factorial"
         "model": "logistic",
         // adjustment_set: 调整变量列表（应与 epsilon.rho.Z 一致）
-        "adjustment_set": [
-            "age",
-            "sex",
-            "BMI"
-        ],
+        "adjustment_set": [],
         // ─── equation_type: 此效应值对应的方程类型 ───
         // 从 E1-E6 中选择，应与顶层 equation_type 一致
         "equation_type": "E1/E2/E3/E4/E5/E6",
         // ─── equation_formula: 此效应值对应的数学公式 ───
         // ⚠ 必须使用数学符号表达，严禁纯文字描述！
         // 应与顶层 equation_formula.formula 一致或高度相似
-        "equation_formula": "g(E[Y|do(X=x),Z]) = α + β_X·T_X(x) + γᵀZ",
-        // ─── reason: LLM 给出设值依据 ───
-        // 逐字段解释每个字段的取值原因及论文出处
-        // 必须引用论文中的具体段落 (页码/段落)、表格 (表号+列)、或图 (图号)
-        //
-        // 示例:
-        // "1. equation_type='E2':
-        //     论文 Methods Section 2.3 (p.5) 使用 Cox 比例风险模型，属于生存分析，
-        //     对应 E2 (生存原子方程)，公式形式为 λ(t)=λ₀(t)·exp(β·X+γᵀZ)。
-        //  2. equation_formula='λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γ₁·Age + γ₂·Sex + γ₃·TDI)':
-        //     根据 E2 模板构建。处理变量 X = Healthy Lifestyle Score (Methods p.4 Exposure 定义)，
-        //     协变量 Z = {Age, Sex, TDI} 来自 Table 2 脚注 'adjusted for age, sex, and TDI'。
-        //  3. theta_hat=-0.174:
-        //     Table 2, Model 2 报告 HR=0.84 (95% CI: 0.78-0.90)。
-        //     由于 mu.scale='log'，theta_hat = ln(HR) = ln(0.84) ≈ -0.174。
-        //  4. ci=[-0.248, -0.105]:
-        //     论文 CI [0.78, 0.90] → log 尺度: [ln(0.78), ln(0.90)] ≈ [-0.248, -0.105]。
-        //  5. p_value='< 0.001':
-        //     Table 2, Model 2, HLS 行标注 p<0.001。
-        //  6. n=502490:
-        //     Results 第 1 段 (p.6): 'A total of 502,490 participants were included'。
-        //  7. design='cohort':
-        //     Methods p.3 第 1 段: 'This prospective cohort study used UK Biobank data'。
-        //  8. grade='B':
-        //     前瞻性队列研究属于观察性研究，证据等级为 B。
-        //  9. model='Cox':
-        //     与 equation_type E2 对应，Methods p.5 明确描述为 Cox regression。
-        // 10. adjustment_set=['age','sex','TDI']:
-        //     Table 2 脚注: 'Model 2 adjusted for age, sex, and Townsend deprivation index'。"
-        "reason": "1. equation_type='E2': 论文使用 Cox 比例风险模型 (Methods p.X)，属生存分析，对应 E2。\n2. equation_formula: 根据 E2 模板构建，X 来自 Methods Exposure 定义，Z 来自 Table X 脚注调整变量列表。\n3. theta_hat=X: Table X Model X 报告 HR=X，theta_hat=ln(HR)=ln(X)≈X。\n4. ci=[X,X]: 论文 CI [X,X] → log 尺度 [ln(X),ln(X)]。\n5. p_value: Table X 同行标注。\n6. n=X: Results 第 X 段报告总样本量。\n7. design: Methods 第 X 段描述研究设计。\n8. grade: 根据研究设计判定证据等级。\n9. model: 与 equation_type 对应，Methods 明确描述。\n10. adjustment_set: Table X 脚注列出的调整变量。"
+        "equation_formula": "g(E[Y|do(X=x),Z]) = α + β_X·T_X(x) + γᵀZ"
     },
     // ─── HPP 数据集映射 ───
     // 每个变量映射到 HPP 的 {dataset, field} 对
@@ -694,26 +553,7 @@
         // 管线在执行 adjustment 时会验证这些字段存在于 HPP 数据集中
         // 注意: epsilon.rho.Z、literature_estimate.adjustment_set、hpp_mapping.Z
         //       三处列表必须保持一致，否则管线应产生 warning flag
-        "Z": [
-            {
-                "name": "协变量1名称",
-                "dataset": "001-demographics",
-                "field": "age_at_research_stage",
-                "status": "exact"
-            },
-            {
-                "name": "协变量2名称",
-                "dataset": "001-demographics",
-                "field": "sex",
-                "status": "exact"
-            },
-            {
-                "name": "协变量3名称",
-                "dataset": "002-anthropometrics",
-                "field": "bmi",
-                "status": "exact"
-            }
-        ],
+        "Z": [],
         // ─── M: 中介变量（equation_type="E4" 时必需！）───
         // 如果缺失，管线将产生 flag: "mediator_mapping_missing_for_E4"
         // E4 估计器会验证 data["M"] 列存在

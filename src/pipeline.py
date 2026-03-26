@@ -1087,7 +1087,7 @@ class EdgeExtractionPipeline:
         ocr_text_func: Callable[[str], str],
         ocr_init_func: Optional[Callable] = None,
         ocr_output_dir: str = "./ocr_cache",
-        ocr_dpi: int = 200,
+        ocr_dpi: int = 400,
         ocr_validate_pages: bool = True,
         hpp_dict_path: Optional[str] = None,
         template_path: Optional[str] = None,

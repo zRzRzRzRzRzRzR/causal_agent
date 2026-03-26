@@ -15,6 +15,8 @@ _DEFAULT_MODEL = os.getenv("DEFAULT_MODEL")
 _DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE"))
 _DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS"))
 _VISION_MODEL = os.getenv("VISION_MODEL")
+_VISION_API_KEY = os.getenv("VISION_API_KEY")
+_VISION_BASE_URL = os.getenv("VISION_BASE_URL")
 
 
 class GLMClient:
@@ -25,14 +27,24 @@ class GLMClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        vision_api_key: Optional[str] = None,
+        vision_base_url: Optional[str] = None,
     ):
         self.api_key = api_key or _API_KEY
         self.base_url = base_url or _BASE_URL
         self.model = model or _DEFAULT_MODEL
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+        self.vision_api_key = vision_api_key or _VISION_API_KEY
+        self.vision_base_url = vision_base_url or _VISION_BASE_URL
+        self.vision_client = OpenAI(
+            api_key=self.vision_api_key, base_url=self.vision_base_url
+        )
+
         print(
             f"[LLM] Initialized GLMClient with model={self.model}, base_url={self.base_url}"
         )
+        print(f"[LLM] Vision client with base_url={vision_base_url}")
 
     def call(
         self,
@@ -136,7 +148,7 @@ class GLMClient:
             )
         content.append({"type": "text", "text": prompt})
 
-        response = self.client.chat.completions.create(
+        response = self.vision_client.chat.completions.create(
             model=vision_model,
             messages=[{"role": "user", "content": content}],
             temperature=temperature,

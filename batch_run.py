@@ -207,7 +207,7 @@ def main():
         default=None,
     )
     parser.add_argument("--ocr-dir", default="./cache_ocr")
-    parser.add_argument("--dpi", type=int, default=200)
+    parser.add_argument("--dpi", type=int, default=400)
     parser.add_argument("--no-validate-pages", action="store_true")
     parser.add_argument("--model", default=None)
     parser.add_argument("--api-key", default=None)

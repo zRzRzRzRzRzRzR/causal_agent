@@ -10,7 +10,7 @@ from .llm_client import GLMClient
 
 
 def pdf_to_images(
-    pdf_path: str, output_dir: Optional[str] = None, dpi: int = 200
+    pdf_path: str, output_dir: Optional[str] = None, dpi: int = 400
 ) -> List[str]:
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="pdf_images_")
@@ -81,7 +81,7 @@ class PDFExtractor:
         self,
         ocr_output_dir: Optional[str] = None,
         client: Optional[GLMClient] = None,
-        dpi: int = 200,
+        dpi: int = 400,
         validate_pages: bool = True,
     ):
         self.ocr_output_dir = ocr_output_dir or tempfile.mkdtemp(prefix="ocr_output_")

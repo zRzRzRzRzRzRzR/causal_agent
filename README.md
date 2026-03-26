@@ -238,7 +238,7 @@ python batch_run.py --type interventional
 | `--base-url`          | 覆盖环境变量中的 Base URL                           |
 | `--hpp-dict`          | HPP 数据字典 JSON 路径（启用 RAG + Rerank）           |
 | `--ocr-dir`           | OCR 缓存目录（默认 `./cache_ocr`）                  |
-| `--dpi`               | PDF 转图片 DPI（默认 200）                         |
+| `--dpi`               | PDF 转图片 DPI（默认 400）                         |
 | `--no-validate-pages` | 跳过 OCR 尾页过滤                                 |
 | `--xml`               | 输入为 JATS/NLM XML 格式，跳过 OCR                  |
 | `--resume`            | 跳过已有缓存的步骤（step0/step1）                      |

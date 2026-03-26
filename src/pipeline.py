@@ -618,18 +618,23 @@ def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
     Force pre-validated values into the filled edge.
     This ensures equation_type, model, mu, theta_hat, and ci are correct
     even if the LLM ignored the guidance.
+
+    Also ensures consistency between top-level equation_type and
+    literature_estimate.equation_type (dual-check fields).
     """
     if not preval:
         return filled
 
-    # Override equation_type
-    if preval.get("equation_type"):
-        filled["equation_type"] = preval["equation_type"]
+    # Override equation_type (top-level)
+    eq_type = preval.get("equation_type")
+    if eq_type:
+        filled["equation_type"] = eq_type
 
     # Override model
-    if preval.get("model"):
+    model = preval.get("model")
+    if model:
         lit = filled.setdefault("literature_estimate", {})
-        lit["model"] = preval["model"]
+        lit["model"] = model
 
     # Override mu
     if preval.get("mu"):
@@ -653,6 +658,48 @@ def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
     if preval.get("id_strategy"):
         alpha = filled.setdefault("epsilon", {}).setdefault("alpha", {})
         alpha["id_strategy"] = preval["id_strategy"]
+
+    # ── FIX: Sync dual-check fields ──
+    # literature_estimate.equation_type MUST match top-level equation_type
+    final_eq_type = filled.get("equation_type")
+    if final_eq_type:
+        lit["equation_type"] = final_eq_type
+
+    # literature_estimate.equation_formula SHOULD match top-level equation_formula.formula
+    top_formula = filled.get("equation_formula", {})
+    if isinstance(top_formula, dict) and top_formula.get("formula"):
+        lit["equation_formula"] = top_formula["formula"]
+
+    # ── FIX: Ensure model is consistent with equation_type ──
+    # If the LLM wrote model="mediation" but equation_type is E1, override model
+    if final_eq_type and model:
+        from .semantic_validator import MODEL_TO_EQUATION_TYPE
+
+        allowed_eqs = MODEL_TO_EQUATION_TYPE.get(model, set())
+        if allowed_eqs and final_eq_type not in allowed_eqs:
+            # Model is inconsistent with equation_type — re-derive model
+            from .edge_prevalidator import EQUATION_TYPE_TO_MODEL
+
+            effect_scale = str(filled.get("_prevalidation_effect_scale", ""))
+            new_model_key = f"{final_eq_type}_{effect_scale}"
+            new_model = EQUATION_TYPE_TO_MODEL.get(new_model_key)
+            if not new_model:
+                # Fallback: derive from equation_type alone
+                _eq_to_default_model = {
+                    "E1": "linear",
+                    "E2": "Cox",
+                    "E3": "LMM",
+                    "E4": "mediation",
+                    "E5": "counterfactual",
+                    "E6": "interaction_model",
+                }
+                new_model = _eq_to_default_model.get(final_eq_type, "linear")
+            lit["model"] = new_model
+            print(
+                f"  [Override] model '{model}' inconsistent with eq_type '{final_eq_type}', "
+                f"corrected to '{new_model}'",
+                file=sys.stderr,
+            )
 
     # Pre-populate adjustment_variables into rho.Z and adjustment_set if LLM left them empty
     adj_vars = preval.get("adjustment_variables", [])
@@ -678,6 +725,14 @@ def _final_schema_enforcement(edge: Dict) -> None:
     for key in list(edge.keys()):
         if key.startswith("_"):
             del edge[key]
+
+    # 1b. Fix edge_id format: EV-YEAR-Author#N (hyphen, not underscore)
+    eid = edge.get("edge_id", "")
+    if eid:
+        # Normalize: EV_2001_Scurr#1 -> EV-2001-Scurr#1
+        # Pattern: EV followed by separator then year then separator then name#num
+        eid = _re.sub(r"^EV[_\-](\d{4})[_\-]", r"EV-\1-", eid)
+        edge["edge_id"] = eid
 
     # 2. hpp_mapping: enforce strict structure
     hm = edge.get("hpp_mapping", {})
@@ -731,7 +786,7 @@ def _final_schema_enforcement(edge: Dict) -> None:
 
     _fix_ds(hm)
 
-    # 4. literature_estimate: strip extra fields
+    # 4. literature_estimate: strip extra fields AND sync dual-check fields
     _ALLOWED_LIT_KEYS = {
         "theta_hat",
         "ci",
@@ -742,14 +797,59 @@ def _final_schema_enforcement(edge: Dict) -> None:
         "grade",
         "model",
         "adjustment_set",
-        "equation_type",  # NEW: dual-check
-        "equation_formula",  # NEW: dual-check
-        "reason",  # NEW: traceability
+        "equation_type",  # dual-check
+        "equation_formula",  # dual-check
+        "reason",  # traceability
     }
     lit = edge.get("literature_estimate", {})
     for k in list(lit.keys()):
         if k not in _ALLOWED_LIT_KEYS:
             del lit[k]
+
+    # ── FIX: Ensure literature_estimate.equation_type == top-level equation_type ──
+    if eq_type:
+        lit["equation_type"] = eq_type
+
+    # ── FIX: Ensure literature_estimate.equation_formula syncs with top-level ──
+    top_formula = edge.get("equation_formula", {})
+    if isinstance(top_formula, dict) and top_formula.get("formula"):
+        lit["equation_formula"] = top_formula["formula"]
+
+    # ── FIX: Ensure literature_estimate.model is consistent with equation_type ──
+    model = lit.get("model", "")
+    if model and eq_type:
+        _MODEL_TO_ALLOWED_EQ = {
+            "logistic": {"E1"},
+            "linear": {"E1"},
+            "poisson": {"E1"},
+            "ANCOVA": {"E1"},
+            "IVW": {"E1"},
+            "t-test": {"E1"},
+            "Cox": {"E2"},
+            "parametric_survival": {"E2"},
+            "KM": {"E2"},
+            "LMM": {"E3"},
+            "GEE": {"E3"},
+            "mixed": {"E3"},
+            "mediation": {"E4"},
+            "path_analysis": {"E4"},
+            "counterfactual": {"E5"},
+            "S-learner": {"E5"},
+            "T-learner": {"E5"},
+            "interaction_model": {"E6"},
+            "factorial": {"E6"},
+        }
+        allowed_eqs = _MODEL_TO_ALLOWED_EQ.get(model, set())
+        if allowed_eqs and eq_type not in allowed_eqs:
+            _eq_to_default = {
+                "E1": "linear",
+                "E2": "Cox",
+                "E3": "LMM",
+                "E4": "mediation",
+                "E5": "counterfactual",
+                "E6": "interaction_model",
+            }
+            lit["model"] = _eq_to_default.get(eq_type, "linear")
 
     # 4b. equation_formula_reported: strip extra fields
     _ALLOWED_EFR_KEYS = {
@@ -773,6 +873,20 @@ def _final_schema_enforcement(edge: Dict) -> None:
             if k not in _ALLOWED_EFR_KEYS:
                 del efr[k]
 
+    # ── FIX: Ensure efr.model_type is consistent with lit.model ──
+    if isinstance(efr, dict) and lit.get("model"):
+        efr_model = efr.get("model_type", "")
+        lit_model = lit.get("model", "")
+        # If efr.model_type is "other" but lit.model is specific, sync
+        # Also sync if they are completely mismatched
+        if efr_model and lit_model:
+            # Normalize for comparison
+            efr_lower = efr_model.lower().strip()
+            lit_lower = lit_model.lower().strip()
+            if efr_lower != lit_lower and efr_lower != "other":
+                # Only override if clearly wrong, not if "other" is intentional
+                pass  # Leave as-is for now; the prompt instructs LLM correctly
+
     # 4c. equation_formula: allow formula + parameters
     ef = edge.get("equation_formula", {})
     if isinstance(ef, dict):
@@ -780,6 +894,20 @@ def _final_schema_enforcement(edge: Dict) -> None:
         for k in list(ef.keys()):
             if k not in _ALLOWED_EF_KEYS:
                 del ef[k]
+    elif isinstance(ef, str):
+        # FIX: If equation_formula is still a string (old format), wrap it
+        edge["equation_formula"] = {"formula": ef, "parameters": []}
+
+    # 4d. Ensure equation_formula_reported has parameters and reason
+    if isinstance(efr, dict):
+        if "parameters" not in efr:
+            efr["parameters"] = []
+        if "reason" not in efr:
+            efr["reason"] = ""
+
+    # 4e. Ensure literature_estimate has reason
+    if "reason" not in lit:
+        lit["reason"] = ""
 
     # 5. Normalize mu.core.type to use log prefix for ratio measures
     mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})

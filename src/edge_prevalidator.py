@@ -215,29 +215,40 @@ def _detect_special_equation_type(edge: Dict, evidence_type: str) -> Optional[st
     """
     Detect if edge requires a special equation_type (E3/E4/E6) based
     on keywords in the edge notes, X, Y, or subgroup fields.
-    """
-    searchable = " ".join(
-        [
-            str(edge.get("X", "")),
-            str(edge.get("Y", "")),
-            str(edge.get("notes", "")),
-            str(edge.get("subgroup", "")),
-        ]
-    ).lower()
 
-    # E4: mediation
-    if any(kw in searchable for kw in MEDIATION_KEYWORDS):
+    IMPORTANT: Only trigger E4/E6 when there is STRONG evidence that the
+    paper's statistical method is mediation/interaction analysis.
+    The statistical_method field from Step 1 is the primary signal.
+    Keyword detection in X/Y variable names is a secondary signal and
+    should NOT override the statistical_method.
+    """
+    stat_method = str(edge.get("statistical_method", "")).lower().strip()
+
+    # PRIMARY signal: statistical_method from Step 1
+    if stat_method == "mediation":
         return "E4"
 
-    # E6: interaction
+    # Only check notes for strong signals — NOT X/Y variable names,
+    # because X/Y names like "Elastic compression stockings" should not
+    # accidentally match mediation/interaction keywords.
+    notes_text = str(edge.get("notes", "")).lower()
+
+    # E4: mediation — only from notes or statistical_method
+    if any(kw in notes_text for kw in MEDIATION_KEYWORDS):
+        return "E4"
+
+    # E6: interaction — X field starting with "interaction:" is strong signal
     x_str = str(edge.get("X", "")).lower()
     if x_str.startswith("interaction:") or x_str.startswith("interaction "):
         return "E6"
-    if any(kw in searchable for kw in INTERACTION_KEYWORDS):
+    # Only check notes for interaction keywords, not X/Y names
+    if any(kw in notes_text for kw in INTERACTION_KEYWORDS):
         return "E6"
 
-    # E3: longitudinal
-    if any(kw in searchable for kw in LONGITUDINAL_KEYWORDS):
+    # E3: longitudinal — from statistical_method or notes
+    if stat_method in ("lmm", "gee"):
+        return "E3"
+    if any(kw in notes_text for kw in LONGITUDINAL_KEYWORDS):
         return "E3"
 
     return None

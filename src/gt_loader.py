@@ -27,8 +27,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # 1. Load error_patterns.json (for Step 4)
@@ -115,8 +114,16 @@ _EPSILON_KEEP = {"Pi", "iota", "o", "mu", "alpha", "rho"}
 
 # Fields within literature_estimate to keep
 _LIT_KEEP = {
-    "theta_hat", "ci", "p_value", "n", "design", "model",
-    "adjustment_set", "equation_type", "equation_formula", "reason",
+    "theta_hat",
+    "ci",
+    "p_value",
+    "n",
+    "design",
+    "model",
+    "adjustment_set",
+    "equation_type",
+    "equation_formula",
+    "reason",
 }
 
 
@@ -171,6 +178,7 @@ def load_gt_cases(
                     raw = f.read_text(encoding="utf-8")
                     # Strip JS-style comments for .jsonc
                     import re
+
                     clean = re.sub(r"//[^\n]*", "", raw)
                     clean = re.sub(r",\s*([}\]])", r"\1", clean)
                     data = json.loads(clean)

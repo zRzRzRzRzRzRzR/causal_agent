@@ -65,7 +65,52 @@ def strip_comments(obj: Any) -> Any:
 
 
 def get_clean_skeleton(template: Dict) -> Dict:
-    return strip_comments(copy.deepcopy(template))
+    """
+    Get a clean skeleton from the template (no _comment keys).
+    Also ensures all fields referenced in the Step 2 prompt exist in the
+    skeleton so merge_with_template can properly handle LLM output.
+    """
+    skeleton = strip_comments(copy.deepcopy(template))
+
+    # ── Ensure equation_formula has parameters field ──
+    ef = skeleton.get("equation_formula", {})
+    if isinstance(ef, dict):
+        ef.setdefault("parameters", [])
+    elif isinstance(ef, str):
+        skeleton["equation_formula"] = {"formula": ef, "parameters": []}
+
+    # ── Ensure equation_formula_reported has parameters and reason ──
+    efr = skeleton.get("equation_formula_reported", {})
+    if isinstance(efr, dict):
+        efr.setdefault("parameters", [])
+        efr.setdefault("reason", "")
+
+    # ── Ensure literature_estimate has reason ──
+    lit = skeleton.get("literature_estimate", {})
+    if isinstance(lit, dict):
+        lit.setdefault("reason", "")
+        lit.setdefault("equation_type", "")
+        lit.setdefault("equation_formula", "")
+
+    # ── Ensure study_cohort sub-fields have is_reported ──
+    cohort = skeleton.get("study_cohort", {})
+    if isinstance(cohort, dict):
+        for field_name in (
+            "sample_size",
+            "age",
+            "sex",
+            "disease_indication",
+            "study_design",
+            "country_or_region",
+            "data_source",
+            "follow_up_duration",
+        ):
+            fd = cohort.get(field_name)
+            if isinstance(fd, dict):
+                fd.setdefault("is_reported", False)
+                fd.setdefault("value", "")
+
+    return skeleton
 
 
 def prefill_skeleton(
@@ -90,7 +135,7 @@ def prefill_skeleton(
     short_title = paper_info.get("short_title", "")
     study_tag = f"{author}{short_title}".replace(" ", "")
     idx = edge.get("edge_index", 1)
-    result["edge_id"] = f"EV_{year}_{study_tag}#{idx}"
+    result["edge_id"] = f"EV-{year}-{study_tag}#{idx}"
     if paper_info.get("short_title"):
         pass
 
@@ -431,6 +476,16 @@ def auto_fix(edge_json: Dict) -> Dict:
         for k in extra_efr_keys:
             del efr[k]
 
+    # --- Ensure equation_formula is dict {formula, parameters}, not string ---
+    ef = edge_json.get("equation_formula")
+    if isinstance(ef, str):
+        edge_json["equation_formula"] = {"formula": ef, "parameters": []}
+    elif isinstance(ef, dict):
+        ef.setdefault("formula", "")
+        ef.setdefault("parameters", [])
+    elif ef is None:
+        edge_json["equation_formula"] = {"formula": "", "parameters": []}
+
     # --- Ensure parameters is well-formed in both formula sections ---
     for formula_key in ("equation_formula", "equation_formula_reported"):
         formula = edge_json.get(formula_key, {})
@@ -451,6 +506,16 @@ def auto_fix(edge_json: Dict) -> Dict:
         section = edge_json.get(section_key, {})
         if isinstance(section, dict) and "reason" not in section:
             section["reason"] = ""
+
+    # --- Ensure literature_estimate has dual-check fields ---
+    if "equation_type" not in lit:
+        lit["equation_type"] = edge_json.get("equation_type", "")
+    if "equation_formula" not in lit:
+        ef_obj = edge_json.get("equation_formula", {})
+        if isinstance(ef_obj, dict):
+            lit["equation_formula"] = ef_obj.get("formula", "")
+        else:
+            lit["equation_formula"] = ""
 
     # --- Ensure study_cohort sub-fields have is_reported ---
     cohort = edge_json.get("study_cohort", {})
@@ -568,9 +633,13 @@ def prepare_template_for_prompt(template: Dict) -> str:
     The new template has // comments in the JSON file which serve as hints.
     We include them as-is for the LLM to read (they're excellent guidance),
     but we also provide a clean JSON version the LLM should output.
+
+    Ensures the skeleton includes all fields the prompt instructs the LLM
+    to fill (parameters, reason, etc.) even if the template file doesn't
+    have them.
     """
-    # For the prompt, we show the clean JSON skeleton (no comments)
-    clean = strip_comments(template)
+    # Use get_clean_skeleton which adds missing fields
+    clean = get_clean_skeleton(template)
     return json.dumps(clean, indent=2, ensure_ascii=False)
 
 

@@ -26,9 +26,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-# ---------------------------------------------------------------------------
 # Parse annotated JSON with comments
-# ---------------------------------------------------------------------------
 
 # Regex to detect edge summary lines like:
 #   // EV-2000-McPhillips#1 | ✅ 17 正确 | ⚠️ 4 待确认 | ❌ 2 错误
@@ -166,9 +164,7 @@ def parse_gt_json(gt_path: str) -> Tuple[List[Dict], List[Dict]]:
     return [data], annotations
 
 
-# ---------------------------------------------------------------------------
 # Categorize errors
-# ---------------------------------------------------------------------------
 
 ERROR_CATEGORIES = {
     "covariate_hallucination": [
@@ -242,9 +238,7 @@ def categorize_error(text: str) -> str:
     return "other"
 
 
-# ---------------------------------------------------------------------------
 # Extract patterns from annotations
-# ---------------------------------------------------------------------------
 
 
 def extract_patterns(
@@ -277,9 +271,7 @@ def extract_patterns(
     return patterns
 
 
-# ---------------------------------------------------------------------------
 # Aggregate patterns across cases
-# ---------------------------------------------------------------------------
 
 
 def aggregate_patterns(all_patterns: List[Dict]) -> Dict:
@@ -343,9 +335,7 @@ def aggregate_patterns(all_patterns: List[Dict]) -> Dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 
 # File patterns to match as GT annotated files
 _GT_FILE_PATTERNS = [

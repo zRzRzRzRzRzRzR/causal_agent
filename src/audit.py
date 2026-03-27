@@ -115,7 +115,6 @@ def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, An
     efr = edge.get("equation_formula_reported", {})
     mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})
 
-    # --- Check reported_effect_value (ALWAYS, regardless of scale) ---
     rev = efr.get("reported_effect_value")
     if rev is not None and not _number_appears_in_text(rev, pdf_text):
         issues.append(
@@ -130,7 +129,6 @@ def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, An
             }
         )
 
-    # --- Check reported_ci (ALWAYS) ---
     rci = efr.get("reported_ci")
     if isinstance(rci, list):
         for i, bound in enumerate(rci):
@@ -147,7 +145,6 @@ def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, An
                     }
                 )
 
-    # --- Check theta_hat ---
     theta = lit.get("theta_hat")
     if theta is not None:
         if mu.get("scale") == "log":
@@ -193,7 +190,6 @@ def _check_numeric_hallucination(edge: Dict, pdf_text: str) -> List[Dict[str, An
                     }
                 )
 
-    # --- Check literature_estimate.ci on difference scale ---
     ci = lit.get("ci")
     if isinstance(ci, list) and mu.get("scale") != "log":
         for i, bound in enumerate(ci):

@@ -90,9 +90,7 @@ def _load_prompt(name: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-# ---------------------------------------------------------------------------
 # Step 0: Classify
-# ---------------------------------------------------------------------------
 
 
 def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
@@ -109,9 +107,7 @@ def step0_classify(client: GLMClient, pdf_text: str) -> Dict[str, Any]:
     return result
 
 
-# ---------------------------------------------------------------------------
 # Step 1: Enumerate edges (with deduplication)
-# ---------------------------------------------------------------------------
 
 
 _BASELINE_DEMO_KEYWORDS = {
@@ -197,9 +193,7 @@ def step1_enumerate_edges(
     return result
 
 
-# ---------------------------------------------------------------------------
 # Step 1.5: Pre-validate edges (NO LLM calls)
-# ---------------------------------------------------------------------------
 
 
 def step1_5_prevalidate(
@@ -247,9 +241,7 @@ def step1_5_prevalidate(
     return enriched, report
 
 
-# ---------------------------------------------------------------------------
 # Step 2: Fill one edge (simplified -- no retry loop)
-# ---------------------------------------------------------------------------
 
 
 def extract_anchor_numbers(pdf_text: str) -> Set[str]:
@@ -422,9 +414,7 @@ def post_step2_hard_match(
     return filled
 
 
-# ---------------------------------------------------------------------------
 # Step 2: Fill one edge (simplified -- no retry loop)
-# ---------------------------------------------------------------------------
 
 
 def step2_fill_one_edge(
@@ -526,7 +516,6 @@ def step2_fill_one_edge(
     # Apply pre-validated overrides (deterministic corrections)
     filled = _apply_prevalidation_overrides(filled, preval)
 
-    # --- Hard-match gate: nullify any hallucinated numbers ---
     anchor_set = extract_anchor_numbers(pdf_text)
     filled = post_step2_hard_match(filled, anchor_set, pdf_text)
 
@@ -568,9 +557,7 @@ def step2_fill_one_edge(
     return filled
 
 
-# ---------------------------------------------------------------------------
 # Step 2.5: Strong Model Recovery for null values
-# ---------------------------------------------------------------------------
 
 
 def step2_5_recover_nulls(
@@ -1158,9 +1145,7 @@ def _final_schema_enforcement(edge: Dict) -> None:
                     pass  # Non-numeric string like "NS", leave as-is
 
 
-# ---------------------------------------------------------------------------
 # Step 3: Review (with robust JSON parsing)
-# ---------------------------------------------------------------------------
 
 
 def step3_review(
@@ -1316,9 +1301,7 @@ def _safe_spot_check(
         )
 
 
-# ---------------------------------------------------------------------------
 # Pipeline class
-# ---------------------------------------------------------------------------
 
 
 class EdgeExtractionPipeline:

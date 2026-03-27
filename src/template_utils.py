@@ -94,7 +94,6 @@ def prefill_skeleton(
     """
     result = copy.deepcopy(skeleton)
 
-    # ---- edge_id ----
     year = paper_info.get("year")
     # Guard against None, "NA", "None", empty string, non-integer
     if year is None or str(year).strip().lower() in ("", "na", "none", "yyyy", "null"):
@@ -145,12 +144,10 @@ def prefill_skeleton(
     if p_val is not None:
         lit["p_value"] = p_val
 
-    # ---- outcome type -> epsilon.o.type ----
     otype = edge.get("outcome_type")
     if otype:
         result.setdefault("epsilon", {}).setdefault("o", {})["type"] = otype
 
-    # ---- alpha.id_strategy from evidence_type ----
     alpha = result.setdefault("epsilon", {}).setdefault("alpha", {})
     if evidence_type == "interventional":
         alpha["id_strategy"] = "rct"
@@ -159,16 +156,13 @@ def prefill_skeleton(
     elif evidence_type == "associational":
         alpha["id_strategy"] = "observational"
 
-    # ---- literature_estimate.design from evidence_type ----
     if evidence_type == "interventional":
         lit.setdefault("design", "RCT")
 
     return result
 
 
-# ---------------------------------------------------------------------------
 # 3. Deep-merge LLM output into the skeleton (flexible merge)
-# ---------------------------------------------------------------------------
 
 
 def merge_with_template(skeleton: Dict, llm_output: Dict) -> Dict:
@@ -376,14 +370,11 @@ def auto_fix(edge_json: Dict) -> Dict:
       - Infer mu.core.scale from mu.core.type if inconsistent
       - Normalize mu.core.type to use log prefix for ratio measures
     """
-    # --- Strip _validation from final output ---
     edge_json.pop("_validation", None)
 
-    # --- Normalize dataset IDs in hpp_mapping: ensure hyphen format ---
     hm = edge_json.get("hpp_mapping", {})
     _normalize_dataset_ids(hm)
 
-    # --- Ensure M and X2 always exist ---
     eq_type = edge_json.get("equation_type", "")
     if eq_type != "E4":
         hm["M"] = None
@@ -394,7 +385,6 @@ def auto_fix(edge_json: Dict) -> Dict:
     elif "X2" not in hm:
         hm["X2"] = None
 
-    # --- Strip forbidden fields from hpp_mapping entries ---
     _ALLOWED_MAPPING_KEYS = {"name", "dataset", "field", "status"}
     for role in ("X", "Y"):
         mapping = hm.get(role)
@@ -403,7 +393,6 @@ def auto_fix(edge_json: Dict) -> Dict:
             for k in extra_keys:
                 del mapping[k]
 
-    # --- Backfill missing required fields in hpp_mapping X/Y ---
     rho = edge_json.get("epsilon", {}).get("rho", {})
     iota_name = (
         edge_json.get("epsilon", {}).get("iota", {}).get("core", {}).get("name", "")
@@ -438,7 +427,6 @@ def auto_fix(edge_json: Dict) -> Dict:
     for k in extra_hpp_keys:
         del hm[k]
 
-    # --- Strip forbidden fields from literature_estimate ---
     # STRICTLY follow template: only these keys exist in the template
     _ALLOWED_LIT_KEYS = {
         "theta_hat",
@@ -458,7 +446,6 @@ def auto_fix(edge_json: Dict) -> Dict:
     for k in extra_lit_keys:
         del lit[k]
 
-    # --- Strip forbidden fields from equation_formula_reported ---
     # STRICTLY follow template: only these keys exist in the template
     _ALLOWED_EFR_KEYS = {
         "equation",
@@ -479,7 +466,6 @@ def auto_fix(edge_json: Dict) -> Dict:
         for k in extra_efr_keys:
             del efr[k]
 
-    # --- Ensure equation_formula is dict {formula}, not string ---
     # Template only has "formula" key, no "parameters"
     ef = edge_json.get("equation_formula")
     if isinstance(ef, str):
@@ -494,7 +480,6 @@ def auto_fix(edge_json: Dict) -> Dict:
     elif ef is None:
         edge_json["equation_formula"] = {"formula": ""}
 
-    # --- Ensure literature_estimate has dual-check fields ---
     if "equation_type" not in lit:
         lit["equation_type"] = edge_json.get("equation_type", "")
     if "equation_formula" not in lit:
@@ -504,7 +489,6 @@ def auto_fix(edge_json: Dict) -> Dict:
         else:
             lit["equation_formula"] = ""
 
-    # --- Ensure study_cohort sub-fields have is_reported ---
     cohort = edge_json.get("study_cohort", {})
     if isinstance(cohort, dict):
         for field_name in (
@@ -522,7 +506,6 @@ def auto_fix(edge_json: Dict) -> Dict:
                 fd.setdefault("is_reported", False)
                 fd.setdefault("value", "")
 
-    # --- theta_hat: try to coerce string to number ---
     theta = lit.get("theta_hat")
     if isinstance(theta, str):
         try:
@@ -530,7 +513,6 @@ def auto_fix(edge_json: Dict) -> Dict:
         except (ValueError, TypeError):
             lit["theta_hat"] = None
 
-    # --- Auto-compute theta_hat from reported ratio if on log scale ---
     mu = edge_json.get("epsilon", {}).get("mu", {}).get("core", {})
     if mu.get("scale") == "log" and mu.get("family") == "ratio":
         theta = lit.get("theta_hat")
@@ -548,7 +530,6 @@ def auto_fix(edge_json: Dict) -> Dict:
                     except (ValueError, ZeroDivisionError):
                         pass
 
-    # --- CI: auto-convert to log scale if needed ---
     if mu.get("scale") == "log" and mu.get("family") == "ratio":
         ci = lit.get("ci")
         if ci and isinstance(ci, list) and len(ci) == 2:
@@ -570,7 +551,6 @@ def auto_fix(edge_json: Dict) -> Dict:
                         except (TypeError, ValueError, ZeroDivisionError):
                             pass
 
-    # --- Normalize mu.core.type to use log prefix for ratio measures ---
     mu_type = mu.get("type", "")
     if mu_type in ("HR", "OR", "RR") and mu.get("scale") == "log":
         mu["type"] = f"log{mu_type}"
@@ -585,7 +565,6 @@ def auto_fix(edge_json: Dict) -> Dict:
         mu["family"] = "difference"
         mu["scale"] = "identity"
 
-    # --- Z consistency: if rho.Z is empty, hpp_mapping.Z must be empty ---
     rho_z = rho.get("Z", [])
     if not rho_z or rho_z == ["..."]:
         rho["Z"] = []
@@ -607,7 +586,6 @@ def auto_fix(edge_json: Dict) -> Dict:
                 and not any(p in z.get("name", "") for p in _ph_pats)
             ]
 
-    # --- reported_ci / reported_effect_value logical constraint ---
     # CI exists → effect_value must exist; otherwise clear CI
     efr = edge_json.get("equation_formula_reported", {})
     if isinstance(efr, dict):
@@ -621,7 +599,6 @@ def auto_fix(edge_json: Dict) -> Dict:
         if _ci_exists and _rev is None:
             efr["reported_ci"] = [None, None]
 
-    # --- Normalize reported_p / p_value: "< 0.001" → float 0.001 ---
     import re as _re_p
 
     for _cont, _key in [

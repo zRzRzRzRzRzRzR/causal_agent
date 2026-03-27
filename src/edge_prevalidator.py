@@ -498,9 +498,7 @@ def soft_check_edge(
     return derived
 
 
-# ---------------------------------------------------------------------------
 # Pre-compute theta_hat and CI on correct scale
-# ---------------------------------------------------------------------------
 
 
 def precompute_theta(edge: Dict, mu: Dict) -> Dict[str, Any]:
@@ -563,9 +561,7 @@ def precompute_theta(edge: Dict, mu: Dict) -> Dict[str, Any]:
     return result
 
 
-# ---------------------------------------------------------------------------
 # Main entry point: prevalidate all edges
-# ---------------------------------------------------------------------------
 
 
 def prevalidate_edges(

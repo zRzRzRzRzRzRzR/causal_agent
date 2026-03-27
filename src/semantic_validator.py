@@ -2,10 +2,6 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-# ---------------------------------------------------------------------------
-# 1. Canonical mapping tables (from step2_fill_template.md prompt)
-# ---------------------------------------------------------------------------
-
 # model -> allowed equation_types
 MODEL_TO_EQUATION_TYPE: Dict[str, Set[str]] = {
     "logistic": {"E1"},
@@ -89,9 +85,7 @@ MU_TYPE_FAMILY_SCALE: Dict[str, Tuple[str, str]] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # 2. Core semantic validation function
-# ---------------------------------------------------------------------------
 
 
 def validate_semantics(
@@ -195,9 +189,7 @@ def validate_semantics(
     return issues
 
 
-# ---------------------------------------------------------------------------
 # 3. Individual check functions
-# ---------------------------------------------------------------------------
 
 
 def _check_model_equation_type(eq_type: str, model: str) -> List[Dict]:
@@ -761,9 +753,7 @@ def _check_rho_z_adjustment(rho: Dict, lit: Dict) -> List[Dict]:
     return []
 
 
-# ---------------------------------------------------------------------------
 # 4. Aggregate severity assessment
-# ---------------------------------------------------------------------------
 
 
 def has_blocking_errors(issues: List[Dict]) -> bool:
@@ -801,9 +791,7 @@ def format_issues_for_prompt(issues: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
 # 5. Edge deduplication (for Step 1 output)
-# ---------------------------------------------------------------------------
 
 
 def _normalize_var_name(name: str) -> str:
@@ -941,9 +929,7 @@ def deduplicate_step1_edges(
     return unique, removed
 
 
-# ---------------------------------------------------------------------------
 # 6. Enhanced cross-edge duplicate detection (for Step 3)
-# ---------------------------------------------------------------------------
 
 
 def detect_fuzzy_duplicates_step3(

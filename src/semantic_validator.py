@@ -1,20 +1,3 @@
-"""
-semantic_validator.py -- Deep semantic validation for filled edges.
-
-Goes beyond format checks (template_utils.validate_filled_edge) to verify
-that the LLM output is *logically correct*:
-
-  1. equation_type <-> literature_estimate.model consistency
-  2. equation_type <-> equation_formula keyword consistency
-  3. equation_type <-> mu.core (family/type/scale) consistency
-  4. equation_type <-> conditional fields (M for E4, X2 for E6)
-  5. alpha.id_strategy <-> evidence_type consistency
-  6. equation_formula structural correctness (hazard/logit/linear patterns)
-  7. rho.Z <-> literature_estimate.adjustment_set consistency
-
-Also provides fuzzy edge deduplication for Step 1 output.
-"""
-
 import math
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple

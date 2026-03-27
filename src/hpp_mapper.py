@@ -1,26 +1,7 @@
-"""
-hpp_mapper.py — Map paper variables to HPP (Human Phenotype Project) fields.
-
-Given an edge's X, Y, Z variables, search the HPP data dictionary for
-the best matching dataset+field pairs. Uses:
-  1. Inverted token index over all fields
-  2. Synonym expansion for medical/clinical terms
-  3. Rule-based dataset forcing (e.g., disease outcomes → 021-medical_conditions)
-  4. Context-aware ranking (direct hits weighted higher than synonyms)
-
-Output format matches the new template:
-  hpp_mapping.X = {dataset: "009_sleep", field: "total_sleep_time"}
-  hpp_mapping.Y = {dataset: "002_anthropometrics", field: "bmi"}
-"""
-
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Set, Tuple
-
-# ---------------------------------------------------------------------------
-# Synonym map — used for query expansion during field search
-# ---------------------------------------------------------------------------
 
 SYNONYM_MAP: Dict[str, Set[str]] = {
     # Anthropometrics

@@ -1,23 +1,3 @@
-"""
-template_utils.py — Template-first approach for edge filling.
-
-Aligned with the new hpp_mapping_template.json which has a clean,
-flat structure:
-  edge_id, paper_title, paper_abstract, equation_type, equation_formula,
-  epsilon{Pi, iota, o, tau, mu, alpha, rho},
-  literature_estimate{theta_hat, ci, ...},
-  hpp_mapping{X, Y, M?, X2?}
-
-Key changes from v1:
-  - Removed schema_version, equation_version, provenance, pi,
-    modeling_directives, equation_inference_hints (not in new template)
-  - Template comments (_comment) are stripped; no _hint/_meta system needed
-  - LLM output can add extra keys (mapping_notes, composite_components,
-    reported_HR, group_means, notes) — we merge them flexibly
-  - hpp_mapping uses underscore dataset IDs (e.g. "009_sleep")
-  - M and X2 in hpp_mapping are conditional on equation_type (E4/E6)
-"""
-
 import copy
 import json
 import math
@@ -604,6 +584,66 @@ def auto_fix(edge_json: Dict) -> Dict:
     elif mu_type in ("MD", "BETA", "RD", "SMD"):
         mu["family"] = "difference"
         mu["scale"] = "identity"
+
+    # --- Z consistency: if rho.Z is empty, hpp_mapping.Z must be empty ---
+    rho_z = rho.get("Z", [])
+    if not rho_z or rho_z == ["..."]:
+        rho["Z"] = []
+        lit["adjustment_set"] = []
+        efr = edge_json.get("equation_formula_reported", {})
+        if isinstance(efr, dict):
+            efr["Z"] = []
+        hm["Z"] = []
+    else:
+        # Strip placeholder Z entries from hpp_mapping.Z
+        if isinstance(hm.get("Z"), list):
+            _ph_pats = ("协变量", "...", "covariate_name", "变量")
+            hm["Z"] = [
+                z
+                for z in hm["Z"]
+                if isinstance(z, dict)
+                and z.get("name")
+                and z["name"] not in ("...", "")
+                and not any(p in z.get("name", "") for p in _ph_pats)
+            ]
+
+    # --- reported_ci / reported_effect_value logical constraint ---
+    # CI exists → effect_value must exist; otherwise clear CI
+    efr = edge_json.get("equation_formula_reported", {})
+    if isinstance(efr, dict):
+        _rev = efr.get("reported_effect_value")
+        _rci = efr.get("reported_ci", [None, None])
+        _ci_exists = (
+            isinstance(_rci, list)
+            and len(_rci) == 2
+            and any(v is not None for v in _rci)
+        )
+        if _ci_exists and _rev is None:
+            efr["reported_ci"] = [None, None]
+
+    # --- Normalize reported_p / p_value: "< 0.001" → float 0.001 ---
+    import re as _re_p
+
+    for _cont, _key in [
+        (efr, "reported_p"),
+        (lit, "p_value"),
+    ]:
+        if not isinstance(_cont, dict):
+            continue
+        _pv = _cont.get(_key)
+        if isinstance(_pv, str):
+            _cl = _pv.strip()
+            _pm = _re_p.match(r"^[<≤]\s*(\d*\.?\d+)$", _cl)
+            if _pm:
+                try:
+                    _cont[_key] = float(_pm.group(1))
+                except ValueError:
+                    pass
+            else:
+                try:
+                    _cont[_key] = float(_cl)
+                except ValueError:
+                    pass  # Non-numeric like "NS", leave as-is
 
     return edge_json
 

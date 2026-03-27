@@ -57,6 +57,23 @@
   - 验证其中引用的每个论文位置是否真实存在
   - 如果 reason 说 "Methods p.5 描述 Cox model"，检查论文 p.5 是否真的有这段描述
 
+### 模式 9: CI 无效应值 (Orphan CI)
+**症状**: `reported_ci` 有值（如 [0.72, 0.95]）但 `reported_effect_value` 为 null。
+**检查方法**: 有 CI 必须有点估计。如果 reported_effect_value 为 null 但 CI 非空，标为 `severity: error`。
+**正确做法**: 找到论文中 CI 对应的效应值填入，或者如果真的找不到，两个都清空为 null。
+
+### 模式 10: p 值格式错误 (P-Value Format Error)
+**症状**: `reported_p` 或 `p_value` 是字符串而非数字（如 `"< 0.001"` 而非 `0.001`）。
+**检查方法**: 检查 p 值字段是否为 float 类型。字符串格式会被管道自动转换但应在源头修正。
+
+### 模式 11: 公式-Z 不一致 (Formula-Z Inconsistency)
+**症状**: `equation_formula_reported.equation` 中没有协变量调整项（无 γ、gamma、Z 符号），但 Z 列表非空。
+**检查方法**:
+  - 阅读 equation 公式字符串
+  - 如果公式是纯 treatment 模型（如 `Y = α + β·X + ε`），没有 `+ γ^T·Z` 项
+  - 但 Z 被填了 ["Age", "Sex", "BMI"]
+  - 则标为 `severity: error`，suggested_fix 为 `[]`
+
 ---
 
 ## 审核示例 (Few-shot)
@@ -184,6 +201,6 @@
 2. 每个 finding 必须引用论文中的具体位置
 3. 如果论文未报告某信息但也不能确定edge是错的，标为 warning
 4. 不要检查格式问题（格式已验证通过）
-5. 重点关注上述 8 类错误模式（模式 1-5 是内容错误，模式 6-8 是溯源错误）
+5. 重点关注上述 11 类错误模式（模式 1-5 是内容错误，模式 6-8 是溯源错误，模式 9-11 是格式/逻辑错误）
 6. 对于 parameters[].source，逐个验证引用的 Table/Figure/页码是否真实存在
 7. 对于 reason 字段，验证论文引用是否准确，是否能在原文中找到对应描述

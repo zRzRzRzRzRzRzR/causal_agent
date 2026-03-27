@@ -1,20 +1,3 @@
-"""
-review.py -- Post-extraction review, rerank, and quality assessment.
-
-Step 3 runs AFTER Step 2 produces all filled edges. It operates on the
-complete set of edges for one paper and performs:
-
-  3a. HPP Mapping Rerank   -- LLM re-evaluates top HPP candidates per edge
-  3b. Cross-Edge Consistency -- detect duplicates, contradictions, scale errors
-  3b+. Fuzzy Duplicate Detection -- token-overlap-based near-duplicate detection
-  3c. Content Spot-Check    -- LLM verifies key numeric values against paper
-  3d. Quality Report        -- aggregate stats, per-edge scores, actionable flags
-
-Changes from original:
-  - generate_quality_report now includes per-edge semantic validation results
-  - _generate_action_items flags semantic errors alongside format errors
-"""
-
 import json
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Set, Tuple

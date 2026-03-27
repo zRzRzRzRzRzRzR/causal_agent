@@ -9,16 +9,25 @@ Redesigned for speed and reliability:
             equation metadata derivation) -- NO LLM calls needed
   Step 2: Fill each edge into HPP template (simplified, no retry loop --
           pre-validation provides equation_type/model/mu/theta)
+  Step 2.5: Strong model recovery -- re-extract null effect values using a
+            stronger/more expensive model. Triggered when reported_effect_value,
+            theta_hat, or CI are null after Step 2.
   Step 3: Review with robust JSON parsing (no crash on LLM parse failures)
   Step 4: Content audit -- deterministic + LLM checks against paper text
           (covariate hallucination, numeric hallucination, Y-label mismatch,
           HPP variable leakage, sample data errors)
 
 Key changes from v2:
+  - Step 2.5 added: strong model recovery for null values
   - Step 4 added: post-extraction content audit with auto-fix
   - Phase A (deterministic): covariate/numeric/HPP leakage detection + auto-removal
+  - Phase A new checks: A10 CI/effect_value logical constraint,
+    A11 p-value format normalization, A12 formula-Z consistency,
+    A13 Z mapping ghost detection
   - Phase B (LLM): Y-label cross-check, adjustment semantics, guided by
     error_patterns.json from reference GT cases
+  - _final_schema_enforcement: Z consistency, CI/effect_value constraint,
+    p-value normalization
 """
 
 import json
@@ -559,6 +568,195 @@ def step2_fill_one_edge(
     return filled
 
 
+# ---------------------------------------------------------------------------
+# Step 2.5: Strong Model Recovery for null values
+# ---------------------------------------------------------------------------
+
+
+def step2_5_recover_nulls(
+    client_strong: GLMClient,
+    pdf_text: str,
+    edges: List[Dict],
+    anchor_set: Set[str],
+) -> List[Dict]:
+    """
+    Step 2.5: Use a stronger model to recover null effect values.
+
+    Trigger conditions (any):
+    1. reported_effect_value is null
+    2. theta_hat is null
+    3. reported_ci exists but reported_effect_value is null (logical contradiction)
+    4. All of CI, effect_value, p_value are null (entire edge is empty)
+    """
+    for i, edge in enumerate(edges):
+        efr = edge.get("equation_formula_reported", {})
+        lit = edge.get("literature_estimate", {})
+        rho = edge.get("epsilon", {}).get("rho", {})
+        mu = edge.get("epsilon", {}).get("mu", {}).get("core", {})
+
+        rev = efr.get("reported_effect_value")
+        rci = efr.get("reported_ci", [None, None])
+        theta = lit.get("theta_hat")
+        p_val = lit.get("p_value")
+
+        ci_exists = isinstance(rci, list) and any(v is not None for v in rci)
+
+        needs_recovery = (
+            rev is None
+            or theta is None
+            or (ci_exists and rev is None)
+            or (rev is None and theta is None and p_val is None)
+        )
+
+        if not needs_recovery:
+            continue
+
+        edge_id = edge.get("edge_id", f"#{i+1}")
+        x_name = rho.get("X", "?")
+        y_name = rho.get("Y", "?")
+        source = edge.get("_prevalidation", {}).get("hard_check", {})
+
+        print(
+            f"  [Recovery] Edge {edge_id}: {x_name} → {y_name} "
+            f"(rev={'null' if rev is None else rev}, "
+            f"theta={'null' if theta is None else theta})",
+            file=sys.stderr,
+        )
+
+        prompt = (
+            f"你是医学统计学专家。请从论文中精确提取以下统计效应的数值。\n\n"
+            f"**要提取的关系**: {x_name} → {y_name}\n"
+            f"**效应量类型**: {efr.get('effect_measure', '?')}\n"
+            f"**模型类型**: {efr.get('model_type', '?')}\n"
+            f"**来源位置提示**: {edge.get('_prevalidation', {}).get('hard_check', {}).get('checks', [])}\n\n"
+            f"请在论文中找到这个效应的：\n"
+            f"1. 效应值（HR/OR/RR/beta/MD 等，论文原始尺度）\n"
+            f"2. 95% CI（如有）\n"
+            f"3. P 值（如有，用 float 表示，如 < 0.001 则写 0.001）\n"
+            f"4. 来源位置（Table X / Figure X / 正文第 X 页）\n\n"
+            f"如果论文确实没有报告某个值，写 null。\n"
+            f"不要计算，不要推导，只提取论文直接报告的数值。\n\n"
+            f"输出 JSON：\n"
+            f'{{"effect_value": ..., "ci": [lower, upper], '
+            f'"p_value": ..., "source_location": "...", '
+            f'"effect_type": "HR/OR/beta/MD/..."}}\n\n'
+            f"--- 论文原文 ---\n{pdf_text[:30000]}"
+        )
+
+        try:
+            result = client_strong.call_json(prompt, max_tokens=4096)
+            _apply_recovery_result(edge, result, anchor_set, pdf_text, mu)
+        except Exception as e:
+            print(
+                f"    [Recovery] Failed: {e}",
+                file=sys.stderr,
+            )
+
+    return edges
+
+
+def _apply_recovery_result(
+    edge: Dict,
+    result: Dict,
+    anchor_set: Set[str],
+    pdf_text: str,
+    mu: Dict,
+) -> None:
+    """Apply recovery result to edge, still validated by hard-match."""
+    efr = edge.get("equation_formula_reported", {})
+    lit = edge.get("literature_estimate", {})
+
+    new_val = result.get("effect_value")
+    new_ci = result.get("ci")
+    new_p = result.get("p_value")
+    recovered = []
+
+    # Recover reported_effect_value (must pass hard-match)
+    if new_val is not None and efr.get("reported_effect_value") is None:
+        if hard_match_value(new_val, anchor_set, pdf_text):
+            efr["reported_effect_value"] = new_val
+            recovered.append(f"reported_effect_value={new_val}")
+            # Sync theta_hat
+            if mu.get("scale") == "log":
+                try:
+                    val_f = float(new_val)
+                    if val_f > 0:
+                        lit["theta_hat"] = round(math.log(val_f), 4)
+                        recovered.append(f"theta_hat={lit['theta_hat']}")
+                except (ValueError, TypeError):
+                    pass
+            elif mu.get("scale") == "identity":
+                try:
+                    lit["theta_hat"] = float(new_val)
+                    recovered.append(f"theta_hat={new_val}")
+                except (ValueError, TypeError):
+                    pass
+
+    # Recover CI
+    if new_ci and isinstance(new_ci, list) and len(new_ci) == 2:
+        curr_ci = efr.get("reported_ci", [None, None])
+        if curr_ci in (None, [None, None]):
+            valid_ci = []
+            for b in new_ci:
+                if b is not None and hard_match_value(b, anchor_set, pdf_text):
+                    valid_ci.append(b)
+                else:
+                    valid_ci.append(None)
+            if any(v is not None for v in valid_ci):
+                efr["reported_ci"] = valid_ci
+                recovered.append(f"reported_ci={valid_ci}")
+                # Sync lit CI
+                if mu.get("scale") == "log":
+                    log_ci = [None, None]
+                    for idx, b in enumerate(valid_ci):
+                        if b is not None:
+                            try:
+                                bf = float(b)
+                                if bf > 0:
+                                    log_ci[idx] = round(math.log(bf), 4)
+                            except (ValueError, TypeError):
+                                pass
+                    lit["ci"] = log_ci
+                else:
+                    lit["ci"] = [float(b) if b is not None else None for b in valid_ci]
+
+    # Recover P value (normalize to float)
+    if new_p is not None and lit.get("p_value") is None:
+        if isinstance(new_p, (int, float)):
+            lit["p_value"] = new_p
+            recovered.append(f"p_value={new_p}")
+        elif isinstance(new_p, str):
+            import re as _re
+
+            match = _re.match(r"^[<≤]\s*(\d*\.?\d+)$", new_p.strip())
+            if match:
+                p_float = float(match.group(1))
+                lit["p_value"] = p_float
+                recovered.append(f"p_value={p_float}")
+            else:
+                try:
+                    p_float = float(new_p.strip())
+                    lit["p_value"] = p_float
+                    recovered.append(f"p_value={p_float}")
+                except ValueError:
+                    pass
+
+    # Enforce: if reported_ci exists but reported_effect_value is still null,
+    # clear the CI (logical invariant)
+    rci = efr.get("reported_ci", [None, None])
+    ci_exists = isinstance(rci, list) and any(v is not None for v in rci)
+    if ci_exists and efr.get("reported_effect_value") is None:
+        efr["reported_ci"] = [None, None]
+        lit["ci"] = [None, None]
+        recovered.append("cleared orphan CI (no effect_value)")
+
+    if recovered:
+        print(
+            f"    [Recovery] Recovered: {', '.join(recovered)}",
+            file=sys.stderr,
+        )
+
+
 def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
     """Build a guidance block for the LLM based on pre-validated metadata."""
     if not preval:
@@ -906,6 +1104,59 @@ def _final_schema_enforcement(edge: Dict) -> None:
     if mu_type in ("HR", "OR", "RR") and mu.get("scale") == "log":
         mu["type"] = f"log{mu_type}"
 
+    # 6. Z consistency: if rho.Z is empty, all Z-related fields must be empty
+    rho_z = rho.get("Z", [])
+    if not rho_z or rho_z == ["..."]:
+        rho["Z"] = []
+        lit["adjustment_set"] = []
+        if isinstance(efr, dict):
+            efr["Z"] = []
+        hm["Z"] = []
+    else:
+        # rho.Z has values — strip placeholder entries from hpp_mapping.Z
+        if isinstance(hm.get("Z"), list):
+            _placeholder_pats = ("协变量", "...", "covariate_name", "变量")
+            hm["Z"] = [
+                z
+                for z in hm["Z"]
+                if isinstance(z, dict)
+                and z.get("name")
+                and z["name"] not in ("...", "")
+                and not any(p in z.get("name", "") for p in _placeholder_pats)
+            ]
+
+    # 7. reported_ci / reported_effect_value logical constraint:
+    #    CI exists → effect_value must exist; otherwise clear both
+    if isinstance(efr, dict):
+        _rev = efr.get("reported_effect_value")
+        _rci = efr.get("reported_ci", [None, None])
+        _ci_exists = (
+            isinstance(_rci, list)
+            and len(_rci) == 2
+            and any(v is not None for v in _rci)
+        )
+        if _ci_exists and _rev is None:
+            efr["reported_ci"] = [None, None]
+
+    # 8. Normalize reported_p / p_value: "< 0.001" → float 0.001
+    for _container, _key in [(efr, "reported_p"), (lit, "p_value")]:
+        if not isinstance(_container, dict):
+            continue
+        _pval = _container.get(_key)
+        if isinstance(_pval, str):
+            _cleaned = _pval.strip()
+            _p_match = _re.match(r"^[<≤]\s*(\d*\.?\d+)$", _cleaned)
+            if _p_match:
+                try:
+                    _container[_key] = float(_p_match.group(1))
+                except ValueError:
+                    pass
+            else:
+                try:
+                    _container[_key] = float(_cleaned)
+                except ValueError:
+                    pass  # Non-numeric string like "NS", leave as-is
+
 
 # ---------------------------------------------------------------------------
 # Step 3: Review (with robust JSON parsing)
@@ -1072,11 +1323,12 @@ def _safe_spot_check(
 
 class EdgeExtractionPipeline:
     """
-    Six-step pipeline:
+    Seven-step pipeline:
       Step 0: Classify paper type
       Step 1: Enumerate all statistical edges (with deduplication)
       Step 1.5: Pre-validate (hard + soft check, no LLM)
       Step 2: Fill each edge into HPP template (simplified, no retry)
+      Step 2.5: Strong model recovery for null effect values (optional)
       Step 3: Review, rerank, consistency check, spot-check, quality report
       Step 4: Content audit (deterministic Phase A + LLM Phase B)
     """
@@ -1105,8 +1357,11 @@ class EdgeExtractionPipeline:
         error_patterns_path: Optional[str] = None,
         # Reference GT options (NEW)
         reference_dir: Optional[str] = None,
+        # Strong model for null recovery (Step 2.5)
+        strong_client: Optional[GLMClient] = None,
     ):
         self.client = client
+        self.strong_client = strong_client
         self.ocr_text_func = ocr_text_func
         self.template_path = template_path or str(_DEFAULT_TEMPLATE)
         self.annotated_template = load_template(self.template_path)
@@ -1172,6 +1427,12 @@ class EdgeExtractionPipeline:
                 self._gt_cases = []
         else:
             self._gt_cases = []
+
+        if self.strong_client:
+            print(
+                f"[Pipeline] Strong model enabled for Step 2.5 null recovery",
+                file=sys.stderr,
+            )
 
         if ocr_init_func is not None:
             ocr_init_func(
@@ -1329,6 +1590,52 @@ class EdgeExtractionPipeline:
                 f"         Done: {eid} (equation_type={eq}, semantic_valid={sem_valid})",
                 file=sys.stderr,
             )
+
+        # -- Step 2.5: Strong Model Recovery for null values --
+        if self.strong_client and all_filled_edges:
+            anchor_set = extract_anchor_numbers(pdf_text)
+            null_count_before = sum(
+                1
+                for e in all_filled_edges
+                if e.get("equation_formula_reported", {}).get("reported_effect_value")
+                is None
+                or e.get("literature_estimate", {}).get("theta_hat") is None
+            )
+            if null_count_before > 0:
+                print(
+                    f"\n[Step 2.5] Recovering {null_count_before} null values "
+                    f"with strong model ...",
+                    file=sys.stderr,
+                )
+                all_filled_edges = step2_5_recover_nulls(
+                    self.strong_client,
+                    pdf_text,
+                    all_filled_edges,
+                    anchor_set,
+                )
+                null_count_after = sum(
+                    1
+                    for e in all_filled_edges
+                    if e.get("equation_formula_reported", {}).get(
+                        "reported_effect_value"
+                    )
+                    is None
+                    or e.get("literature_estimate", {}).get("theta_hat") is None
+                )
+                print(
+                    f"  Recovered: {null_count_before - null_count_after}/"
+                    f"{null_count_before} null values filled",
+                    file=sys.stderr,
+                )
+                if pdf_dir:
+                    save_json(
+                        pdf_dir / "step2_5_recovery.json",
+                        {
+                            "null_before": null_count_before,
+                            "null_after": null_count_after,
+                            "recovered": null_count_before - null_count_after,
+                        },
+                    )
 
         # -- Step 3: Review --
         quality_report = None

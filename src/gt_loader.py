@@ -14,21 +14,6 @@ def load_error_patterns(patterns_path: str) -> Optional[Dict]:
 
 
 def build_error_patterns_context(patterns: Dict, max_examples_per_cat: int = 2) -> str:
-    """
-    Build a compact text block from error_patterns.json for injection
-    into Step 4 Phase B prompt.
-
-    Output format:
-        ## 历史错误模式分布 (从 N 篇 GT 论文中提取)
-        - covariate_hallucination: 12次 (28.6%)
-        - numeric_hallucination: 8次 (19.0%)
-        ...
-
-        ## 典型错误示例
-        ### covariate_hallucination
-        - Case X, Edge EV-xxx#1, field Z: "TDI 不存在于本论文..."
-        ...
-    """
     lines = []
     total = patterns.get("total_patterns", 0)
     n_cases = patterns.get("num_cases", 0)

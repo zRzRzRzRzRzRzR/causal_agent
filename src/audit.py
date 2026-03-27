@@ -1,25 +1,3 @@
-"""
-step4_audit.py -- Post-extraction Evidence Card Audit.
-
-Runs AFTER Step 3 on the final edges.json. Focuses on content-level
-accuracy that format/semantic validators cannot catch:
-
-  Phase A (deterministic, no LLM):
-    A1. Covariate hallucination   -- each Z variable must appear in paper text
-    A2. Numeric hallucination     -- theta_hat, CI, p_value must appear in text
-    A3. Sample data verification  -- sample_size, sex ratios must appear in text
-    A4. HPP variable leakage      -- X/Y names must appear in paper, not just HPP dict
-    A5. Extra field detection      -- flag fields not in the allowed schema
-
-  Phase B (LLM, with few-shot GT example):
-    B1. Y-label cross-check       -- does the numeric value match the claimed Y?
-    B2. Adjustment set semantics  -- are Z variables actually covariates or just
-                                     matching/stratification variables?
-    B3. Study cohort verification  -- verify sample_size, age, sex against paper
-
-Output: audit_report.json + edges_audited.json (with fixes applied)
-"""
-
 import copy
 import json
 import re
@@ -27,7 +5,6 @@ from typing import Any, Dict, List, Tuple
 
 
 def _number_appears_in_text(val: Any, text: str) -> bool:
-    """Check if a numeric value appears somewhere in the paper text."""
     if val is None:
         return True
     try:
@@ -542,6 +519,213 @@ def _check_parameter_source_traceability(
     return issues
 
 
+def _check_reported_ci_effect_value_consistency(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A10: If reported_ci has values, reported_effect_value MUST also have a value.
+    If reported_effect_value is null but reported_ci is not, both must be cleared.
+    This is a logical invariant — you can't have CI without a point estimate.
+    """
+    issues = []
+    efr = edge.get("equation_formula_reported", {})
+    if not isinstance(efr, dict):
+        return issues
+
+    rev = efr.get("reported_effect_value")
+    rci = efr.get("reported_ci", [None, None])
+
+    ci_exists = (
+        isinstance(rci, list) and len(rci) == 2 and any(v is not None for v in rci)
+    )
+
+    if ci_exists and rev is None:
+        issues.append(
+            {
+                "check": "ci_without_effect_value",
+                "severity": "error",
+                "field": "equation_formula_reported.reported_ci",
+                "message": (
+                    f"reported_ci={rci} exists but reported_effect_value is null. "
+                    f"CI cannot exist without a point estimate. Both will be cleared."
+                ),
+                "action": "clear_ci_and_effect",
+            }
+        )
+
+    return issues
+
+
+def _check_reported_p_format(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A11: Normalize reported_p format.
+    - "< 0.001" / "<0.001" / "< .001" → float 0.001
+    - "< 0.05" → float 0.05
+    - "0.032" (string) → float 0.032
+    For '<' prefixed p-values, the numeric part is the upper bound,
+    which is what we store (the actual p is guaranteed to be smaller).
+    """
+    issues = []
+    efr = edge.get("equation_formula_reported", {})
+    lit = edge.get("literature_estimate", {})
+
+    for container_name, container, field_key in [
+        ("equation_formula_reported.reported_p", efr, "reported_p"),
+        ("literature_estimate.p_value", lit, "p_value"),
+    ]:
+        p_val = container.get(field_key)
+
+        if p_val is None:
+            continue
+        if isinstance(p_val, (int, float)):
+            continue  # Already numeric, skip
+
+        if isinstance(p_val, str):
+            cleaned = p_val.strip()
+            # Match patterns like "< 0.001", "<0.001", "< .001", "<.05", "≤0.05"
+            match = re.match(r"^[<≤]\s*(\d*\.?\d+)$", cleaned)
+            if match:
+                try:
+                    numeric_val = float(match.group(1))
+                    issues.append(
+                        {
+                            "check": "reported_p_format",
+                            "severity": "warning",
+                            "field": container_name,
+                            "value": p_val,
+                            "message": (
+                                f"p-value '{p_val}' uses '<' prefix. "
+                                f"Normalizing to float {numeric_val} "
+                                f"(actual p < {numeric_val})."
+                            ),
+                            "action": "normalize_p",
+                            "normalized_value": numeric_val,
+                            "field_key": field_key,
+                            "container_path": container_name.rsplit(".", 1)[0],
+                        }
+                    )
+                except ValueError:
+                    pass
+            else:
+                # Try direct float conversion for string numbers like "0.032"
+                try:
+                    numeric_val = float(cleaned)
+                    issues.append(
+                        {
+                            "check": "reported_p_format",
+                            "severity": "warning",
+                            "field": container_name,
+                            "value": p_val,
+                            "message": (
+                                f"p-value '{p_val}' is a string. "
+                                f"Converting to float {numeric_val}."
+                            ),
+                            "action": "normalize_p",
+                            "normalized_value": numeric_val,
+                            "field_key": field_key,
+                            "container_path": container_name.rsplit(".", 1)[0],
+                        }
+                    )
+                except ValueError:
+                    pass  # Non-numeric string like "NS", leave as-is
+
+    return issues
+
+
+def _check_formula_z_consistency(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A12: Check that equation_formula_reported.equation actually contains
+    covariate adjustment terms if Z is non-empty.
+    If the formula has no Z/gamma/covariate symbols but Z list is filled,
+    the LLM likely hallucinated Z from the HPP dictionary or baseline table.
+    """
+    issues = []
+    efr = edge.get("equation_formula_reported", {})
+    if not isinstance(efr, dict):
+        return issues
+
+    equation = efr.get("equation", "") or ""
+    z_list = efr.get("Z", [])
+
+    if not z_list or not equation:
+        return issues
+
+    # Formula markers that indicate covariate adjustment is present
+    has_covariate_in_formula = bool(
+        re.search(
+            r"gamma|γ|\\gamma|covariate|adjust|\+ γ|\+ gamma|γ\^T|gamma\^T"
+            r"|Z_[a-zA-Z]|covariates|confound",
+            equation,
+            re.IGNORECASE,
+        )
+    )
+
+    if not has_covariate_in_formula and len(z_list) > 0:
+        issues.append(
+            {
+                "check": "formula_z_inconsistency",
+                "severity": "error",
+                "field": "equation_formula_reported.Z",
+                "message": (
+                    f"Formula '{equation[:100]}...' contains no covariate "
+                    f"adjustment terms (no gamma/γ/Z symbols), but Z={z_list}. "
+                    f"Z should be empty for unadjusted models."
+                ),
+                "current_value": z_list,
+                "action": "clear_z",
+            }
+        )
+
+    return issues
+
+
+def _check_z_mapping_consistency(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A13: If epsilon.rho.Z is empty, hpp_mapping.Z must also be empty.
+    Catches ghost Z mappings with placeholder names.
+    """
+    issues = []
+    rho_z = edge.get("epsilon", {}).get("rho", {}).get("Z", [])
+    hm_z = edge.get("hpp_mapping", {}).get("Z", [])
+
+    # rho.Z is empty but hpp_mapping.Z has entries
+    if (not rho_z or rho_z == ["..."]) and isinstance(hm_z, list) and len(hm_z) > 0:
+        issues.append(
+            {
+                "check": "z_mapping_ghost",
+                "severity": "error",
+                "field": "hpp_mapping.Z",
+                "message": (
+                    f"epsilon.rho.Z is empty but hpp_mapping.Z has "
+                    f"{len(hm_z)} entries. "
+                    f"hpp_mapping.Z must be empty when rho.Z is empty."
+                ),
+                "action": "clear_z",
+            }
+        )
+
+    # Check for placeholder names in hpp_mapping.Z
+    if isinstance(hm_z, list):
+        placeholder_patterns = ("协变量", "...", "covariate_name", "变量")
+        for z_item in hm_z:
+            if isinstance(z_item, dict):
+                name = z_item.get("name", "")
+                if any(p in name for p in placeholder_patterns) or name == "":
+                    issues.append(
+                        {
+                            "check": "z_mapping_placeholder",
+                            "severity": "error",
+                            "field": "hpp_mapping.Z",
+                            "message": (
+                                f"hpp_mapping.Z contains placeholder entry: "
+                                f"name='{name}'. Must be removed."
+                            ),
+                            "action": "clear_z_placeholders",
+                        }
+                    )
+                    break  # One issue is enough
+
+    return issues
+
+
 def _check_dual_equation_consistency(edge: Dict) -> List[Dict[str, Any]]:
     """
     A9: Verify consistency between equation_formula, equation_formula_reported,
@@ -681,6 +865,10 @@ def phase_a_audit(
         edge_issues.extend(_check_computed_cohort_values(edge, pdf_text))
         edge_issues.extend(_check_parameter_source_traceability(edge, pdf_text))  # A8
         edge_issues.extend(_check_dual_equation_consistency(edge))  # A9
+        edge_issues.extend(_check_reported_ci_effect_value_consistency(edge))  # A10
+        edge_issues.extend(_check_reported_p_format(edge))  # A11
+        edge_issues.extend(_check_formula_z_consistency(edge))  # A12
+        edge_issues.extend(_check_z_mapping_consistency(edge))  # A13
 
         for iss in edge_issues:
             iss["edge_id"] = edge_id
@@ -859,6 +1047,89 @@ def apply_phase_a_fixes(
                             "old_value": old_ci,
                         }
                     )
+
+            elif action == "clear_ci_and_effect":
+                # A10: CI exists but effect_value is null → clear both
+                efr = edge.get("equation_formula_reported", {})
+                old_ci = efr.get("reported_ci")
+                efr["reported_ci"] = [None, None]
+                applied_fixes.append(
+                    {
+                        "edge_id": iss.get("edge_id", "?"),
+                        "action": "cleared_orphan_ci",
+                        "field": "equation_formula_reported.reported_ci",
+                        "old_value": old_ci,
+                        "reason": "CI cannot exist without point estimate",
+                    }
+                )
+
+            elif action == "normalize_p":
+                # A11: Convert string p-value to float
+                container_path = iss.get("container_path", "")
+                field_key = iss.get("field_key", "")
+                normalized = iss.get("normalized_value")
+                if container_path and field_key and normalized is not None:
+                    if container_path == "equation_formula_reported":
+                        container = edge.get("equation_formula_reported", {})
+                    elif container_path == "literature_estimate":
+                        container = edge.get("literature_estimate", {})
+                    else:
+                        container = {}
+                    if container:
+                        old_val = container.get(field_key)
+                        container[field_key] = normalized
+                        applied_fixes.append(
+                            {
+                                "edge_id": iss.get("edge_id", "?"),
+                                "action": "normalized_p_value",
+                                "field": iss.get("field", ""),
+                                "old_value": old_val,
+                                "new_value": normalized,
+                            }
+                        )
+
+            elif action in ("clear_z", "clear_z_placeholders"):
+                # A12/A13: Clear all Z fields across the edge
+                rho = edge.get("epsilon", {}).get("rho", {})
+                old_rho_z = rho.get("Z", [])
+                rho["Z"] = []
+
+                lit = edge.get("literature_estimate", {})
+                old_adj = lit.get("adjustment_set", [])
+                lit["adjustment_set"] = []
+
+                efr = edge.get("equation_formula_reported", {})
+                if isinstance(efr, dict):
+                    old_efr_z = efr.get("Z", [])
+                    efr["Z"] = []
+
+                hm = edge.get("hpp_mapping", {})
+                old_hm_z = hm.get("Z", [])
+                if action == "clear_z_placeholders":
+                    # Only remove placeholder entries, keep valid ones
+                    placeholder_patterns = ("协变量", "...", "covariate_name", "变量")
+                    hm["Z"] = [
+                        z
+                        for z in (hm.get("Z") or [])
+                        if isinstance(z, dict)
+                        and z.get("name")
+                        and not any(
+                            p in z.get("name", "") for p in placeholder_patterns
+                        )
+                        and z.get("name") != ""
+                    ]
+                else:
+                    hm["Z"] = []
+
+                applied_fixes.append(
+                    {
+                        "edge_id": iss.get("edge_id", "?"),
+                        "action": f"cleared_z_fields_{action}",
+                        "old_rho_z": old_rho_z,
+                        "old_adjustment_set": old_adj,
+                        "reason": iss.get("message", ""),
+                    }
+                )
 
     return fixed_edges, applied_fixes
 

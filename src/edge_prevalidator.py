@@ -98,7 +98,6 @@ def _normalize_number(val: Any) -> Optional[str]:
 
 
 def _number_appears_in_text(val: Any, text: str) -> bool:
-    """Check if a numeric value appears somewhere in the paper text."""
     if val is None:
         return True  # null values don't need verification
     try:

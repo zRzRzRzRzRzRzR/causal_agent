@@ -100,6 +100,22 @@ Evidence type: {evidence_type}
   `equation_formula_reported.Z`、`epsilon.rho.Z`、`literature_estimate.adjustment_set`、`hpp_mapping.Z`
 - 如果论文同时报告多个模型（如 Model 1 / Model 2 / Model 3），**只能**填写与你当前 edge 的 estimate / CI / p_value 对应的那个模型的调整变量；不能混用别的模型的协变量。
 
+**⚠️ Z 决策流程（必须按此顺序判断）**：
+1. 找到当前 edge 的 estimate 在论文中的**精确出处**（哪个 Table 的哪一行，或哪个模型）
+2. 找到该 Table/模型的脚注或 Methods 中描述的**该模型的调整变量**
+3. 如果脚注写 "adjusted for age, sex, BMI" → Z = ["age", "sex", "BMI"]
+4. 如果脚注写 "unadjusted" 或无脚注说明调整 → Z = []
+5. 如果模型是 t-test / ANOVA / Fisher's exact / chi-square → Z = **必须**为 []
+6. **禁止**从 baseline table（Table 1）的列头反推 Z
+7. **禁止**因为 HPP 字典中有 age/sex/BMI 字段就填入 Z
+
+**❌ 错误示例（LLM 常犯）**：
+```
+公式: "Y_it = α + β₀·t + β_X·Treatment + ε_it"  ← 无协变量项
+Z: ["Age", "Sex", "TDI"]  ← 错！公式中没有 γ^T·Z 项，Z 必须为 []
+```
+正确做法：如果你的 equation 中没有 `+ γ^T·Z` 或 `+ γ₁·Age + γ₂·Sex` 等协变量项，那么 Z 就必须是 `[]`。**公式和 Z 必须一致。**
+
 ### 4. epsilon字段（来自论文）
 - `epsilon.Pi`: 人群标签 — `"adult_general"`（成人一般人群）、`"cvd"`（心血管疾病）、`"diabetes"`（糖尿病）、`"oncology"`（肿瘤）、`"pediatric"`（儿科）
 - `epsilon.iota.core.name`: 暴露变量的**简洁名称**（例如 `"Healthy Lifestyle Score"` 而非 `"Healthy Lifestyle Score 4 (Never smoking, Physically active, ...)"）`。必须匹配rho.X
@@ -176,6 +192,9 @@ Evidence type: {evidence_type}
 | C4 | M条件   | `hpp_mapping.M`非null仅当equation_type = "E4" |
 | C5 | X2条件  | `hpp_mapping.X2`非null仅当equation_type = "E6" |
 | C6 | 单个边   | JSON恰好描述一个X→Y边 |
+| C7 | CI→效应值 | 如果 `reported_ci` ≠ [null,null]，则 `reported_effect_value` ≠ null |
+| C8 | p值格式  | `reported_p` 和 `p_value` 是 float 数字（不是字符串） |
+| C9 | 公式-Z一致 | 如果 equation 中无 γ/gamma/covariate 项，则 Z 必须为 [] |
 
 ---
 
@@ -232,6 +251,29 @@ Evidence type: {evidence_type}
 - 如果参与者是**健康人**（即使他们有疾病家族史），`disease_indication` 应反映"healthy"
 - "healthy siblings of patients with premature atherothrombotic disease" 的 disease_indication 是 **"healthy (family history of premature atherothrombotic disease)"**，不是 "subclinical atherosclerosis"
 
+### R7: reported_ci 存在 → reported_effect_value 必须存在
+- 如果你填写了 `reported_ci`（不是 [null, null]），则 `reported_effect_value` **必须也有值**。
+- 逻辑：你不可能有置信区间但没有点估计。
+- 如果论文只报告了 CI 但你找不到对应的效应值，两个都填 null：
+  ```json
+  "reported_effect_value": null,
+  "reported_ci": [null, null]
+  ```
+- **❌ 以下输出会被管道自动清零**：
+  ```json
+  "reported_effect_value": null,
+  "reported_ci": [0.72, 0.95]   ← 有CI但无效应值，管道会把CI也清空
+  ```
+
+### R8: reported_p / p_value 必须是数字，不是字符串
+- `reported_p` 和 `literature_estimate.p_value` 必须输出为 **float 数字**，不是字符串。
+- 如果论文写 "p < 0.001"，填 `0.001`（float），不是 `"< 0.001"`（string）。
+- 如果论文写 "p = 0.032"，填 `0.032`（float），不是 `"0.032"`（string）。
+- 如果论文写 "p < 0.05" 但未给出精确值，填 `0.05`。
+- 如果论文写 "NS" 或 "not significant" 但未给出数值，填 `null`。
+- **❌ 错误**：`"reported_p": "< 0.001"` ← 字符串，会被管道转换
+- **✅ 正确**：`"reported_p": 0.001` ← 数字
+
 ---
 
 ## 输出要求
@@ -258,3 +300,6 @@ Evidence type: {evidence_type}
 18. **equation_formula_reported 只允许**：`equation`, `source`, `model_type`, `link_function`, `effect_measure`, `reported_effect_value`, `reported_ci`, `reported_p`, `X`, `Y`, `Z`。**禁止**添加 `parameters`, `reason` 等额外字段。
 19. `study_cohort` 的每个子字段必须包含 `value`（字符串）和 `is_reported`（布尔值）
 20. **严格按模板输出，不要添加模板中不存在的字段**
+21. **如果 `reported_ci` 非空，`reported_effect_value` 必须也非空**（R7）
+22. **`reported_p` 和 `p_value` 必须是 float 数字**，不是字符串。`"< 0.001"` → `0.001`，`"0.032"` → `0.032`（R8）
+23. **公式和 Z 必须一致**：如果 `equation_formula_reported.equation` 中没有协变量调整项（γ/gamma/Z），则所有 Z 字段必须为 `[]`

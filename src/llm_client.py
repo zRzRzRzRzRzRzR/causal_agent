@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -54,6 +55,7 @@ class GLMClient:
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         response_format: Optional[Dict[str, str]] = None,
         thinking: bool = True,
+        max_retries: int = 10,
     ) -> str:
         messages: List[Dict] = []
         if system_prompt:
@@ -72,8 +74,24 @@ class GLMClient:
         if not thinking:
             kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
-        response = self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+                return response.choices[0].message.content
+            except Exception as e:
+                last_error = e
+                is_rate_limit = "429" in str(e) or "RateLimitError" in type(e).__name__
+                if attempt < max_retries:
+                    wait = 5.0 if is_rate_limit else 2.0
+                    print(
+                        f"[LLM] {'限流' if is_rate_limit else '调用失败'}"
+                        f" (第 {attempt}/{max_retries} 次)，"
+                        f"{wait:.0f}s 后重试"
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
 
     def call_json(
         self,
@@ -82,19 +100,34 @@ class GLMClient:
         temperature: float = _DEFAULT_TEMPERATURE,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         thinking: bool = True,
+        max_retries: int = 3,
     ) -> Any:
-        raw = self.call(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-            thinking=thinking,
+        last_raw = ""
+        for attempt in range(1, max_retries + 1):
+            raw = self.call(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                thinking=thinking,
+            )
+            last_raw = raw
+
+            parsed = self._try_parse_json(raw)
+            if parsed is not None:
+                return parsed
+
+            print(f"[LLM] JSON 解析失败，第 {attempt}/{max_retries} 次重试...")
+
+        raise ValueError(
+            f"模型输出经过 {max_retries} 次尝试仍无法解析为 JSON：\n{last_raw}"
         )
 
+    @staticmethod
+    def _try_parse_json(raw: str) -> Any:
         try:
             return json.loads(raw)
-
         except json.JSONDecodeError:
             pass
 
@@ -111,13 +144,12 @@ class GLMClient:
 
         json_match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
         if json_match:
-            candidate = json_match.group(1)
             try:
-                return json.loads(candidate)
+                return json.loads(json_match.group(1))
             except json.JSONDecodeError:
                 pass
 
-        raise ValueError(f"模型输出无法解析为 JSON：\n{raw}")
+        return None
 
     def call_vision(
         self,
@@ -126,6 +158,7 @@ class GLMClient:
         model: Optional[str] = None,
         temperature: float = 0.1,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
+        max_retries: int = 10,
     ) -> str:
         vision_model = model or _VISION_MODEL
 
@@ -148,13 +181,27 @@ class GLMClient:
             )
         content.append({"type": "text", "text": prompt})
 
-        response = self.vision_client.chat.completions.create(
-            model=vision_model,
-            messages=[{"role": "user", "content": content}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return response.choices[0].message.content.strip()
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.vision_client.chat.completions.create(
+                    model=vision_model,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                is_rate_limit = "429" in str(e) or "RateLimitError" in type(e).__name__
+                if attempt < max_retries:
+                    wait = 5.0 if is_rate_limit else 2.0
+                    print(
+                        f"[LLM] Vision {'限流' if is_rate_limit else '调用失败'}"
+                        f" (第 {attempt}/{max_retries} 次)，"
+                        f"{wait:.0f}s 后重试"
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
 
     @staticmethod
     def _image_to_base64(image_path: str) -> str:

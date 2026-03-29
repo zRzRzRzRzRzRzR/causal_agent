@@ -1366,18 +1366,25 @@ def run_step4_audit(
                 error_patterns_context=error_patterns_context,  # NEW
             )
 
-            result = client.call_json(
-                prompt,
-                system_prompt=_PHASE_B_SYSTEM_PROMPT,
-                max_tokens=16384,  # enough
-            )
-            batch_issues = parse_phase_b_response(result)
-            phase_b_issues.extend(batch_issues)
-            print(
-                f"  Batch {batch_start//max_edges_per_llm_call + 1}: "
-                f"{len(batch_issues)} issues found",
-                file=sys.stderr,
-            )
+            try:
+                result = client.call_json(
+                    prompt,
+                    system_prompt=_PHASE_B_SYSTEM_PROMPT,
+                    max_tokens=16384,  # enough
+                )
+                batch_issues = parse_phase_b_response(result)
+                phase_b_issues.extend(batch_issues)
+                print(
+                    f"  Batch {batch_start//max_edges_per_llm_call + 1}: "
+                    f"{len(batch_issues)} issues found",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                print(
+                    f"  Batch {batch_start//max_edges_per_llm_call + 1}: "
+                    f"Phase B LLM call failed: {e}",
+                    file=sys.stderr,
+                )
 
     else:
         print("[Step 4] Phase B: Skipped (no LLM client)", file=sys.stderr)

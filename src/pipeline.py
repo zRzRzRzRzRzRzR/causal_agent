@@ -1510,6 +1510,28 @@ class EdgeExtractionPipeline:
         )
         all_filled_edges: List[Dict] = []
 
+        # Resume support: load partially completed Step 2 results
+        step2_partial_path = pdf_dir / "step2_partial.json" if pdf_dir else None
+        step2_cached_edges: Dict[int, Dict] = {}  # edge_index -> filled_edge
+        if resume and step2_partial_path and step2_partial_path.exists():
+            try:
+                with open(step2_partial_path, "r", encoding="utf-8") as f:
+                    cached_list = json.load(f)
+                for ce in cached_list:
+                    ce_idx = ce.get("_step2_edge_index")
+                    if ce_idx is not None:
+                        step2_cached_edges[ce_idx] = ce
+                print(
+                    f"  [Step 2] RESUME: loaded {len(step2_cached_edges)} "
+                    f"cached edges from step2_partial.json",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                print(
+                    f"  [Step 2] Failed to load partial cache: {e}",
+                    file=sys.stderr,
+                )
+
         # Build GT few-shot context once (reuse across edges)
         gt_fewshot_context = None
         if self._gt_cases:
@@ -1528,6 +1550,18 @@ class EdgeExtractionPipeline:
             idx = edge.get("edge_index", i + 1)
             y_short = str(edge.get("Y", ""))[:60]
             eq_pre = edge.get("_prevalidation", {}).get("equation_type", "?")
+
+            # Check if this edge is already cached (resume mode)
+            if idx in step2_cached_edges:
+                filled = step2_cached_edges[idx]
+                all_filled_edges.append(filled)
+                eid = filled.get("edge_id", f"#{idx}")
+                print(
+                    f"\n  [{idx}/{len(edges_list)}] CACHED: -> {y_short} " f"({eid})",
+                    file=sys.stderr,
+                )
+                continue
+
             print(
                 f"\n  [{idx}/{len(edges_list)}] Filling: -> {y_short} "
                 f"(pre-validated: {eq_pre}) ...",
@@ -1550,19 +1584,36 @@ class EdgeExtractionPipeline:
                 except Exception:
                     pass  # fallback to generic context
 
-            filled = step2_fill_one_edge(
-                client=self.client,
-                pdf_text=pdf_text,
-                edge=edge,
-                paper_info=paper_info,
-                evidence_type=evidence_type,
-                annotated_template=self.annotated_template,
-                pdf_name=pdf_name,
-                template_path=self.template_path,
-                hpp_dict_path=self.hpp_dict_path,
-                gt_fewshot_context=edge_gt_context,  # NEW
-            )
+            try:
+                filled = step2_fill_one_edge(
+                    client=self.client,
+                    pdf_text=pdf_text,
+                    edge=edge,
+                    paper_info=paper_info,
+                    evidence_type=evidence_type,
+                    annotated_template=self.annotated_template,
+                    pdf_name=pdf_name,
+                    template_path=self.template_path,
+                    hpp_dict_path=self.hpp_dict_path,
+                    gt_fewshot_context=edge_gt_context,  # NEW
+                )
+            except Exception as e:
+                print(
+                    f"         [ERROR] Edge #{idx} failed: {e}",
+                    file=sys.stderr,
+                )
+                # Save progress so far before potentially crashing
+                if step2_partial_path and all_filled_edges:
+                    save_json(step2_partial_path, all_filled_edges)
+                    print(
+                        f"         [CHECKPOINT] Saved {len(all_filled_edges)} "
+                        f"edges to step2_partial.json (edge #{idx} failed)",
+                        file=sys.stderr,
+                    )
+                raise  # Re-raise to let caller decide
 
+            # Tag with edge index for resume support
+            filled["_step2_edge_index"] = idx
             all_filled_edges.append(filled)
 
             eid = filled.get("edge_id", f"#{idx}")
@@ -1571,6 +1622,18 @@ class EdgeExtractionPipeline:
             sem_valid = validation.get("is_semantically_valid", "?")
             print(
                 f"         Done: {eid} (equation_type={eq}, semantic_valid={sem_valid})",
+                file=sys.stderr,
+            )
+
+            # Incremental save after each edge (crash-safe)
+            if step2_partial_path:
+                save_json(step2_partial_path, all_filled_edges)
+
+        # Clean up partial file after successful completion
+        if step2_partial_path and step2_partial_path.exists():
+            step2_partial_path.unlink()
+            print(
+                "  [Step 2] All edges filled, removed step2_partial.json",
                 file=sys.stderr,
             )
 

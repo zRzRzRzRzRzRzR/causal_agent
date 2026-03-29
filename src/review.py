@@ -56,7 +56,12 @@ def rerank_hpp_mapping(
             f"If current mapping is already best, set best=0."
         )
 
-        result = client.call_json(prompt, max_tokens=32678)
+        try:
+            result = client.call_json(prompt, max_tokens=32678)
+        except Exception as e:
+            print(f"    [Rerank] LLM call failed for {role}: {e}")
+            continue
+
         best_idx = result.get("best", 0)
         reason = result.get("reason", "")
         new_status = result.get("status", current.get("status", "tentative"))

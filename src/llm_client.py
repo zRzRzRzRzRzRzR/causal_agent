@@ -21,7 +21,6 @@ _VISION_BASE_URL = os.getenv("VISION_BASE_URL")
 
 
 class GLMClient:
-    """Thin wrapper around OpenAI-compatible API for GLM models."""
 
     def __init__(
         self,
@@ -74,22 +73,16 @@ class GLMClient:
         if not thinking:
             kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
-        last_error = None
         for attempt in range(1, max_retries + 1):
             try:
                 response = self.client.chat.completions.create(**kwargs)
                 return response.choices[0].message.content
             except Exception as e:
-                last_error = e
-                is_rate_limit = "429" in str(e) or "RateLimitError" in type(e).__name__
                 if attempt < max_retries:
-                    wait = 5.0 if is_rate_limit else 2.0
                     print(
-                        f"[LLM] {'限流' if is_rate_limit else '调用失败'}"
-                        f" (第 {attempt}/{max_retries} 次)，"
-                        f"{wait:.0f}s 后重试"
+                        f"[LLM] 调用失败 (第 {attempt}/{max_retries} 次)，5s 后重试: {e}"
                     )
-                    time.sleep(wait)
+                    time.sleep(5)
                 else:
                     raise
 
@@ -191,15 +184,11 @@ class GLMClient:
                 )
                 return response.choices[0].message.content.strip()
             except Exception as e:
-                is_rate_limit = "429" in str(e) or "RateLimitError" in type(e).__name__
                 if attempt < max_retries:
-                    wait = 5.0 if is_rate_limit else 2.0
                     print(
-                        f"[LLM] Vision {'限流' if is_rate_limit else '调用失败'}"
-                        f" (第 {attempt}/{max_retries} 次)，"
-                        f"{wait:.0f}s 后重试"
+                        f"[LLM] Vision 调用失败 (第 {attempt}/{max_retries} 次)，5s 后重试: {e}"
                     )
-                    time.sleep(wait)
+                    time.sleep(5)
                 else:
                     raise
 

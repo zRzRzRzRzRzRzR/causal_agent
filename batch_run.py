@@ -253,6 +253,11 @@ def main():
         default=None,
         help="Path to error_patterns.json (default: auto-detect ./reference/error_patterns.json)",
     )
+    parser.add_argument(
+        "--no_validate_pages",
+        action="store_true",
+        help="Skip using vision model to cut paper references",
+    )
 
     args = parser.parse_args()
 

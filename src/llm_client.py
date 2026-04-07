@@ -72,6 +72,9 @@ class GLMClient:
 
         if not thinking:
             kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        else:
+            if "minimax" in self.model.lower():
+                kwargs["extra_body"] = {"reasoning_split": True}
 
         for attempt in range(1, max_retries + 1):
             try:

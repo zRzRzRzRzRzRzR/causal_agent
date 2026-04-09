@@ -1,5 +1,7 @@
 import math
 from typing import Any, Dict, List, Optional, Tuple
+import math
+MAX_VAL = 10000000
 
 EFFECT_SCALE_TO_EQUATION_TYPE: Dict[str, str] = {
     "HR": "E2",
@@ -113,6 +115,9 @@ def _number_appears_in_text(val: Any, text: str) -> bool:
     candidates.add(f"{num:.2f}")
     candidates.add(f"{num:.3f}")
     candidates.add(f"{num:.1f}")
+
+    if not math.isfinite(num):
+        num = MAX_VAL if num > 0 else -MAX_VAL
     if num == int(num) and abs(num) < 10000:
         candidates.add(str(int(num)))
     if 0 < abs(num) < 1:

@@ -1,6 +1,6 @@
 import math
 from typing import Any, Dict, List, Optional, Tuple
-import math
+
 MAX_VAL = 10000000
 
 EFFECT_SCALE_TO_EQUATION_TYPE: Dict[str, str] = {

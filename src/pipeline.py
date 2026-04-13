@@ -493,7 +493,7 @@ def step2_fill_one_edge(
     full_prompt = (
         f"{prompt_template}\n\n"
         f"---\n\n"
-        f"## Pre-validated equation metadata (use these values)\n\n"
+        f"## Pre-validated equation metadata (suggested reference)\n\n"
         f"{preval_guidance}\n\n"
         f"{gt_fewshot_section}"
         f"---\n\n**Paper**\n\n{pdf_text}"
@@ -751,25 +751,25 @@ def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
 
     lines = []
     lines.append(
-        f"- **equation_type**: `{preval.get('equation_type', '?')}` "
+        f"- **suggested equation_type**: `{preval.get('equation_type', '?')}` "
         f"(derived from effect_scale={edge.get('effect_scale', '?')}, "
         f"outcome_type={edge.get('outcome_type', '?')})"
     )
-    lines.append(f"- **model**: `{preval.get('model', '?')}`")
+    lines.append(f"- **suggested model**: `{preval.get('model', '?')}`")
 
     mu = preval.get("mu", {})
     lines.append(
-        f"- **mu**: family=`{mu.get('family', '?')}`, "
+        f"- **suggested mu**: family=`{mu.get('family', '?')}`, "
         f"type=`{mu.get('type', '?')}`, scale=`{mu.get('scale', '?')}`"
     )
 
     theta = preval.get("theta_hat")
     if theta is not None:
-        lines.append(f"- **theta_hat** (on correct scale): `{theta}`")
+        lines.append(f"- **theta_hat** (pre-computed on correct scale): `{theta}`")
 
     ci = preval.get("ci")
     if ci and any(v is not None for v in ci):
-        lines.append(f"- **ci** (on correct scale): `{ci}`")
+        lines.append(f"- **ci** (pre-computed on correct scale): `{ci}`")
 
     reported = preval.get("reported_value")
     if reported is not None:
@@ -782,7 +782,7 @@ def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
     lines.append(f"- **id_strategy**: `{preval.get('id_strategy', '?')}`")
     lines.append(f"- **formula_skeleton**: `{preval.get('formula_skeleton', '?')}`")
 
-    # NEW: Include reasoning chain so LLM can reference it in its own `reason` field
+    # Include reasoning chain so LLM can reference it in its own `reason` field
     reasoning = preval.get("reasoning_chain", [])
     if reasoning:
         lines.append("\n**Derivation reasoning** (for your `reason` field reference):")
@@ -790,9 +790,12 @@ def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
             lines.append(f"  - {step}")
 
     lines.append(
-        "\n**IMPORTANT**: Use the pre-validated equation_type, model, mu, "
-        "theta_hat, and ci values above. Do NOT re-derive these -- they have "
-        "been verified against the paper."
+        "\n**NOTE**: The equation_type, model, and mu above are SUGGESTIONS "
+        "derived from effect_scale and outcome_type. You MUST verify them "
+        "against the paper's actual statistical method and formula structure. "
+        "If the paper uses a different model (e.g. Poisson reporting HR, "
+        "or logistic regression with interaction terms), use the correct type. "
+        "theta_hat and ci are pre-computed and will be applied automatically."
     )
 
     return "\n".join(lines)
@@ -800,51 +803,35 @@ def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
 
 def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
     """
-    Force pre-validated values into the filled edge.
-    This ensures equation_type, model, mu, theta_hat, and ci are correct
-    even if the LLM ignored the guidance.
+    Apply deterministic post-processing to the LLM-filled edge.
 
-    Also ensures consistency between top-level equation_type and
-    literature_estimate.equation_type (dual-check fields).
+    We NO LONGER override equation_type, model, or mu — those are determined
+    by the LLM based on the paper's actual statistical method and formula.
+
+    We DO override:
+      - theta_hat and ci (log-scale conversion is deterministic math)
+      - id_strategy (derived from evidence_type, no ambiguity)
+      - adjustment_variables (from Step 1 extraction)
+      - Dual-check field sync (lit.equation_type ↔ top-level)
     """
     if not preval:
         return filled
 
-    # Override equation_type (top-level)
-    eq_type = preval.get("equation_type")
-    if eq_type:
-        filled["equation_type"] = eq_type
-
-    # Override model
-    model = preval.get("model")
-    if model:
-        lit = filled.setdefault("literature_estimate", {})
-        lit["model"] = model
-
-    # Override mu
-    if preval.get("mu"):
-        mu_core = (
-            filled.setdefault("epsilon", {}).setdefault("mu", {}).setdefault("core", {})
-        )
-        mu_core.update(preval["mu"])
-
-    # Override theta_hat and ci
     lit = filled.setdefault("literature_estimate", {})
+
+    # ── Override theta_hat and ci (deterministic log-scale conversion) ──
     if preval.get("theta_hat") is not None:
         lit["theta_hat"] = preval["theta_hat"]
 
     if preval.get("ci") and any(v is not None for v in preval["ci"]):
         lit["ci"] = preval["ci"]
 
-    # NOTE: Do NOT add reported_HR/reported_OR/reported_CI_* to literature_estimate.
-    # The GT schema only allows: theta_hat, ci, ci_level, p_value, n, design, grade, model, adjustment_set.
-
-    # Override id_strategy
+    # ── Override id_strategy (derived from evidence_type, no ambiguity) ──
     if preval.get("id_strategy"):
         alpha = filled.setdefault("epsilon", {}).setdefault("alpha", {})
         alpha["id_strategy"] = preval["id_strategy"]
 
-    # ── FIX: Sync dual-check fields ──
+    # ── Sync dual-check fields ──
     # literature_estimate.equation_type MUST match top-level equation_type
     final_eq_type = filled.get("equation_type")
     if final_eq_type:
@@ -855,38 +842,7 @@ def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
     if isinstance(top_formula, dict) and top_formula.get("formula"):
         lit["equation_formula"] = top_formula["formula"]
 
-    # ── FIX: Ensure model is consistent with equation_type ──
-    # If the LLM wrote model="mediation" but equation_type is E1, override model
-    if final_eq_type and model:
-        from .semantic_validator import MODEL_TO_EQUATION_TYPE
-
-        allowed_eqs = MODEL_TO_EQUATION_TYPE.get(model, set())
-        if allowed_eqs and final_eq_type not in allowed_eqs:
-            # Model is inconsistent with equation_type — re-derive model
-            from .edge_prevalidator import EQUATION_TYPE_TO_MODEL
-
-            effect_scale = str(filled.get("_prevalidation_effect_scale", ""))
-            new_model_key = f"{final_eq_type}_{effect_scale}"
-            new_model = EQUATION_TYPE_TO_MODEL.get(new_model_key)
-            if not new_model:
-                # Fallback: derive from equation_type alone
-                _eq_to_default_model = {
-                    "E1": "linear",
-                    "E2": "Cox",
-                    "E3": "LMM",
-                    "E4": "mediation",
-                    "E5": "counterfactual",
-                    "E6": "interaction_model",
-                }
-                new_model = _eq_to_default_model.get(final_eq_type, "linear")
-            lit["model"] = new_model
-            print(
-                f"  [Override] model '{model}' inconsistent with eq_type '{final_eq_type}', "
-                f"corrected to '{new_model}'",
-                file=sys.stderr,
-            )
-
-    # Pre-populate adjustment_variables into rho.Z and adjustment_set if LLM left them empty
+    # ── Pre-populate adjustment_variables if LLM left them empty ──
     adj_vars = preval.get("adjustment_variables", [])
     if adj_vars:
         rho = filled.setdefault("epsilon", {}).setdefault("rho", {})
@@ -1019,41 +975,10 @@ def _final_schema_enforcement(edge: Dict) -> None:
     if isinstance(top_formula, dict) and top_formula.get("formula"):
         lit["equation_formula"] = top_formula["formula"]
 
-    # ── FIX: Ensure literature_estimate.model is consistent with equation_type ──
-    model = lit.get("model", "")
-    if model and eq_type:
-        _MODEL_TO_ALLOWED_EQ = {
-            "logistic": {"E1"},
-            "linear": {"E1"},
-            "poisson": {"E1"},
-            "ANCOVA": {"E1"},
-            "IVW": {"E1"},
-            "t-test": {"E1"},
-            "Cox": {"E2"},
-            "parametric_survival": {"E2"},
-            "KM": {"E2"},
-            "LMM": {"E3"},
-            "GEE": {"E3"},
-            "mixed": {"E3"},
-            "mediation": {"E4"},
-            "path_analysis": {"E4"},
-            "counterfactual": {"E5"},
-            "S-learner": {"E5"},
-            "T-learner": {"E5"},
-            "interaction_model": {"E6"},
-            "factorial": {"E6"},
-        }
-        allowed_eqs = _MODEL_TO_ALLOWED_EQ.get(model, set())
-        if allowed_eqs and eq_type not in allowed_eqs:
-            _eq_to_default = {
-                "E1": "linear",
-                "E2": "Cox",
-                "E3": "LMM",
-                "E4": "mediation",
-                "E5": "counterfactual",
-                "E6": "interaction_model",
-            }
-            lit["model"] = _eq_to_default.get(eq_type, "linear")
+    # ── NOTE: model is NOT forced to match equation_type anymore ──
+    # The LLM determines model and equation_type from the paper's actual method.
+    # Semantic validation (semantic_validator.py) will report inconsistencies
+    # but will NOT override the LLM's choices.
 
     # 4b. equation_formula_reported: strip extra fields — STRICTLY follow template
     _ALLOWED_EFR_KEYS = {

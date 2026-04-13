@@ -44,22 +44,24 @@ Evidence type: {evidence_type}
 
 ---
 
-## 预确定字段（请勿更改）
+## 预计算字段（自动处理）
 
-以下字段已经**预验证和预计算**。完全按照给定值使用它们。
-管道将用这些值覆盖你的输出，所以不要浪费时间重新推导它们。
+以下字段已**预计算**，管道会自动填入，你不需要手动推导：
 
 **这些值在此提示词之后注入 —— 查看下面的"预验证方程元数据"部分。**
 
-预确定的字段：
-- `equation_type` — 已从effect_scale和outcome_type推导
-- `literature_estimate.model` — 已推导
-- `epsilon.mu.core`（family、type、scale）— 已推导
+自动处理的字段：
 - `literature_estimate.theta_hat` — 已转换为正确的尺度（比率用对数）
 - `literature_estimate.ci` — 已转换为正确的尺度
-- `reported_HR` / `reported_OR` / `reported_RR` — 原始尺度值（用于比率测量）
-- `reported_CI_HR` / `reported_CI_OR` / `reported_CI_RR` — 原始CI
 - `epsilon.alpha.id_strategy` — 已从evidence_type推导
+
+## 你需要自行判断的字段
+
+以下字段**由你根据论文内容决定**，下面的"预验证方程元数据"部分提供了参考建议，但你必须根据论文的实际统计方法和公式结构来确认：
+
+- `equation_type` — 根据论文的统计方法从 E1-E6 中选择
+- `literature_estimate.model` — 根据论文的实际统计模型填写
+- `epsilon.mu.core`（family、type、scale）— 根据效应指标类型填写
 
 ---
 
@@ -79,7 +81,7 @@ Evidence type: {evidence_type}
 }
 ```
 
-- `formula`: 使用预确定的 equation_type 框架编写数学公式。**必须使用数学符号**（β, γ, λ 等），严禁纯文字描述。
+- `formula`: 根据论文实际统计方法选择对应的 equation_type 框架编写数学公式。**必须使用数学符号**（β, γ, λ 等），严禁纯文字描述。
   如果当前效应值来自未调整比较/直接比较/列联表/Fisher/t-test/Model 1=no adjustments，则不要为了套公式强行加入 `+ gamma^T * Z`。
 
 ### 3. equation_formula_reported（论文报告方程 — 独立于 E1-6 框架）

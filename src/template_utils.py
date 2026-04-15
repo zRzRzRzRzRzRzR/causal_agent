@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Tuple
 
 import json5
 
+# Upper bound for plausible ratio values (HR/OR/RR).
+# Values above this on "log" scale are assumed to already be log-transformed.
+# In epidemiology, ratios > 50 are virtually nonexistent.
+MAX_PLAUSIBLE_RATIO = 50
+
 
 def load_template(template_path: str) -> Dict:
     with open(template_path, "r", encoding="utf-8") as f:
@@ -538,7 +543,7 @@ def auto_fix(edge_json: Dict) -> Dict:
             # Check: is exp(theta) a plausible ratio? If theta=0.84, exp(0.84)=2.32 — plausible.
             # But theta=-0.17 is already on log scale (negative, no ambiguity).
             # So for positive theta: always convert if < 50 (safe upper bound).
-            if theta < 50:
+            if theta < MAX_PLAUSIBLE_RATIO:
                 try:
                     lit["theta_hat"] = round(math.log(theta), 6)
                 except (ValueError, ZeroDivisionError):

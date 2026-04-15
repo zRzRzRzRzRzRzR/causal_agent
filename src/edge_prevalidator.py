@@ -42,6 +42,11 @@ EFFECT_SCALE_TO_MU: Dict[str, Dict[str, str]] = {
 
 RATIO_SCALES = {"HR", "OR", "RR", "IRR"}
 
+# Thresholds for methods-section based E3 detection
+E3_MIN_KEYWORD_HITS = 2  # minimum longitudinal keyword matches in methods section
+METHODS_FALLBACK_RATIO = 0.4  # fraction of paper to use if methods section not found
+METHODS_MAX_LENGTH = 15000  # max chars for extracted methods section
+
 # Mediation keywords (force E4)
 MEDIATION_KEYWORDS = {
     "mediation",
@@ -251,9 +256,9 @@ def _detect_special_equation_type(
         longitudinal_hits = sum(
             1 for kw in LONGITUDINAL_KEYWORDS if kw in methods_lower
         )
-        # Require at least 2 keyword hits to avoid false positives
+        # Require at least E3_MIN_KEYWORD_HITS to avoid false positives
         # (e.g., a paper that merely mentions "longitudinal" in passing)
-        if longitudinal_hits >= 2:
+        if longitudinal_hits >= E3_MIN_KEYWORD_HITS:
             # Additional check: for interventional studies with repeated measures,
             # the effect_scale should be a difference measure (MD/beta), not HR/OR
             effect_scale = str(edge.get("effect_scale", "")).strip()
@@ -284,8 +289,8 @@ def _extract_methods_section(pdf_text: str) -> str:
             methods_starts.append(idx)
 
     if not methods_starts:
-        # No methods section found; use first 40% of paper as proxy
-        return pdf_text[: int(len(pdf_text) * 0.4)]
+        # No methods section found; use first portion of paper as proxy
+        return pdf_text[: int(len(pdf_text) * METHODS_FALLBACK_RATIO)]
 
     start = min(methods_starts)
 
@@ -296,7 +301,7 @@ def _extract_methods_section(pdf_text: str) -> str:
         if idx != -1:
             methods_ends.append(idx)
 
-    end = min(methods_ends) if methods_ends else min(start + 15000, len(pdf_text))
+    end = min(methods_ends) if methods_ends else min(start + METHODS_MAX_LENGTH, len(pdf_text))
     return pdf_text[start:end]
 
 
@@ -686,16 +691,22 @@ def prevalidate_edges(
         # RCT-specific check: warn if edge looks like within-group change
         if evidence_type == "interventional":
             c_field = str(edge.get("C", "")).lower().strip()
-            if c_field in (
-                "",
-                "baseline",
-                "pre-intervention",
-                "pre",
-                "week 0",
-                "day 0",
-                "before",
-                "pre-treatment",
-            ):
+            # Instead of an exact list, use pattern matching to catch
+            # any temporal/pre-post reference as the control group
+            _is_within_group = (
+                c_field == ""
+                or c_field.startswith("pre")
+                or c_field.startswith("before")
+                or c_field.startswith("baseline")
+                or c_field.startswith("day 0")
+                or c_field.startswith("week 0")
+                or c_field.startswith("month 0")
+                or c_field.startswith("time 0")
+                or c_field.startswith("visit 1")
+                or "pre-" in c_field
+                or "baseline" in c_field
+            )
+            if _is_within_group:
                 soft_result["issues"].append(
                     {
                         "check": "rct_within_group_warning",

@@ -84,11 +84,21 @@ Evidence type: {evidence_type}
 - `formula`: 根据论文实际统计方法选择对应的 equation_type 框架编写数学公式。**必须使用数学符号**（β, γ, λ 等），严禁纯文字描述。
   如果当前效应值来自未调整比较/直接比较/列联表/Fisher/t-test/Model 1=no adjustments，则不要为了套公式强行加入 `+ gamma^T * Z`。
 
+**⚠️ 暴露变量编码要求（重要！）**：
+- 公式中 X 必须使用论文的**实际编码形式**，不要使用泛化的 `T_X(x)` 或直接写 `X`
+- 如果 X 是**分类变量**（如 lifestyle score = 4 vs 0），使用 indicator 形式：`β_X·I(LifestyleScore=4)`
+- 如果 X 是**二分组**（如 TRE 干预组 vs 对照组），使用 indicator 形式：`β_X·I(TRE_i)`
+- 如果 X 是**连续变量**（如 sleep duration in hours），直接使用变量名：`β_X·SleepDuration`
+- 如果是 E3 重复测量模型，必须包含**时间×组交互项**：`β_XT·I(TRE_i)·t`
+
+**❌ 错误**: `λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·T_X(x) + γᵀ·Z)` — `T_X(x)` 过于泛化
+**✅ 正确**: `λ(t|do(X=x),Z) = λ₀(t)·exp(β_X·I(LifestyleScore=4) + γ₁·Age + γ₂·Sex + γ₃·TDI)` — 具体编码
+
 ### 3. equation_formula_reported（论文报告方程 — 独立于 E1-6 框架）
 
 此字段用于与 equation_formula 做**双重校验**。包含以下子字段：
 
-- `equation`: 数学公式字符串（必须使用数学符号，严禁纯文字描述）
+- `equation`: 数学公式字符串（必须使用数学符号，严禁纯文字描述）。**与 equation_formula 相同的编码要求**：X 必须使用论文实际编码形式（indicator function / 连续变量名），协变量必须逐个列出而非用 `γᵀ·Z` 泛化。
 - `source`: `"extracted"`（论文有明确方程）或 `"reconstructed"`（论文无方程，根据方法描述重构）
 - `model_type`: `"Cox"` / `"logistic"` / `"linear"` / `"Poisson"` 等
 - `link_function`: `"log"` / `"logit"` / `"identity"` 等

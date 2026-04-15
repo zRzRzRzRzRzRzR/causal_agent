@@ -199,10 +199,13 @@ def hard_check_edge(edge: Dict, pdf_text: str) -> Dict[str, Any]:
     return results
 
 
-def _detect_special_equation_type(edge: Dict, evidence_type: str) -> Optional[str]:
+def _detect_special_equation_type(
+    edge: Dict, evidence_type: str, pdf_text: str = ""
+) -> Optional[str]:
     """
     Detect if edge requires a special equation_type (E3/E4/E6) based
-    on keywords in the edge notes, X, Y, or subgroup fields.
+    on keywords in the edge notes, X, Y, or subgroup fields,
+    AND by scanning the paper's methods section for model keywords.
 
     IMPORTANT: Only trigger E4/E6 when there is STRONG evidence that the
     paper's statistical method is mediation/interaction analysis.
@@ -239,12 +242,68 @@ def _detect_special_equation_type(edge: Dict, evidence_type: str) -> Optional[st
     if any(kw in notes_text for kw in LONGITUDINAL_KEYWORDS):
         return "E3"
 
+    # E3: scan paper methods section for mixed/repeated-measures keywords
+    # This catches cases where Step 1 LLM didn't output the correct stat_method
+    if pdf_text:
+        methods_text = _extract_methods_section(pdf_text)
+        methods_lower = methods_text.lower()
+        # Count how many longitudinal keywords appear in the methods section
+        longitudinal_hits = sum(
+            1 for kw in LONGITUDINAL_KEYWORDS if kw in methods_lower
+        )
+        # Require at least 2 keyword hits to avoid false positives
+        # (e.g., a paper that merely mentions "longitudinal" in passing)
+        if longitudinal_hits >= 2:
+            # Additional check: for interventional studies with repeated measures,
+            # the effect_scale should be a difference measure (MD/beta), not HR/OR
+            effect_scale = str(edge.get("effect_scale", "")).strip()
+            if effect_scale not in ("HR", "OR", "RR"):
+                return "E3"
+
     return None
+
+
+def _extract_methods_section(pdf_text: str) -> str:
+    """
+    Extract the methods/statistical analysis section from paper text.
+    Falls back to the full text if section headers are not found.
+    """
+    text_lower = pdf_text.lower()
+
+    # Try to find methods section boundaries
+    methods_starts = []
+    for header in (
+        "methods",
+        "statistical analysis",
+        "statistical methods",
+        "study design",
+        "materials and methods",
+    ):
+        idx = text_lower.find(header)
+        if idx != -1:
+            methods_starts.append(idx)
+
+    if not methods_starts:
+        # No methods section found; use first 40% of paper as proxy
+        return pdf_text[: int(len(pdf_text) * 0.4)]
+
+    start = min(methods_starts)
+
+    # Try to find the end (results section)
+    methods_ends = []
+    for header in ("results", "findings", "discussion"):
+        idx = text_lower.find(header, start + 100)
+        if idx != -1:
+            methods_ends.append(idx)
+
+    end = min(methods_ends) if methods_ends else min(start + 15000, len(pdf_text))
+    return pdf_text[start:end]
 
 
 def derive_equation_metadata(
     edge: Dict,
     evidence_type: str,
+    pdf_text: str = "",
 ) -> Dict[str, Any]:
     """
     Deterministically derive equation_type, model, mu, and formula skeleton
@@ -280,7 +339,7 @@ def derive_equation_metadata(
     }
 
     # Step 1: Check for special equation types (mediation/interaction/longitudinal)
-    special_eq = _detect_special_equation_type(edge, evidence_type)
+    special_eq = _detect_special_equation_type(edge, evidence_type, pdf_text)
 
     # Step 2: Derive equation_type — priority: special > stat_method > effect_scale > outcome_type
     if special_eq:
@@ -472,6 +531,7 @@ def _build_formula_skeleton(
 def soft_check_edge(
     edge: Dict,
     evidence_type: str,
+    pdf_text: str = "",
 ) -> Dict[str, Any]:
     """
     Derive expected equation metadata from edge and validate consistency.
@@ -479,7 +539,7 @@ def soft_check_edge(
 
     This is a pure deterministic check -- no LLM needed.
     """
-    derived = derive_equation_metadata(edge, evidence_type)
+    derived = derive_equation_metadata(edge, evidence_type, pdf_text)
 
     # Cross-validate: if edge already has notes about the model
     notes = str(edge.get("notes", "")).lower()
@@ -527,8 +587,10 @@ def precompute_theta(edge: Dict, mu: Dict) -> Dict[str, Any]:
     if estimate is None:
         return result
 
+    # Robust parsing: handle Unicode minus signs
+    est_str = str(estimate).replace("\u2212", "-").replace("\u2013", "-").strip()
     try:
-        est_float = float(estimate)
+        est_float = float(est_str)
     except (ValueError, TypeError):
         return result
 
@@ -614,12 +676,37 @@ def prevalidate_edges(
                 }
             )
 
-        # Phase B: Soft check
-        soft_result = soft_check_edge(edge, evidence_type)
+        # Phase B: Soft check (pass pdf_text for methods-section scanning)
+        soft_result = soft_check_edge(edge, evidence_type, pdf_text)
         if soft_result["issues"]:
             for iss in soft_result["issues"]:
                 iss["edge_index"] = idx
             report["soft_check_issues"].extend(soft_result["issues"])
+
+        # RCT-specific check: warn if edge looks like within-group change
+        if evidence_type == "interventional":
+            c_field = str(edge.get("C", "")).lower().strip()
+            if c_field in (
+                "",
+                "baseline",
+                "pre-intervention",
+                "pre",
+                "week 0",
+                "day 0",
+                "before",
+                "pre-treatment",
+            ):
+                soft_result["issues"].append(
+                    {
+                        "check": "rct_within_group_warning",
+                        "severity": "warning",
+                        "message": (
+                            f"RCT edge has C='{edge.get('C', '')}' which looks like "
+                            f"a within-group pre-post comparison, not a between-group "
+                            f"difference. Prefer between-group estimates (intervention vs control)."
+                        ),
+                    }
+                )
 
         # Pre-compute theta on correct scale
         theta_result = precompute_theta(edge, soft_result["mu"])

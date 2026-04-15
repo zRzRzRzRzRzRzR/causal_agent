@@ -44,6 +44,7 @@ from .hpp_mapper import HPPMapper, get_hpp_context
 from .llm_client import GLMClient
 from .review import (
     check_cross_edge_consistency,
+    filter_edges_by_priority,
     generate_quality_report,
     rerank_hpp_mapping,
     spot_check_values,
@@ -1083,6 +1084,16 @@ def step3_review(
     spot_check_sample: int = 5,
 ) -> Tuple[List[Dict], Dict]:
     print(f"\n[Step 3] Reviewing {len(edges)} edges ...", file=sys.stderr)
+
+    # 3pre. Filter exploratory edges by priority
+    kept, removed = filter_edges_by_priority(edges)
+    if removed:
+        print(
+            f"  [3pre] Filtered {len(removed)} exploratory edges "
+            f"({len(kept)} kept)",
+            file=sys.stderr,
+        )
+        edges = kept
 
     all_rerank_changes: List[Dict] = []
     if enable_rerank and hpp_dict_path:

@@ -112,6 +112,37 @@ def _extract_role_queries(edge: Dict) -> Dict[str, str]:
     return queries
 
 
+def filter_edges_by_priority(
+    edges: List[Dict],
+    keep: Tuple[str, ...] = ("primary", "secondary"),
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Filter edges based on the 'priority' field set during Step 1.
+    Returns (kept_edges, removed_edges).
+
+    If no edges have a priority field (backward compat), all are kept.
+    """
+    # Check if any edges have priority field
+    has_priority = any(e.get("priority") for e in edges)
+    if not has_priority:
+        return edges, []
+
+    kept = []
+    removed = []
+    for e in edges:
+        prio = str(e.get("priority", "primary")).lower().strip()
+        if prio in keep:
+            kept.append(e)
+        else:
+            removed.append(e)
+
+    # Safety: if filtering would remove ALL edges, keep everything
+    if not kept:
+        return edges, []
+
+    return kept, removed
+
+
 def check_population_consistency(edges: List[Dict]) -> List[Dict]:
     """
     All edges from the same paper should have the same Pi (population).

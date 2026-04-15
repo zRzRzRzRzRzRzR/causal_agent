@@ -36,6 +36,18 @@
 - 多个暴露组（例如，4h-TRF vs 对照组, 6h-TRF vs 对照组）→ 单独的边
 - 多个暴露变量（例如，睡眠时长和失眠）→ 单独的边
 
+### 规则 4b: RCT/干预研究——优先提取组间差异（重要！）
+
+对于干预研究（RCT、临床试验），**必须**优先提取**组间差异**（between-group difference: 干预组 vs 对照组），而非组内前后变化（within-group pre-post change）。
+
+- 如果论文同时报告了"干预组前后变化"和"干预组 vs 对照组差异"，**只提取组间差异**
+- 典型的组间差异来源：调整后的组间均值差（adjusted mean difference）、组间差值的95%CI、ANCOVA模型的组间效应
+- `C`（对照组）字段必须填写实际对照组名称（如 "control group"、"placebo"），**不能**填 "baseline" 或留空
+- 如果论文只报告了各组的前后变化量而没有直接报告组间差异，在 `notes` 中说明 "only within-group changes reported, no between-group difference available"
+
+**❌ 错误**: X="4h TRF", C="baseline", estimate=-3.2（这是组内前后变化）
+**✅ 正确**: X="4h TRF", C="control group", estimate=-3.3（这是组间差异）
+
 ### 规则 5: 必须包含无统计学显著性的结果
 
 - 记录 p > 0.05 的边 —— 标记为 `significant: false`
@@ -88,6 +100,7 @@
       "has_numeric_estimate": true,
       "statistical_method": "Cox或logistic或linear或Poisson或LMM或GEE或t-test或ANCOVA或MR_IVW或KM或mediation或其他",
       "adjustment_variables": ["年龄", "性别", "BMI"],
+      "priority": "primary或secondary或exploratory",
       "notes": "可选补充说明"
     }
   ]
@@ -112,6 +125,14 @@
 
 - **adjustment_variables**: 模型调整的协变量/混杂因素列表。从论文的方法或表注中提取。如果论文说"调整了年龄、性别、BMI、吸烟和教育"，写作 `["age", "sex", "BMI", "smoking", "education"]`。如果未调整或未说明，写作 `[]`。
 
+### 规则 8: Edge 优先级标注
+
+为每个 edge 标注 `priority` 字段，用于后续筛选：
+
+- `"primary"` — 论文的主要结局（出现在摘要、研究目标、或 primary outcome 中）
+- `"secondary"` — 论文的次要结局（secondary outcome、safety endpoint）
+- `"exploratory"` — 亚组分析、敏感性分析、补充材料中的额外分析
+
 ## 输出之前，请你思考和自检
 
 1. 是否扫描了论文中的**每个表格**？
@@ -124,3 +145,5 @@
 8. 对于交互效应，是否避免了冗余的三重报告（规则7）？
 9. 是否通过阅读方法部分填写了`statistical_method`？
 10. 是否从模型描述或表注中填写了`adjustment_variables`？
+11. 对于RCT/干预研究，是否提取的是**组间差异**而非组内前后变化（规则4b）？
+12. 是否为每个 edge 标注了 `priority`（规则8）？

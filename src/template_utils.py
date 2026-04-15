@@ -124,8 +124,10 @@ def prefill_skeleton(
 
     estimate = edge.get("estimate")
     if estimate is not None:
+        # Robust parsing: handle Unicode minus signs (U+2212, en-dash U+2013)
+        est_str = str(estimate).replace("\u2212", "-").replace("\u2013", "-").strip()
         try:
-            lit["theta_hat"] = float(estimate)
+            lit["theta_hat"] = float(est_str)
         except (ValueError, TypeError):
             pass
 
@@ -133,9 +135,13 @@ def prefill_skeleton(
     if isinstance(ci, list) and len(ci) == 2:
         parsed_ci = []
         for v in ci:
-            try:
-                parsed_ci.append(float(v) if v is not None else None)
-            except (ValueError, TypeError):
+            if v is not None:
+                v_str = str(v).replace("\u2212", "-").replace("\u2013", "-").strip()
+                try:
+                    parsed_ci.append(float(v_str))
+                except (ValueError, TypeError):
+                    parsed_ci.append(None)
+            else:
                 parsed_ci.append(None)
         if any(v is not None for v in parsed_ci):
             lit["ci"] = parsed_ci
@@ -508,48 +514,57 @@ def auto_fix(edge_json: Dict) -> Dict:
 
     theta = lit.get("theta_hat")
     if isinstance(theta, str):
+        # Robust parsing: handle Unicode minus signs
+        theta_str = str(theta).replace("\u2212", "-").replace("\u2013", "-").strip()
         try:
-            lit["theta_hat"] = float(theta)
+            lit["theta_hat"] = float(theta_str)
         except (ValueError, TypeError):
             lit["theta_hat"] = None
 
     mu = edge_json.get("epsilon", {}).get("mu", {}).get("core", {})
     if mu.get("scale") == "log" and mu.get("family") == "ratio":
         theta = lit.get("theta_hat")
-        # If theta_hat looks like a raw ratio (positive, not already log-transformed)
+        # Deterministic log transform: if mu says log scale and theta is
+        # a raw ratio (positive value that is NOT already on log scale),
+        # convert it. We detect "raw ratio" by checking if the value is
+        # positive — log-scale values are centered around 0 and can be negative,
+        # while raw ratios (HR/OR/RR) are always positive.
         if theta is not None and isinstance(theta, (int, float)) and theta > 0:
-            # Heuristic: if theta > 0.05 and exp(theta) would be unreasonably large,
-            # it's probably already on ratio scale and needs log transform
-            if theta > 0.05 and abs(theta) < 50:
-                # Check if it looks more like a ratio than a log value
-                # Ratios are typically 0.1-20, log values are typically -3 to 3
-                if theta > 3 or (0.1 < theta < 0.95):
-                    # Likely a raw ratio, convert to log
-                    try:
-                        lit["theta_hat"] = round(math.log(theta), 6)
-                    except (ValueError, ZeroDivisionError):
-                        pass
+            # A positive theta on log scale would mean exp(theta) > 1.
+            # But raw ratios like 0.84 are also positive.
+            # Key insight: if theta is between 0.01 and 50, it's almost
+            # certainly a raw ratio. True log-scale values > 3 (i.e., ratio > 20)
+            # are extremely rare in epidemiology.
+            # Check: is exp(theta) a plausible ratio? If theta=0.84, exp(0.84)=2.32 — plausible.
+            # But theta=-0.17 is already on log scale (negative, no ambiguity).
+            # So for positive theta: always convert if < 50 (safe upper bound).
+            if theta < 50:
+                try:
+                    lit["theta_hat"] = round(math.log(theta), 6)
+                except (ValueError, ZeroDivisionError):
+                    pass
 
     if mu.get("scale") == "log" and mu.get("family") == "ratio":
         ci = lit.get("ci")
         if ci and isinstance(ci, list) and len(ci) == 2:
-            # If CI values look like raw ratios (both positive, typical ratio range)
-            if (
-                ci[0] is not None
-                and ci[1] is not None
-                and isinstance(ci[0], (int, float))
-                and isinstance(ci[1], (int, float))
-            ):
-                if ci[0] > 0 and ci[1] > 0 and ci[0] < 50 and ci[1] < 50:
-                    # If both are in ratio range (0.01-50) and not already log
-                    if ci[1] > 0.05:  # upper bound should be > 0.05 for ratio
+            new_ci = [None, None]
+            needs_transform = False
+            for i, bound in enumerate(ci):
+                if bound is not None and isinstance(bound, (int, float)):
+                    # Same logic: positive values on ratio scale need log transform
+                    if bound > 0:
+                        needs_transform = True
                         try:
-                            lit["ci"] = [
-                                round(math.log(ci[0]), 6) if ci[0] > 0 else None,
-                                round(math.log(ci[1]), 6) if ci[1] > 0 else None,
-                            ]
-                        except (TypeError, ValueError, ZeroDivisionError):
-                            pass
+                            new_ci[i] = round(math.log(bound), 6)
+                        except (ValueError, ZeroDivisionError):
+                            new_ci[i] = None
+                    else:
+                        # Already on log scale (negative or zero)
+                        new_ci[i] = bound
+                else:
+                    new_ci[i] = bound
+            if needs_transform:
+                lit["ci"] = new_ci
 
     mu_type = mu.get("type", "")
     if mu_type in ("HR", "OR", "RR") and mu.get("scale") == "log":

@@ -11,6 +11,22 @@
 - **Y** = 结局 / 因变量
 - 论文报告了该关系的**统计量**（HR、OR、β、均值差、p值、CI等）
 
+**⚠️ X 命名硬规则：X 必须编码对照/参照组（除连续型 X 外）**
+
+当 X 是分类变量或干预（几乎所有 RCT 和分层分析的情况），X 字符串**必须**显式包含对照组：
+
+- ✅ `"4-h TRF vs Control"`
+- ✅ `"Sleep duration ≥10 h/day (vs 7 h/day reference)"`
+- ✅ `"Healthy Lifestyle Score 4 vs 0"`
+- ✅ `"10-h TRE vs Standard of Care"`
+- ❌ `"4-h Time-Restricted Feeding"` （缺对照组）
+- ❌ `"Healthy Lifestyle Score"` （缺对比层次）
+- ❌ `"10-h TRE"` （缺对照组）
+
+连续型 X（如 `"Sleep duration (hours)"`）可不加对照，但如果论文报告的是**分层比较**（例：≥10h vs 7h），则必须写出层次。
+
+同时，`C` 字段仍然必须填写对照组名（可以与 X 里的 "vs ..." 重复，保留两处是为下游双重校验）。
+
 ## 枚举规则（严格遵循）
 
 ### 规则 1: 逐行扫描每个表格
@@ -36,17 +52,30 @@
 - 多个暴露组（例如，4h-TRF vs 对照组, 6h-TRF vs 对照组）→ 单独的边
 - 多个暴露变量（例如，睡眠时长和失眠）→ 单独的边
 
-### 规则 4b: RCT/干预研究——优先提取组间差异（重要！）
+### 规则 4b: RCT/干预研究——优先组间差异，但不要漏掉其他合法终点
 
-对于干预研究（RCT、临床试验），**必须**优先提取**组间差异**（between-group difference: 干预组 vs 对照组），而非组内前后变化（within-group pre-post change）。
+对于干预研究（RCT、临床试验），**优先**提取**组间差异**（between-group difference）。但**不要为了遵守这条规则而漏掉合法终点**——先提取所有终点，再判断每个终点的最佳形式。
 
-- 如果论文同时报告了"干预组前后变化"和"干预组 vs 对照组差异"，**只提取组间差异**
-- 典型的组间差异来源：调整后的组间均值差（adjusted mean difference）、组间差值的95%CI、ANCOVA模型的组间效应
-- `C`（对照组）字段必须填写实际对照组名称（如 "control group"、"placebo"），**不能**填 "baseline" 或留空
-- 如果论文只报告了各组的前后变化量而没有直接报告组间差异，在 `notes` 中说明 "only within-group changes reported, no between-group difference available"
+- 如果论文对**同一 Y** 同时报告了"干预组前后变化"和"干预组 vs 对照组差异"，**只提取组间差异**（避免冗余）。
+- 但如果论文只对某个 Y 报告了**组内前后变化**或只报告了**各组的均值±SD（无差异估计）**，这仍然是该 Y 的合法 edge——**必须保留**，标注 `priority: secondary` 并在 `notes` 里说明 "only within-group changes reported" 或 "group means only"。
+- 不要因为次要终点效应小、CI 跨 0 或 p>0.05 就丢弃——无统计显著性的终点也必须保留（规则 5）。
+- 典型组间差异来源：调整后的组间均值差（adjusted mean difference）、组间差值 95% CI、ANCOVA 模型的组间效应
+- `C`（对照组）字段必须填实际对照组名（"control group"、"placebo"），**不能**填 "baseline" 或留空
 
-**❌ 错误**: X="4h TRF", C="baseline", estimate=-3.2（这是组内前后变化）
-**✅ 正确**: X="4h TRF", C="control group", estimate=-3.3（这是组间差异）
+**❌ 错误**: X="4h TRF", C="baseline", estimate=-3.2（这是组内前后变化）→ 应改为组间差异
+**✅ 正确**: X="4h TRF vs control group", C="control group", estimate=-3.3（组间差异）
+**✅ 也正确**（fallback）: X="4h TRF vs baseline", C="baseline", priority="secondary", notes="only within-group changes reported" （当组间差异不可得时）
+
+### 规则 4c: 同 (X, Y) 必须通过时间点或亚组区分（重要！）
+
+如果论文对**同一 (X, Y) 对**报告了多个值（例如不同随访时间点、不同亚组、不同模型），每个值都是一个单独的 edge，**Y 字段必须包含区分符**：
+
+- ✅ `Y = "HbA1c (%) at week 8"` 和 `Y = "HbA1c (%) at week 12"`
+- ✅ `Y = "SBP (mmHg), males"` 和 `Y = "SBP (mmHg), females"`（亚组分层）
+- ✅ `Y = "BMI change (kg/m²), adjusted"` 和 `Y = "BMI change (kg/m²), unadjusted"`（不同模型）
+- ❌ 三条 edge 都写 `Y = "HbA1c (%)"` 且 X 完全相同，这会导致下游去重误删。
+
+**原则**：如果去掉所有 subgroup/时间点/模型信息后，你发现同一论文有两个 edge 的 (X, Y, subgroup) 完全一样，就必须在 Y 或 subgroup 里加区分符。
 
 ### 规则 5: 必须包含无统计学显著性的结果
 
@@ -130,8 +159,27 @@
 为每个 edge 标注 `priority` 字段，用于后续筛选：
 
 - `"primary"` — 论文的主要结局（出现在摘要、研究目标、或 primary outcome 中）
-- `"secondary"` — 论文的次要结局（secondary outcome、safety endpoint）
-- `"exploratory"` — 亚组分析、敏感性分析、补充材料中的额外分析
+- `"secondary"` — 论文的次要结局（secondary outcome、safety endpoint、生物标志物、次要终点）
+- `"exploratory"` — **仅用于**下列情形：post-hoc 亚组分析、敏感性分析、补充材料的额外分析、或明显的 "exploratory" 标注
+
+**默认规则**：如果不确定是 secondary 还是 exploratory，**一律填 "secondary"**。下游管道会根据 priority 过滤，错误地填 "exploratory" 会导致合法终点被丢弃。次要终点（LDL、甘油三酯、CRP、BMI、日卡路里摄入等）**不是** exploratory，应填 "secondary"。
+
+### 规则 9: E3（重复测量 / 前后变化）识别
+
+`statistical_method` 如果是下列情形，对应的 equation_type 应为 **E3**（而非 E1）：
+- 论文报告 baseline + follow-up 数据并用 **time × group interaction** 检验干预效应
+- 使用 LMM / GEE / ANCOVA change score 分析纵向数据
+- 报告 "change from baseline" 或 "Δ (Y)" 作为主要结果
+
+这种情况下 `statistical_method` 应是 `"LMM"` / `"GEE"` / `"ANCOVA"` 而非 `"linear"`。
+
+### 规则 10: n（样本量）必须是**当前 edge 对应的样本量**
+
+如果论文按亚组或 completer 分析报告效应值，`n` **不是**全样本量，而是该效应值实际计算时使用的样本量：
+
+- ❌ Rassy 论文 obesity 子组 HR 时填 n=438,583（全样本）
+- ✅ 该 HR 使用的 n=107,041（obesity 子组）
+- 定位方法：看 estimate 数值**旁边**的 n 或 events 计数，不要看 Methods 或 Figure 1 流程图里的总 n
 
 ## 输出之前，请你思考和自检
 
@@ -145,5 +193,9 @@
 8. 对于交互效应，是否避免了冗余的三重报告（规则7）？
 9. 是否通过阅读方法部分填写了`statistical_method`？
 10. 是否从模型描述或表注中填写了`adjustment_variables`？
-11. 对于RCT/干预研究，是否提取的是**组间差异**而非组内前后变化（规则4b）？
-12. 是否为每个 edge 标注了 `priority`（规则8）？
+11. 对于RCT/干预研究，是否**优先**组间差异（规则4b）？**同时**是否保留了只报告组内变化或 group means 的次要终点（规则4b）？
+12. 是否为每个 edge 标注了 `priority`（规则8），且次要终点用的是 "secondary"（不是 "exploratory"）？
+13. 同 (X, Y) 出现多次时，Y 或 subgroup 中是否包含时间点/亚组/模型区分符（规则 4c）？
+14. X 字段是否包含对照/参照组（"vs Control" / "vs 7h reference" 等）？（核心概念节）
+15. 若论文用 baseline + follow-up + time×group 交互，`statistical_method` 是否为 LMM/GEE/ANCOVA 而非 linear？（规则 9）
+16. `n` 是否为当前 edge 实际对应的样本量（亚组 n），而非全样本量？（规则 10）

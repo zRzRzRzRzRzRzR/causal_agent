@@ -63,6 +63,19 @@ Evidence type: {evidence_type}
 - `literature_estimate.model` — 根据论文的实际统计模型填写
 - `epsilon.mu.core`（family、type、scale）— 根据效应指标类型填写
 
+**⚠️ E3 识别规则**：如果论文包含下列任一特征，`equation_type` 应为 **E3**（而非 E1）：
+- 报告 baseline + follow-up 数据，使用 **time × group interaction** 检验干预效应
+- 使用 LMM / GEE / 混合效应模型分析纵向/重复测量数据
+- 报告 "change from baseline" / "Δ Y" 作为主要结果，并用 ANCOVA 调整基线
+
+对应的 `model_type` / `literature_estimate.model` 应填 `"LMM"` / `"GEE"` / `"ANCOVA"`，**不要**填 `"linear"`。`equation_formula` 必须包含 `time × group` 交互项（例如 `β_XT·I(TRE_i)·t`）。
+
+**⚠️ E1 vs E3 判断**：
+- E1（单一时点回归/对比）：只在单一时点比较，或仅报告最终值
+- E3（纵向/重复测量）：显式建模时间或使用 change score + 基线协变量
+
+RCT 通常是 **E3**（而非 E1），除非只报告 endpoint 单时点比较。
+
 ---
 
 ## 你需要填充的字段（将精力集中在这里）
@@ -130,7 +143,8 @@ Z: ["Age", "Sex", "TDI"]  ← 错！公式中没有 γ^T·Z 项，Z 必须为 []
 
 ### 4. epsilon字段（来自论文）
 - `epsilon.Pi`: 人群标签 — `"adult_general"`（成人一般人群）、`"cvd"`（心血管疾病）、`"diabetes"`（糖尿病）、`"oncology"`（肿瘤）、`"pediatric"`（儿科）
-- `epsilon.iota.core.name`: 暴露变量的**简洁名称**（例如 `"Healthy Lifestyle Score"` 而非 `"Healthy Lifestyle Score 4 (Never smoking, Physically active, ...)"）`。必须匹配rho.X
+- `epsilon.iota.core.name`: 暴露变量的**简洁名称**（例如 `"Healthy Lifestyle Score"` 而非 `"Healthy Lifestyle Score 4 (Never smoking, Physically active, ...)"）`。必须匹配rho.X。
+  - **注意**：简洁名称指"变量本体"；对照/层次信息不应出现在 iota.core.name（那是 rho 和 equation_formula_reported.X 的职责）。例如 X 原始是 `"Healthy Lifestyle Score 4 vs 0"`，iota.core.name 填 `"Healthy Lifestyle Score"`。
 - `epsilon.o.name`: 结局变量名称（必须匹配rho.Y）
 - `epsilon.o.type`: `"binary"`（二分类）、`"continuous"`（连续）或`"survival"`（生存）
 - `epsilon.tau`: 时间坐标（index、horizon，ISO 8601格式如"P5Y"、"P10Y"）
@@ -140,7 +154,7 @@ Z: ["Age", "Sex", "TDI"]  ← 错！公式中没有 γ^T·Z 项，Z 必须为 []
 - `epsilon.rho`: 变量角色 — X（使用简洁名称，与iota.core.name一致）、Y、Z（调整变量列表）。**默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。不要把 baseline table 中的 Age/Sex/BMI/TDI 当成调整变量。IV（仅MR，否则为null）
 
 ### 5. literature_estimate（剩余字段）
-- `n`: 总样本量
+- `n`: 与当前效应值对应的样本量（若 edge 是亚组效应则为**亚组样本量**，不是全队列；若是 completer 分析则为 completer 数）。定位方法：找到 estimate 数值**旁边**的 n/events 计数，不是 Methods 或流程图的总 n。
 - `design`: `"RCT"` / `"cohort"`（队列）/ `"cross-sectional"`（横断面）/ `"case-control"`（病例对照）/ `"meta-analysis"`（荟萃分析）/ `"MR"`
 - `grade`: `"A"`（高质量RCT）、`"B"`（中等）、`"C"`（低质量/未调整）
 - `adjustment_set`: 调整变量列表（必须匹配rho.Z）。**默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。

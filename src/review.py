@@ -115,12 +115,20 @@ def _extract_role_queries(edge: Dict) -> Dict[str, str]:
 def filter_edges_by_priority(
     edges: List[Dict],
     keep: Tuple[str, ...] = ("primary", "secondary"),
+    max_drop_fraction: float = 0.30,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Filter edges based on the 'priority' field set during Step 1.
     Returns (kept_edges, removed_edges).
 
-    If no edges have a priority field (backward compat), all are kept.
+    Guards against over-filtering:
+    - If no edges have a priority field (backward compat), all are kept.
+    - If dropping exploratory would remove more than ``max_drop_fraction``
+      (default 30%) of edges, we treat this as a labeling problem (the LLM
+      over-tagged legitimate secondary endpoints as exploratory) and keep
+      everything. This prevents the NEW framework's over-filtering
+      regression seen on RCT papers like Manoogian (2022).
+    - If filtering would remove ALL edges, keep everything.
     """
     # Check if any edges have priority field
     has_priority = any(e.get("priority") for e in edges)
@@ -138,6 +146,11 @@ def filter_edges_by_priority(
 
     # Safety: if filtering would remove ALL edges, keep everything
     if not kept:
+        return edges, []
+
+    # Guard against aggressive over-tagging of exploratory
+    total = len(edges)
+    if total > 0 and len(removed) / total > max_drop_fraction:
         return edges, []
 
     return kept, removed

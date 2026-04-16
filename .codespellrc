@@ -1,0 +1,3 @@
+[codespell]
+ignore-words-list = tre,trf,nd,te,ot,hte,ba,fo,te,nin,thru
+skip = ./venv,./.git,./cache_ocr,./pdfs,./gt,./reference,./templates,./result_test,./result_test_0416,./result_test_0416_mm,*.json,*.jsonc

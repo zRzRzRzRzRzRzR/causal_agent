@@ -1070,6 +1070,95 @@ def _final_schema_enforcement(edge: Dict) -> None:
                 except ValueError:
                     pass  # Non-numeric string like "NS", leave as-is
 
+    # 9. Field-consistency normalizer (Improvement #4).
+    # Sync effect_measure / link_function when they fall out of agreement.
+    # We don't override the LLM's core choices — only fix obvious mismatches.
+    if isinstance(efr, dict):
+        _em = efr.get("effect_measure")
+        _mt = efr.get("model_type")
+        _lf = efr.get("link_function")
+        if _em in ("HR", "OR", "RR") and _lf not in ("log", "logit"):
+            efr["link_function"] = "log" if _em in ("HR", "RR") else "logit"
+        if _em in ("MD", "BETA", "SMD") and _lf != "identity":
+            efr["link_function"] = "identity"
+        # t-test / ANOVA / Fisher never have covariates — force Z empty.
+        if _mt and str(_mt).lower() in (
+            "t-test",
+            "anova",
+            "fisher",
+            "chi-square",
+            "mann-whitney",
+            "wilcoxon",
+        ):
+            efr["Z"] = []
+            lit["adjustment_set"] = []
+            rho["Z"] = []
+            if isinstance(hm.get("Z"), list):
+                hm["Z"] = []
+
+    # 10. E3 sanity: Cox is never E3 (Improvement #4/#6).
+    _model_type = lit.get("model") or (
+        efr.get("model_type") if isinstance(efr, dict) else None
+    )
+    if (
+        eq_type == "E3"
+        and isinstance(_model_type, str)
+        and _model_type.lower() == "cox"
+    ):
+        edge["equation_type"] = "E2"
+        lit["equation_type"] = "E2"
+
+
+def _is_edge_content_empty(edge: Dict) -> bool:
+    """
+    Return True if the edge has no usable quantitative content AND is not
+    explicitly flagged as qualitative. Used by filter_low_quality_edges.
+    """
+    efr = edge.get("equation_formula_reported", {}) or {}
+    lit = edge.get("literature_estimate", {}) or {}
+
+    def _has_any_num(val):
+        if val is None:
+            return False
+        if isinstance(val, list):
+            return any(v is not None for v in val)
+        return True
+
+    if (
+        _has_any_num(efr.get("reported_effect_value"))
+        or _has_any_num(efr.get("reported_ci", [None, None]))
+        or _has_any_num(lit.get("theta_hat"))
+        or _has_any_num(lit.get("ci", [None, None]))
+        or _has_any_num(lit.get("p_value"))
+    ):
+        return False
+
+    # Preserve explicitly-qualitative edges (paper reports a finding but
+    # no numeric estimate is available).
+    if edge.get("has_numeric_estimate") is False:
+        return False
+
+    return True
+
+
+def filter_low_quality_edges(edges: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Drop edges that carry no numeric effect, CI, theta_hat, or p-value
+    unless has_numeric_estimate is explicitly False. Safety: if every
+    edge would be dropped, keep everything (same rule as
+    filter_edges_by_priority).
+    """
+    kept: List[Dict] = []
+    dropped: List[Dict] = []
+    for e in edges:
+        if _is_edge_content_empty(e):
+            dropped.append(e)
+        else:
+            kept.append(e)
+    if not kept:
+        return edges, []
+    return kept, dropped
+
 
 # Step 3: Review (with robust JSON parsing)
 
@@ -1652,6 +1741,16 @@ class EdgeExtractionPipeline:
         for edge in all_filled_edges:
             edge.pop("_validation", None)
             _final_schema_enforcement(edge)
+
+        # Drop edges that carry no numeric content after cleanup
+        kept_edges, dropped_empty = filter_low_quality_edges(all_filled_edges)
+        if dropped_empty:
+            print(
+                f"[Pipeline] Dropped {len(dropped_empty)} edges with no numeric "
+                f"content (effect value / CI / theta_hat / p_value all null)",
+                file=sys.stderr,
+            )
+        all_filled_edges = kept_edges
 
         if pdf_dir:
             output_file = pdf_dir / "edges.json"

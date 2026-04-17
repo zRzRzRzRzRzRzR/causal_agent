@@ -52,6 +52,38 @@
 - 多个暴露组（例如，4h-TRF vs 对照组, 6h-TRF vs 对照组）→ 单独的边
 - 多个暴露变量（例如，睡眠时长和失眠）→ 单独的边
 
+### 规则 4a: 分类 X 的多层次 vs 单一参照 —— 每个非参照层次一个 edge（**关键！**）
+
+这是观察性研究最常见的结构，也是 LLM 最容易漏掉的情形。当一个**分类暴露**（categorical exposure）有多个层次，每个层次都与同一个参照组比较时：
+
+**规则：有 N 个非参照层次 → 产生 N 个独立 edges**，每个 edge 的 X 字段必须写明该层次 + 参照层次。
+
+**示例 A（Wright 2025 风格，睡眠时长五分类）**：
+- 分类：Sleep duration = {≤5, 5–6, 7 (ref), 8–9, ≥10} h/day
+- 报告：论文给出 ≤5 / 5–6 / 8–9 / ≥10 各自相对于 7h 的 HR
+- ✅ **必须产生 4 个 edges**：
+  - `X = "Sleep duration ≤5 h/day (vs 7 h/day reference)"` → Y=Incident T2D, HR=1.20
+  - `X = "Sleep duration 5–6 h/day (vs 7 h/day reference)"` → HR=?
+  - `X = "Sleep duration 8–9 h/day (vs 7 h/day reference)"` → HR=?
+  - `X = "Sleep duration ≥10 h/day (vs 7 h/day reference)"` → HR=1.28
+- ❌ **错误做法**：只产生 1 条 `X = "Sleep duration"` → HR=... 这是常见错误，会丢失 3 条 GT edges。
+
+**示例 B（Rassy 风格，lifestyle score 分类）**：
+- 分类：Healthy Lifestyle Score = {0 (ref), 1, 2, 3, 4}
+- 报告：每个 Score 级别 vs Score=0 的 HR
+- ✅ 产生 4 个 edges（分数 1/2/3/4 vs 0），每个对每个疾病结局再复制
+
+**示例 C（失眠频率三分类）**：
+- 分类：Insomnia symptoms = {never/rarely (ref), sometimes, usually}
+- 报告：sometimes / usually 各自 vs never/rarely
+- ✅ 产生 **2 个 edges**（sometimes 和 usually 各自一条）
+- 如果论文对同一分类在多个模型（如 model 1 / model 2）下报告，**还要乘以模型数**——见规则 4c 的"模型区分符"
+
+**强制自检（输出前必问）**：
+- 我提取的每个 X 是否对应论文里 Table/Figure 中的**一行**（一个具体层次），而不是整个变量名？
+- 如果论文 Table 里 Sleep duration 有 4 个非参照行，我是不是产生了 4 个独立 edges？
+- 如果答案"否"，**回去补齐**——这是最常见的漏召回来源。
+
 ### 规则 4b: RCT/干预研究——优先组间差异，但不要漏掉其他合法终点
 
 对于干预研究（RCT、临床试验），**优先**提取**组间差异**（between-group difference）。但**不要为了遵守这条规则而漏掉合法终点**——先提取所有终点，再判断每个终点的最佳形式。
@@ -76,6 +108,25 @@
 - ❌ 三条 edge 都写 `Y = "HbA1c (%)"` 且 X 完全相同，这会导致下游去重误删。
 
 **原则**：如果去掉所有 subgroup/时间点/模型信息后，你发现同一论文有两个 edge 的 (X, Y, subgroup) 完全一样，就必须在 Y 或 subgroup 里加区分符。
+
+### 规则 4d: Y 字段必须包含测量形式 / 时间窗 / 单位（重要！）
+
+Y 不是一个变量名，而是"论文报告的那个具体统计量对应的那个结局"。Y 字段必须完整到能唯一定位论文里的**那一行数据**。
+
+**强制包含的信息（能写就写全）**：
+- **测量形式**：是 "change"、"absolute value"、"rate"、"incidence"、"odds"？
+  - ✅ `Y = "HbA1c change (V3-V1, %)"`（RCT 报告变化量）
+  - ✅ `Y = "Incident type 2 diabetes"`（队列研究报告发病）
+  - ❌ `Y = "HbA1c"`（不知道是变化还是绝对值）
+- **时间点/随访窗**：week X / visit X / at baseline / follow-up 等
+  - ✅ `Y = "Weight (kg) at week 12"`
+  - ❌ `Y = "Weight (kg)"`
+- **单位**：`(mg/dL)`、`(mmHg)`、`(%)`、`(kg/m²)` 等
+- **亚组/条件**（如果适用）
+
+**RCT 专项提醒**：RCT 报告"组间差异 (V3−V1 或 change from baseline)"是最常见的 Y 形式。如果论文 Table 的列标题是"Change from baseline"、"V3 − V1"、"Δ"、"week 12 − baseline"，你的 Y **必须**把这个写进去（如 `"LDL change (V3-V1, mg/dL)"`），否则后续匹配会失败。
+
+**自检**：从你填的 Y 字段，能不能判断出它来自论文的哪一行/哪一列？如果不能，补单位/时间/测量形式。
 
 ### 规则 5: 必须包含无统计学显著性的结果
 
@@ -199,3 +250,5 @@
 14. X 字段是否包含对照/参照组（"vs Control" / "vs 7h reference" 等）？（核心概念节）
 15. 若论文用 baseline + follow-up + time×group 交互，`statistical_method` 是否为 LMM/GEE/ANCOVA 而非 linear？（规则 9）
 16. `n` 是否为当前 edge 实际对应的样本量（亚组 n），而非全样本量？（规则 10）
+17. **分类暴露的每个非参照层次是否都生成了独立 edge**（规则 4a）？例如 sleep duration 五分类（≤5 / 5–6 / 7 ref / 8–9 / ≥10）应有 4 个 edges，不是 1 个。**这是最常见的漏召回来源。**
+18. Y 字段是否包含测量形式（change / incidence / absolute）+ 时间窗 + 单位（规则 4d）？例如 RCT 的 Y 是 `"HbA1c change (V3-V1, %)"` 而非 `"HbA1c (%)"`。

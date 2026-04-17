@@ -454,6 +454,7 @@ def step2_fill_one_edge(
     template_path: Optional[str] = None,
     hpp_dict_path: Optional[str] = None,
     gt_fewshot_context: Optional[str] = None,  # NEW: GT few-shot examples
+    enable_hard_match: bool = False,
 ) -> Dict:
     """
     Fill a single edge into the HPP template.
@@ -542,28 +543,28 @@ def step2_fill_one_edge(
     # Apply pre-validated overrides (deterministic corrections)
     filled = _apply_prevalidation_overrides(filled, preval)
 
-    anchor_set = extract_anchor_numbers(pdf_text)
-    # Default: mark untraceable values rather than nullify (scale-safe).
-    # Pipeline.strict_hard_match=True re-enables the old nullify behavior.
-    filled = post_step2_hard_match(filled, anchor_set, pdf_text, strict=False)
+    # Hard-match numeric tracing is opt-in (off by default for scale safety).
+    if enable_hard_match:
+        anchor_set = extract_anchor_numbers(pdf_text)
+        filled = post_step2_hard_match(filled, anchor_set, pdf_text, strict=False)
 
-    hm = filled.get("_hard_match", {})
-    if hm.get("marked"):
-        print(
-            f"  [Hard-Match] Marked {len(hm['marked'])} values as untraceable "
-            f"(not nullified — see _hard_match.marked)",
-            file=sys.stderr,
-        )
-        for change in hm["marked"]:
-            print(f"    {change}", file=sys.stderr)
-    if hm.get("nullified"):
-        print(
-            f"  [Hard-Match] Nullified {len(hm['nullified'])} "
-            f"values not found in paper",
-            file=sys.stderr,
-        )
-        for change in hm["nullified"]:
-            print(f"    {change}", file=sys.stderr)
+        hm = filled.get("_hard_match", {})
+        if hm.get("marked"):
+            print(
+                f"  [Hard-Match] Marked {len(hm['marked'])} values as untraceable "
+                f"(not nullified — see _hard_match.marked)",
+                file=sys.stderr,
+            )
+            for change in hm["marked"]:
+                print(f"    {change}", file=sys.stderr)
+        if hm.get("nullified"):
+            print(
+                f"  [Hard-Match] Nullified {len(hm['nullified'])} "
+                f"values not found in paper",
+                file=sys.stderr,
+            )
+            for change in hm["nullified"]:
+                print(f"    {change}", file=sys.stderr)
 
     # Run semantic validation (for reporting only, no retry)
     semantic_issues = validate_semantics(filled, evidence_type=evidence_type)
@@ -601,7 +602,8 @@ def step2_5_recover_nulls(
     client_strong: GLMClient,
     pdf_text: str,
     edges: List[Dict],
-    anchor_set: Set[str],
+    anchor_set: Optional[Set[str]] = None,
+    enable_hard_match: bool = False,
 ) -> List[Dict]:
     """
     Step 2.5: Use a stronger model to recover null effect values.
@@ -611,6 +613,11 @@ def step2_5_recover_nulls(
     2. theta_hat is null
     3. reported_ci exists but reported_effect_value is null (logical contradiction)
     4. All of CI, effect_value, p_value are null (entire edge is empty)
+
+    When enable_hard_match=True, recovered values are gated by the
+    anchor_set (trace-to-paper check). Otherwise recovered values are
+    accepted as-is — at scale this avoids false rejections from OCR
+    or formatting drift.
     """
     for i, edge in enumerate(edges):
         efr = edge.get("equation_formula_reported", {})
@@ -669,7 +676,14 @@ def step2_5_recover_nulls(
 
         try:
             result = client_strong.call_json(prompt, max_tokens=4096)
-            _apply_recovery_result(edge, result, anchor_set, pdf_text, mu)
+            _apply_recovery_result(
+                edge,
+                result,
+                anchor_set,
+                pdf_text,
+                mu,
+                enable_hard_match=enable_hard_match,
+            )
         except Exception as e:
             print(
                 f"    [Recovery] Failed: {e}",
@@ -682,11 +696,18 @@ def step2_5_recover_nulls(
 def _apply_recovery_result(
     edge: Dict,
     result: Dict,
-    anchor_set: Set[str],
+    anchor_set: Optional[Set[str]],
     pdf_text: str,
     mu: Dict,
+    enable_hard_match: bool = False,
 ) -> None:
-    """Apply recovery result to edge, still validated by hard-match."""
+    """
+    Apply recovery result to edge.
+
+    When enable_hard_match=True and anchor_set is provided, recovered
+    values are gated by hard_match_value. Otherwise accept as-is —
+    at scale, OCR/rounding drift produces false rejections.
+    """
     efr = edge.get("equation_formula_reported", {})
     lit = edge.get("literature_estimate", {})
 
@@ -695,9 +716,16 @@ def _apply_recovery_result(
     new_p = result.get("p_value")
     recovered = []
 
-    # Recover reported_effect_value (must pass hard-match)
+    def _accept(v) -> bool:
+        if v is None:
+            return False
+        if enable_hard_match and anchor_set is not None:
+            return hard_match_value(v, anchor_set, pdf_text)
+        return True
+
+    # Recover reported_effect_value
     if new_val is not None and efr.get("reported_effect_value") is None:
-        if hard_match_value(new_val, anchor_set, pdf_text):
+        if _accept(new_val):
             efr["reported_effect_value"] = new_val
             recovered.append(f"reported_effect_value={new_val}")
             # Sync theta_hat
@@ -722,7 +750,7 @@ def _apply_recovery_result(
         if curr_ci in (None, [None, None]):
             valid_ci = []
             for b in new_ci:
-                if b is not None and hard_match_value(b, anchor_set, pdf_text):
+                if _accept(b):
                     valid_ci.append(b)
                 else:
                     valid_ci.append(None)
@@ -1377,6 +1405,11 @@ class EdgeExtractionPipeline:
         reference_dir: Optional[str] = None,
         # Strong model for null recovery (Step 2.5)
         strong_client: Optional[GLMClient] = None,
+        # Hard-match numeric tracing — off by default at scale since
+        # OCR hiccups and rounding produce false "not traceable" hits
+        # that would mark or discard valid extractions. Turn on for
+        # small, clean corpora where you want the extra safety.
+        enable_hard_match: bool = False,
     ):
         self.client = client
         self.strong_client = strong_client
@@ -1404,6 +1437,9 @@ class EdgeExtractionPipeline:
         self.enable_step4 = enable_step4
         self.enable_step4_llm = enable_step4_llm
         self.step4_max_edges_per_call = step4_max_edges_per_call
+
+        # Hard-match flag (off by default; see constructor docstring above)
+        self.enable_hard_match = enable_hard_match
         if error_patterns_path:
             self.error_patterns_path = error_patterns_path
         elif _DEFAULT_ERROR_PATTERNS.exists():
@@ -1631,6 +1667,7 @@ class EdgeExtractionPipeline:
                     template_path=self.template_path,
                     hpp_dict_path=self.hpp_dict_path,
                     gt_fewshot_context=edge_gt_context,  # NEW
+                    enable_hard_match=self.enable_hard_match,
                 )
             except Exception as e:
                 print(
@@ -1674,7 +1711,10 @@ class EdgeExtractionPipeline:
 
         # -- Step 2.5: Strong Model Recovery for null values --
         if self.strong_client and all_filled_edges:
-            anchor_set = extract_anchor_numbers(pdf_text)
+            # anchor_set only needed when hard_match is enabled
+            anchor_set = (
+                extract_anchor_numbers(pdf_text) if self.enable_hard_match else None
+            )
             null_count_before = sum(
                 1
                 for e in all_filled_edges
@@ -1692,7 +1732,8 @@ class EdgeExtractionPipeline:
                     self.strong_client,
                     pdf_text,
                     all_filled_edges,
-                    anchor_set,
+                    anchor_set=anchor_set,
+                    enable_hard_match=self.enable_hard_match,
                 )
                 null_count_after = sum(
                     1

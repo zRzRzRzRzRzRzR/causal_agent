@@ -342,15 +342,31 @@ def post_step2_hard_match(
     filled: Dict,
     anchor_set: Set[str],
     pdf_text: str,
+    strict: bool = False,
 ) -> Dict:
     """
     After Step 2 LLM fills the template, verify all numeric values
-    against the paper's anchor numbers. Nullify any that can't be traced.
+    against the paper's anchor numbers.
 
-    This is the CRITICAL fix — it prevents hallucinated numbers
-    from surviving into the final output.
+    Behavior:
+    - strict=False (default): MARK untraceable values in
+      filled["_hard_match"]["marked"] but leave the values intact.
+      Safer at scale: OCR hiccups, rounding, or unusual number
+      formatting will produce false "not traceable" hits, and
+      nullifying them would discard real extractions.
+    - strict=True: NULLIFY untraceable values. Use this only when you
+      have high confidence the anchor_set captures the paper's full
+      numeric surface (e.g., well-OCR'd clean PDFs, small corpora).
     """
-    changes = []
+    marked = []
+    nullified = []
+
+    def _record(detail: str, clear_fn):
+        if strict:
+            clear_fn()
+            nullified.append(detail)
+        else:
+            marked.append(detail)
 
     efr = filled.get("equation_formula_reported", {})
     lit = filled.get("literature_estimate", {})
@@ -359,58 +375,67 @@ def post_step2_hard_match(
     # Check reported_effect_value
     rev = efr.get("reported_effect_value")
     if rev is not None and not hard_match_value(rev, anchor_set, pdf_text):
-        changes.append(f"reported_effect_value={rev} -> null (not in paper)")
-        efr["reported_effect_value"] = None
+        _record(
+            f"reported_effect_value={rev} (not traceable in paper)",
+            lambda: efr.__setitem__("reported_effect_value", None),
+        )
 
     # Check reported_ci
     rci = efr.get("reported_ci", [])
     if isinstance(rci, list):
-        new_ci = []
-        for bound in rci:
+        new_ci = list(rci)
+        for idx, bound in enumerate(rci):
             if bound is not None and not hard_match_value(bound, anchor_set, pdf_text):
-                changes.append(f"reported_ci bound={bound} -> null")
-                new_ci.append(None)
-            else:
-                new_ci.append(bound)
-        efr["reported_ci"] = new_ci
+
+                def _clear(i=idx):
+                    new_ci[i] = None
+
+                _record(f"reported_ci[{idx}]={bound} (not traceable)", _clear)
+        if strict:
+            efr["reported_ci"] = new_ci
 
     # Check theta_hat (only for non-log scales, since log is derived)
     theta = lit.get("theta_hat")
     if theta is not None and mu.get("scale") != "log":
         if not hard_match_value(theta, anchor_set, pdf_text):
-            changes.append(
-                f"theta_hat={theta} -> null (difference scale, not in paper)"
+            _record(
+                f"theta_hat={theta} (difference scale, not traceable)",
+                lambda: lit.__setitem__("theta_hat", None),
             )
-            lit["theta_hat"] = None
 
     # For log scale: verify the original-scale value exists
     if theta is not None and mu.get("scale") == "log":
         try:
             original = math.exp(theta)
             if not hard_match_value(original, anchor_set, pdf_text):
-                changes.append(
-                    f"theta_hat={theta} (exp={original:.4f}) -> null "
-                    f"(original scale not in paper)"
+                _record(
+                    f"theta_hat={theta} (exp={original:.4f}) original scale "
+                    f"not traceable",
+                    lambda: lit.__setitem__("theta_hat", None),
                 )
-                lit["theta_hat"] = None
         except (OverflowError, ValueError):
             pass
 
     # Check literature_estimate.ci on non-log scale
     lit_ci = lit.get("ci", [])
     if isinstance(lit_ci, list) and mu.get("scale") != "log":
-        new_ci = []
-        for bound in lit_ci:
+        new_ci = list(lit_ci)
+        for idx, bound in enumerate(lit_ci):
             if bound is not None and not hard_match_value(bound, anchor_set, pdf_text):
-                changes.append(f"lit ci bound={bound} -> null")
-                new_ci.append(None)
-            else:
-                new_ci.append(bound)
-        lit["ci"] = new_ci
 
-    if changes:
-        # Store changes in internal metadata for logging
-        filled.setdefault("_hard_match", {})["nullified"] = changes
+                def _clear(i=idx):
+                    new_ci[i] = None
+
+                _record(f"lit.ci[{idx}]={bound} (not traceable)", _clear)
+        if strict:
+            lit["ci"] = new_ci
+
+    if marked or nullified:
+        filled.setdefault("_hard_match", {})
+        if marked:
+            filled["_hard_match"]["marked"] = marked
+        if nullified:
+            filled["_hard_match"]["nullified"] = nullified
 
     return filled
 
@@ -518,15 +543,26 @@ def step2_fill_one_edge(
     filled = _apply_prevalidation_overrides(filled, preval)
 
     anchor_set = extract_anchor_numbers(pdf_text)
-    filled = post_step2_hard_match(filled, anchor_set, pdf_text)
+    # Default: mark untraceable values rather than nullify (scale-safe).
+    # Pipeline.strict_hard_match=True re-enables the old nullify behavior.
+    filled = post_step2_hard_match(filled, anchor_set, pdf_text, strict=False)
 
-    if filled.get("_hard_match", {}).get("nullified"):
+    hm = filled.get("_hard_match", {})
+    if hm.get("marked"):
         print(
-            f"  [Hard-Match] Nullified {len(filled['_hard_match']['nullified'])} "
+            f"  [Hard-Match] Marked {len(hm['marked'])} values as untraceable "
+            f"(not nullified — see _hard_match.marked)",
+            file=sys.stderr,
+        )
+        for change in hm["marked"]:
+            print(f"    {change}", file=sys.stderr)
+    if hm.get("nullified"):
+        print(
+            f"  [Hard-Match] Nullified {len(hm['nullified'])} "
             f"values not found in paper",
             file=sys.stderr,
         )
-        for change in filled["_hard_match"]["nullified"]:
+        for change in hm["nullified"]:
             print(f"    {change}", file=sys.stderr)
 
     # Run semantic validation (for reporting only, no retry)
@@ -1070,43 +1106,17 @@ def _final_schema_enforcement(edge: Dict) -> None:
                 except ValueError:
                     pass  # Non-numeric string like "NS", leave as-is
 
-    # 9. Field-consistency normalizer (Improvement #4).
-    # Sync effect_measure / link_function when they fall out of agreement.
-    # We don't override the LLM's core choices — only fix obvious mismatches.
+    # 9. Math-consistency normalizer: effect_measure ↔ link_function only.
+    # Low-risk: these are mathematical identities (HR lives on log scale,
+    # MD lives on identity). We do NOT override model_type / equation_type /
+    # Z decisions here — those are semantic choices for the LLM.
     if isinstance(efr, dict):
         _em = efr.get("effect_measure")
-        _mt = efr.get("model_type")
         _lf = efr.get("link_function")
         if _em in ("HR", "OR", "RR") and _lf not in ("log", "logit"):
             efr["link_function"] = "log" if _em in ("HR", "RR") else "logit"
         if _em in ("MD", "BETA", "SMD") and _lf != "identity":
             efr["link_function"] = "identity"
-        # t-test / ANOVA / Fisher never have covariates — force Z empty.
-        if _mt and str(_mt).lower() in (
-            "t-test",
-            "anova",
-            "fisher",
-            "chi-square",
-            "mann-whitney",
-            "wilcoxon",
-        ):
-            efr["Z"] = []
-            lit["adjustment_set"] = []
-            rho["Z"] = []
-            if isinstance(hm.get("Z"), list):
-                hm["Z"] = []
-
-    # 10. E3 sanity: Cox is never E3 (Improvement #4/#6).
-    _model_type = lit.get("model") or (
-        efr.get("model_type") if isinstance(efr, dict) else None
-    )
-    if (
-        eq_type == "E3"
-        and isinstance(_model_type, str)
-        and _model_type.lower() == "cox"
-    ):
-        edge["equation_type"] = "E2"
-        lit["equation_type"] = "E2"
 
 
 def _is_edge_content_empty(edge: Dict) -> bool:

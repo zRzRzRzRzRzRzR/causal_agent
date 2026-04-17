@@ -115,20 +115,19 @@ def _extract_role_queries(edge: Dict) -> Dict[str, str]:
 def filter_edges_by_priority(
     edges: List[Dict],
     keep: Tuple[str, ...] = ("primary", "secondary"),
-    max_drop_fraction: float = 0.30,
+    warn_drop_fraction: float = 0.30,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Filter edges based on the 'priority' field set during Step 1.
     Returns (kept_edges, removed_edges).
 
-    Guards against over-filtering:
+    Behavior:
     - If no edges have a priority field (backward compat), all are kept.
-    - If dropping exploratory would remove more than ``max_drop_fraction``
-      (default 30%) of edges, we treat this as a labeling problem (the LLM
-      over-tagged legitimate secondary endpoints as exploratory) and keep
-      everything. This prevents the NEW framework's over-filtering
-      regression seen on RCT papers like Manoogian (2022).
-    - If filtering would remove ALL edges, keep everything.
+    - If filtering would remove ALL edges, keep everything (safety net).
+    - If more than ``warn_drop_fraction`` (default 30%) would be dropped,
+      print a warning but still apply the filter. Callers who want
+      conservative behavior at scale should pre-filter priorities in
+      Step 1 instead of relying on a post-hoc magic threshold.
     """
     # Check if any edges have priority field
     has_priority = any(e.get("priority") for e in edges)
@@ -148,10 +147,18 @@ def filter_edges_by_priority(
     if not kept:
         return edges, []
 
-    # Guard against aggressive over-tagging of exploratory
+    # Warn when dropping a large fraction — may indicate LLM mis-tagging.
+    # At scale, warn rather than revert — the filter is meant to be real.
+    import sys as _sys
+
     total = len(edges)
-    if total > 0 and len(removed) / total > max_drop_fraction:
-        return edges, []
+    if total > 0 and len(removed) / total > warn_drop_fraction:
+        print(
+            f"  [priority filter] WARNING: dropping {len(removed)}/{total} "
+            f"({len(removed)/total:.0%}) edges as non-primary/secondary — "
+            f"check Step 1 priority tagging if this looks wrong.",
+            file=_sys.stderr,
+        )
 
     return kept, removed
 

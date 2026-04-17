@@ -143,15 +143,16 @@ Z: ["Age", "Sex", "TDI"]  ← 错！公式中没有 γ^T·Z 项，Z 必须为 []
 
 ### 4. epsilon字段（来自论文）
 - `epsilon.Pi`: 人群标签 — `"adult_general"`（成人一般人群）、`"cvd"`（心血管疾病）、`"diabetes"`（糖尿病）、`"oncology"`（肿瘤）、`"pediatric"`（儿科）
-- `epsilon.iota.core.name`: 暴露变量的**简洁名称**（例如 `"Healthy Lifestyle Score"` 而非 `"Healthy Lifestyle Score 4 (Never smoking, Physically active, ...)"）`。必须匹配rho.X。
-  - **注意**：简洁名称指"变量本体"；对照/层次信息不应出现在 iota.core.name（那是 rho 和 equation_formula_reported.X 的职责）。例如 X 原始是 `"Healthy Lifestyle Score 4 vs 0"`，iota.core.name 填 `"Healthy Lifestyle Score"`。
+- `epsilon.iota.core.name`: 暴露变量的**简洁名称**（例如 `"Healthy Lifestyle Score"` 而非 `"Healthy Lifestyle Score 4 (Never smoking, Physically active, ...)"）`。
+  - **仅对 `iota.core.name` 简化**：X 原始是 `"Healthy Lifestyle Score 4 vs 0"`，`iota.core.name` 填 `"Healthy Lifestyle Score"`。
+  - **⚠️ `equation_formula_reported.X` 和 `epsilon.rho.X` 必须原样保留 step1 的完整 X**，包括 "vs Control" / "vs reference" / 剂量/层次等所有信息。**不要**为了与 iota.core.name 一致就从 rho.X 或 efr.X 里剥掉对照信息。三者允许不一致：iota 是简洁名，rho.X 和 efr.X 是完整 X。
 - `epsilon.o.name`: 结局变量名称（必须匹配rho.Y）
 - `epsilon.o.type`: `"binary"`（二分类）、`"continuous"`（连续）或`"survival"`（生存）
 - `epsilon.tau`: 时间坐标（index、horizon，ISO 8601格式如"P5Y"、"P10Y"）
 - `epsilon.mu.core.type`: 对于比率度量（HR/OR/RR），**必须使用log前缀**：`"logHR"`, `"logOR"`, `"logRR"`（因为theta_hat在对数尺度上）。对于差异度量：`"MD"`, `"BETA"`, `"SMD"`
 - `epsilon.alpha.assumptions`: 选择适用的：`"exchangeability"`（可交换性）、`"positivity"`（正性）、`"consistency"`（一致性）。**不要**包含 `"proportional_hazards"`
 - `epsilon.alpha.status`: `"identified"`（已识别，RCT）/ `"partially_identified"`（部分识别，观察性）/ `"not_identified"`（未识别）
-- `epsilon.rho`: 变量角色 — X（使用简洁名称，与iota.core.name一致）、Y、Z（调整变量列表）。**默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。不要把 baseline table 中的 Age/Sex/BMI/TDI 当成调整变量。IV（仅MR，否则为null）
+- `epsilon.rho`: 变量角色 — X（**原样保留 step1 的完整 X**，包括 "vs Control" / "vs reference"；**不**使用 iota 简洁名）、Y（原样保留 step1 的完整 Y，包括 change/timepoint/unit）、Z（调整变量列表）。Z **默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。不要把 baseline table 中的 Age/Sex/BMI/TDI 当成调整变量。IV（仅MR，否则为null）
 
 ### 5. literature_estimate（剩余字段）
 - `n`: 与当前效应值对应的样本量（若 edge 是亚组效应则为**亚组样本量**，不是全队列；若是 completer 分析则为 completer 数）。定位方法：找到 estimate 数值**旁边**的 n/events 计数，不是 Methods 或流程图的总 n。
@@ -212,8 +213,8 @@ Z: ["Age", "Sex", "TDI"]  ← 错！公式中没有 γ^T·Z 项，Z 必须为 []
 
 | # | 检查    | 条件 |
 |---|-------|------|
-| C1 | X一致性  | `epsilon.iota.core.name` == `epsilon.rho.X` == `hpp_mapping.X.name` |
-| C2 | Y一致性  | `epsilon.o.name` == `epsilon.rho.Y` == `hpp_mapping.Y.name` |
+| C1 | X一致性  | `epsilon.rho.X` == `equation_formula_reported.X`（两者都原样保留 step1 的完整 X，含 "vs ..."）；`epsilon.iota.core.name` 和 `hpp_mapping.X.name` 是简洁名，与 rho.X **不必**相同 |
+| C2 | Y一致性  | `epsilon.rho.Y` == `equation_formula_reported.Y`（含 change/timepoint/unit）；`epsilon.o.name` 和 `hpp_mapping.Y.name` 可为简洁名 |
 | C3 | Z一致性  | `equation_formula_reported.Z` == `epsilon.rho.Z` == `literature_estimate.adjustment_set` == `hpp_mapping.Z[*].name`（若未调整则四处都为空） |
 | C4 | M条件   | `hpp_mapping.M`非null仅当equation_type = "E4" |
 | C5 | X2条件  | `hpp_mapping.X2`非null仅当equation_type = "E6" |
@@ -290,6 +291,17 @@ Z: ["Age", "Sex", "TDI"]  ← 错！公式中没有 γ^T·Z 项，Z 必须为 []
   "reported_effect_value": null,
   "reported_ci": [0.72, 0.95]   ← 有CI但无效应值，管道会把CI也清空
   ```
+
+### R8b: 保留 step1 已提取的效应值（**关键！**）
+
+step1 的 `Estimate:` 字段已经是从论文里抽出来的数值。step2 的 `reported_effect_value`、`theta_hat` **不允许**无故填 null。
+
+- 如果 step1 `Estimate:` 给了数值（比如 `-3.2`），step2 的 `reported_effect_value` **必须**填入该数值（或其等价形式——log 尺度转换后的值）。
+- 如果 step1 `CI:` 给了 `[lo, hi]`，step2 的 `reported_ci` **必须**填入同样的数值。
+- 只有在以下极少数情况下才能让 `reported_effect_value` 为 null：
+  1. step1 `Estimate:` 本身就是 null（上游没提出数值）
+  2. 你发现 step1 的值与论文里能找到的所有值都**完全**不符（视为上游幻觉），且你在 notes 里写明原因
+- **❌ 常见错误**：step1 给了 `-3.2`，step2 以为需要"更严谨"于是填 null——这是错的。step1 的值已经经过 prevalidation，默认就该保留。
 
 ### R8: reported_p / p_value 必须是数字，不是字符串
 - `reported_p` 和 `literature_estimate.p_value` 必须输出为 **float 数字**，不是字符串。

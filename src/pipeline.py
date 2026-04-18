@@ -148,7 +148,13 @@ def step1_enumerate_edges(
     prompt_template = prompt_template.replace("{evidence_type}", evidence_type)
     full_prompt = f"{prompt_template}\n\n---\n\n**Paper**\n\n{pdf_text}"
 
-    result = client.call_json(full_prompt)
+    # step1 is the longest single output in the whole pipeline (dozens of
+    # edges × verbose JSON per edge). Give it a larger budget than the
+    # pipeline default so papers with many outcomes × many exposure levels
+    # (e.g. 9 outcomes × 4 lifestyle-score levels = 36+ edges) don't get
+    # truncated. Bumped from 32k to 65k on 2026-04-18 after Rassy hit the
+    # cap silently.
+    result = client.call_json(full_prompt, max_tokens=65536)
 
     edges = result.get("edges", [])
     paper_info = result.get("paper_info", {})
@@ -1561,7 +1567,33 @@ class EdgeExtractionPipeline:
             step1_cached = True
         else:
             print("\n[Step 1] Enumerating edges ...", file=sys.stderr)
-            step1_result = step1_enumerate_edges(self.client, pdf_text, evidence_type)
+            try:
+                step1_result = step1_enumerate_edges(
+                    self.client, pdf_text, evidence_type
+                )
+            except Exception as exc:
+                # Never let step1 die silently — leave a breadcrumb so the
+                # paper can be retried and we know which step blew up.
+                if pdf_dir:
+                    save_json(
+                        pdf_dir / "_step1_failed.json",
+                        {
+                            "error": str(exc),
+                            "type": type(exc).__name__,
+                            "evidence_type": evidence_type,
+                            "hint": (
+                                "Most common cause: LLM output hit max_tokens "
+                                "and the truncated JSON failed to parse 3×. "
+                                "Re-run this single paper; if it fails again, "
+                                "raise step1's max_tokens further."
+                            ),
+                        },
+                    )
+                print(
+                    f"[Step 1] FAILED: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                raise
             edges_list = step1_result.get("edges", [])
             paper_info = step1_result.get("paper_info", {})
             if pdf_dir:

@@ -263,8 +263,22 @@ def main():
         action="store_true",
         help=(
             "Enable Step 4 Phase C: deterministic autofix using Phase B "
-            "suggested_fix. Off by default. Only fixes that pass type + "
-            "magnitude safety gates are applied."
+            "suggested_fix. Off by default. With this flag alone, runs in "
+            "fill-only mode — only fills missing/empty values "
+            "(None / '' / [] / [None,None]) and never overwrites a "
+            "non-empty value, eliminating the risk of LLM 'corrections' "
+            "stomping on correct data."
+        ),
+    )
+    parser.add_argument(
+        "--phase-c-aggressive",
+        action="store_true",
+        help=(
+            "Allow Phase C to also overwrite existing non-empty values "
+            "(e.g. n: 5800 → 5792, model_type: linear → ANCOVA). Risky — "
+            "Phase B's LLM correctly identifies many real errors but also "
+            "occasionally overwrites correct values with wrong ones. Off "
+            "by default. Has no effect unless --phase-c-autofix is also set."
         ),
     )
 
@@ -344,6 +358,7 @@ def main():
         reference_dir=args.reference_dir,
         error_patterns_path=args.error_patterns,
         enable_phase_c_autofix=args.phase_c_autofix,
+        phase_c_aggressive=args.phase_c_aggressive,
     )
 
     all_results = []

@@ -1,7 +1,7 @@
 import copy
 import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 
 def _number_appears_in_text(val: Any, text: str) -> bool:
@@ -1321,19 +1321,27 @@ def parse_phase_b_response(response: Dict) -> List[Dict]:
 def _phase_c_autofix(
     edges: List[Dict],
     phase_b_issues: List[Dict],
+    aggressive: bool = False,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Apply Phase B's `suggested_fix` for issues that pass a sanity gate.
 
-    Sanity gate (all must hold):
-      - severity == "error"  (we never autofix warnings — too noisy)
-      - suggested_fix is present and not None / "null" / ""
-      - suggested_fix's Python type matches current_value's type
-        (string ↔ string, list ↔ list, number ↔ number)
-      - the field path resolves cleanly to a leaf value
-      - skip floats and ints with very different magnitudes
-        (catches the "5000 → 478" subgroup-n fix only when the LLM
-        gave a plausible candidate, not a wild number)
+    Two modes:
+      - default (aggressive=False, "fill-only"): only apply the fix when
+        the current value is "empty" — None / "" / [] / [None, None].
+        Eliminates the risk of overwriting a correct value with the LLM's
+        possibly-wrong suggestion. Recommended for production runs.
+      - aggressive=True: also apply when current_value is non-empty
+        (overwrites). Useful when you trust Phase B's LLM more than the
+        existing edge state — but expect ~5–10% of fixes to flip correct
+        values to wrong ones. Requires manual eyeballing of the diff.
+
+    Sanity gates (all must hold regardless of mode):
+      - severity == "error"  (warnings are too noisy)
+      - suggested_fix is present and not "null" / "" / "TBD"
+      - type-compatible with the field's expected type
+      - magnitude check for numerics (within [0.01, 100×] of current)
+      - prose / Chinese / "X or Y" alternatives are rejected as values
 
     Returns (autofixed_edges, applied_fixes_log).
     """
@@ -1567,6 +1575,25 @@ def _phase_c_autofix(
         suggested = _coerce_numeric_string(suggested, path)
         if not _passes_magnitude_check(current, suggested):
             continue
+
+        # Fill-only safety gate: refuse to overwrite a non-empty current
+        # value unless the caller explicitly opted into aggressive mode.
+        # An "empty" current is None / "" / [] / [None, None] / [None, None, ...].
+        def _is_empty(v: Any) -> bool:
+            if v is None:
+                return True
+            if isinstance(v, str) and v.strip() == "":
+                return True
+            if isinstance(v, list):
+                if len(v) == 0:
+                    return True
+                if all(x is None for x in v):
+                    return True
+            return False
+
+        if not aggressive and not _is_empty(current):
+            continue
+
         # All gates passed — apply.
         parent[leaf] = suggested
         applied.append(
@@ -1589,6 +1616,7 @@ def run_step4_audit(
     max_edges_per_llm_call: int = 5,
     error_patterns_path: str = None,  # NEW: path to error_patterns.json
     enable_phase_c_autofix: bool = False,  # NEW: opt-in Phase C
+    phase_c_aggressive: bool = False,  # NEW: allow overwriting existing values
 ) -> Tuple[List[Dict], Dict[str, Any]]:
     """
     Run full Step 4 audit.
@@ -1682,11 +1710,14 @@ def run_step4_audit(
     # ── Phase C: opt-in deterministic autofix using Phase B suggested_fix ──
     phase_c_applied: List[Dict] = []
     if enable_phase_c_autofix and phase_b_issues:
+        mode_label = "aggressive (overwrite OK)" if phase_c_aggressive else "fill-only"
         print(
-            "[Step 4] Phase C: applying Phase B suggested_fix where safe ...",
+            f"[Step 4] Phase C: applying Phase B suggested_fix " f"({mode_label}) ...",
             file=sys.stderr,
         )
-        fixed_edges, phase_c_applied = _phase_c_autofix(fixed_edges, phase_b_issues)
+        fixed_edges, phase_c_applied = _phase_c_autofix(
+            fixed_edges, phase_b_issues, aggressive=phase_c_aggressive
+        )
         print(
             f"  Applied {len(phase_c_applied)} Phase C autofixes "
             f"(out of {sum(1 for i in phase_b_issues if i.get('severity')=='error')} "

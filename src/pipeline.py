@@ -505,11 +505,19 @@ def _clean_fill_markers(filled: Dict) -> Dict[str, int]:
                     z["status"] = "missing"
                     cleaned["hpp_mapping"] += 1
 
-    # equation_type: FILL_ME or slash list ("E1/E2/E3/...") rescue
+    # equation_type: must be EXACTLY one of E1..E6.
+    # Three cases trigger rescue:
+    #   (1) FILL_ME marker still present
+    #   (2) slash list "E1/E2/..."
+    #   (3) any value outside the {E1..E6} enum (e.g. E0, E7, "linear", "Cox")
+    # In all cases, try literature_estimate.equation_type as fallback;
+    # if that's also bogus, set top-level to "" so downstream flags it.
+    _VALID_EQ = {"E1", "E2", "E3", "E4", "E5", "E6"}
     eq_top = filled.get("equation_type", "")
-    if _is_fill_marker(eq_top) or "/" in str(eq_top):
+    eq_str = str(eq_top) if eq_top is not None else ""
+    if _is_fill_marker(eq_str) or "/" in eq_str or (eq_str and eq_str not in _VALID_EQ):
         lit_eq = filled.get("literature_estimate", {}).get("equation_type", "")
-        if isinstance(lit_eq, str) and lit_eq in {"E1", "E2", "E3", "E4", "E5", "E6"}:
+        if isinstance(lit_eq, str) and lit_eq in _VALID_EQ:
             filled["equation_type"] = lit_eq
         else:
             filled["equation_type"] = ""
@@ -1637,9 +1645,14 @@ class EdgeExtractionPipeline:
         enable_step4_llm: bool = True,
         step4_max_edges_per_call: int = 5,
         # Phase C deterministic autofix using Phase B suggested_fix.
-        # Off by default — only flip on once you've eyeballed the diff
-        # on a small batch and decided LLM corrections are net-positive.
+        # Off by default. When on, the safe default is "fill-only" mode:
+        # only fills missing/empty values (None, "", [], [None,None]),
+        # never overwrites an existing value with the LLM's suggestion.
         enable_phase_c_autofix: bool = False,
+        # Allow Phase C to overwrite existing non-empty values too. Riskier
+        # — Phase B's LLM suggestions overwrite ~5–10% of correct values
+        # with wrong ones in our test runs. Off by default.
+        phase_c_aggressive: bool = False,
         error_patterns_path: Optional[str] = None,
         # Reference GT options (NEW)
         reference_dir: Optional[str] = None,
@@ -1678,6 +1691,7 @@ class EdgeExtractionPipeline:
         self.enable_step4_llm = enable_step4_llm
         self.step4_max_edges_per_call = step4_max_edges_per_call
         self.enable_phase_c_autofix = enable_phase_c_autofix
+        self.phase_c_aggressive = phase_c_aggressive
 
         # Hard-match flag (off by default; see constructor docstring above)
         self.enable_hard_match = enable_hard_match
@@ -2119,6 +2133,7 @@ class EdgeExtractionPipeline:
                 max_edges_per_llm_call=self.step4_max_edges_per_call,
                 error_patterns_path=self.error_patterns_path,  # NEW
                 enable_phase_c_autofix=self.enable_phase_c_autofix,
+                phase_c_aggressive=self.phase_c_aggressive,
             )
             if pdf_dir:
                 save_json(pdf_dir / "step4_audit.json", audit_report)
@@ -2238,6 +2253,7 @@ class EdgeExtractionPipeline:
                 max_edges_per_llm_call=self.step4_max_edges_per_call,
                 error_patterns_path=self.error_patterns_path,
                 enable_phase_c_autofix=self.enable_phase_c_autofix,
+                phase_c_aggressive=self.phase_c_aggressive,
             )
 
             save_json(edges_path, updated)

@@ -258,6 +258,15 @@ def main():
         action="store_true",
         help="Skip using vision model to cut paper references",
     )
+    parser.add_argument(
+        "--phase-c-autofix",
+        action="store_true",
+        help=(
+            "Enable Step 4 Phase C: deterministic autofix using Phase B "
+            "suggested_fix. Off by default. Only fixes that pass type + "
+            "magnitude safety gates are applied."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -334,6 +343,7 @@ def main():
         max_retries=args.max_retries,
         reference_dir=args.reference_dir,
         error_patterns_path=args.error_patterns,
+        enable_phase_c_autofix=args.phase_c_autofix,
     )
 
     all_results = []

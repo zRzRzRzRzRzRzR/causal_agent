@@ -114,29 +114,104 @@ def _normalize_for_match(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Pi (population label) whitelist
+# Pi (population label) reconciliation — whitelist-free
 # ---------------------------------------------------------------------------
+#
+# Earlier this module shipped a hardcoded VALID_PI_VALUES set and a
+# specificity table tied to specific disease names. That scaled fine for the
+# half-dozen batches we'd seen (sleep / TRF / GERD / COPD / pQTL etc.) but
+# becomes a liability past ~20 batches: every new domain (COVID-ICU,
+# rare-disease pediatrics, transplant, etc.) breaks reconciliation when its
+# labels fall off the whitelist.
+#
+# The new policy:
+#   - No whitelist. Whatever Pi the LLM emits is a candidate.
+#   - Prefer the *plural majority* label (raw count).
+#   - Break ties by treating "adult_general" / "other" / "" as generic
+#     (rank 0) and everything else as specific (rank 1). This still
+#     reproduces the GERD / COPD examples without naming them.
+#   - If the paper has ≥3 distinct labels, log a warning so a human can
+#     eyeball it — the LLM is probably confused about who the population is.
 
-# Keep this in sync with prompts/step2_fill_template.md.
-# Adding a value here without updating the prompt won't help — the LLM
-# still won't emit it. But removing a hard requirement here lets you
-# experiment with new labels in the prompt without false positives.
-VALID_PI_VALUES: Set[str] = {
-    "adult_general",
-    "cvd",
-    "diabetes",
-    "oncology",
-    "pediatric",
-    "respiratory",
-    "gi_disease",
-    "infection",
-    "mental_health",
-    "pregnancy",
-    "elderly",
-    "metabolic_syndrome",
-    "mr_general",
-    "other",
-}
+_GENERIC_PI_LABELS: Set[str] = {"adult_general", "other", "general", ""}
+
+
+def _pi_is_generic(label: str) -> bool:
+    return (
+        not isinstance(label, str)
+        or label.strip().lower() in _GENERIC_PI_LABELS
+    )
+
+
+def reconcile_pi(edges: List[Dict]) -> List[Dict]:
+    """
+    Collapse all Pi values from one paper to a single canonical label.
+
+    Algorithm (whitelist-free):
+      1. Count Pi values across edges.
+      2. Sort by (-count, -specificity_bit, alpha) — specificity_bit is 1
+         for any non-generic label, 0 for adult_general / other / "".
+      3. Write the winner back to every edge.
+
+    Warnings emitted:
+      - `pi_reconciled`         : 2+ distinct labels, collapsed to the winner.
+      - `pi_high_disagreement`  : ≥3 distinct labels — possible LLM confusion,
+                                  worth a human glance.
+    """
+    issues: List[Dict] = []
+    if not edges:
+        return issues
+
+    pi_seen: List[str] = []
+    for e in edges:
+        pi = e.get("epsilon", {}).get("Pi", "")
+        if isinstance(pi, str) and pi.strip():
+            pi_seen.append(pi.strip())
+
+    if not pi_seen:
+        return issues
+
+    counts = Counter(pi_seen)
+    canonical = sorted(
+        counts.items(),
+        key=lambda kv: (
+            -kv[1],
+            0 if _pi_is_generic(kv[0]) else -1,
+            kv[0],
+        ),
+    )[0][0]
+
+    distinct_count = len(counts)
+    if distinct_count > 1:
+        issues.append(
+            {
+                "type": "pi_reconciled",
+                "severity": "warning",
+                "message": (
+                    f"Pi values {dict(counts)} reconciled to {canonical!r} "
+                    f"(by count, generic-vs-specific tiebreak); "
+                    f"written back to all {len(edges)} edge(s)."
+                ),
+            }
+        )
+    if distinct_count >= 3:
+        issues.append(
+            {
+                "type": "pi_high_disagreement",
+                "severity": "warning",
+                "message": (
+                    f"{distinct_count} distinct Pi labels in one paper — "
+                    f"LLM may be confused about the population. "
+                    f"Manual review recommended."
+                ),
+            }
+        )
+
+    for e in edges:
+        eps = e.setdefault("epsilon", {})
+        eps["Pi"] = canonical
+
+    return issues
 
 
 _STATUS_RANK = {"missing": 0, "tentative": 1, "close": 2, "exact": 3}
@@ -394,27 +469,17 @@ def filter_edges_by_priority(
 def check_population_consistency(edges: List[Dict]) -> List[Dict]:
     """
     All edges from the same paper should have the same Pi (population).
-    Also checks each Pi value against the VALID_PI_VALUES whitelist.
+
+    With reconcile_pi running upstream this normally returns an empty list;
+    it remains here as a backstop for callers that bypass step3_review or
+    skip the reconcile step.
     """
     issues: List[Dict] = []
     pi_values = set()
-    for i, e in enumerate(edges):
+    for e in edges:
         pi = e.get("epsilon", {}).get("Pi", "")
         if pi:
             pi_values.add(pi)
-            if pi not in VALID_PI_VALUES:
-                issues.append(
-                    {
-                        "type": "pi_not_in_whitelist",
-                        "severity": "warning",
-                        "message": (
-                            f"Edge #{i+1}: Pi={pi!r} not in VALID_PI_VALUES; "
-                            f"prompt may have offered an unfit option for this paper "
-                            f"(consider adding to whitelist or fixing prompt)."
-                        ),
-                        "edge_indices": [i],
-                    }
-                )
 
     if len(pi_values) > 1:
         issues.append(
@@ -710,19 +775,54 @@ def split_pages(pdf_text: str) -> List[Tuple[int, str]]:
     return pages
 
 
-# Sections we usually want when verifying numeric extractions.
-_RESULTS_HEADERS = re.compile(
+# IMRAD-anchor approach to pulling Results-region pages.
+#
+# Earlier this module enumerated section-name keywords (Results, Findings,
+# Outcomes, Discovery, Replication, …). At the corpus we'd looked at that
+# was fine, but the keyword list grows without bound across 100 batches —
+# every new domain (genomics, vitamin D reviews, COVID supplements, etc.)
+# uses its own header conventions. Instead of chasing keywords we now
+# read the paper's *structure*:
+#
+#   - Almost every paper has stable opening anchors:
+#       Methods / Patients / Materials / Subjects / Study design / etc.
+#   - Almost every paper has stable closing anchors:
+#       Discussion / Conclusion / Limitations / References / etc.
+#   - Whatever section sits between the LAST Methods-anchor page and the
+#     FIRST Discussion-anchor page is "Results-region" by construction —
+#     we don't need to know what header it carries.
+#
+# Combined with the existing Table/Figure pickup pass, this generalizes to
+# review papers (which never had "Results" but always have tables),
+# supplements (often header-less), and unusual domains (genomics with
+# Discovery / Replication sections).
+
+_METHODS_ANCHOR = re.compile(
     r"^\s*#{1,4}\s*"
-    r"(results?|findings?|primary outcomes?|secondary outcomes?|"
-    r"main findings?|protein.{0,30}phenotype|associations?)",
+    r"("
+    r"methods?|materials? and methods?|methodology|"
+    r"patients?(?: and methods?)?|subjects?(?: and methods?)?|"
+    r"study design|study population|study participants?|"
+    r"experimental procedures?|data and methods?|"
+    r"design and setting|design and methods?|"
+    r"online methods?|star\s*[★*]?\s*methods?|stars?\s*methods?"
+    r")\b",
     re.IGNORECASE | re.MULTILINE,
 )
-_END_OF_RESULTS_HEADERS = re.compile(
+
+_DISCUSSION_ANCHOR = re.compile(
     r"^\s*#{1,4}\s*"
-    r"(discussion|conclusions?|limitations?|references?|"
-    r"acknowled?gments?|funding|competing interests?|data availability)",
+    r"("
+    r"discussion|conclusions?|comment(?:ary)?|"
+    r"limitations?|references?|"
+    r"acknowled?gments?|funding|competing interests?|"
+    r"data availability|author contributions?|"
+    r"peer review information|publisher.?s note|"
+    r"supplementary information|supplemental information"
+    r")\b",
     re.IGNORECASE | re.MULTILINE,
 )
+
 _TABLE_HEADER = re.compile(r"(?:^|\n)\s*(?:#{0,4}\s*)?Table\s+\d+[^\n]*", re.IGNORECASE)
 _TABLE_CONTENT = re.compile(r"<table[\s>]", re.IGNORECASE)
 _FIGURE_LEGEND = re.compile(
@@ -736,43 +836,75 @@ def select_results_and_tables(
     max_total_chars: int = 28000,
 ) -> str:
     """
-    Pull pages that are likely to contain numeric findings:
+    Pull pages likely to contain numeric findings, using IMRAD anchors.
 
-      1. Every page from the first Results/Findings header up to (but not
-         including) the first Discussion/Conclusion/References header.
-         This is what the LLM actually wants — the Results section runs
-         multiple pages and they need to stay together.
-      2. Every page with an explicit "Table N" header, plus the next
-         page (table data sometimes wraps in 2-column layouts).
-      3. Every page containing raw <table> markup (numeric tables that
-         survived OCR but lost their caption).
-      4. Every page with a figure legend (small but often quotes the
-         specific values).
+      Phase 1 — Results region by structure (no header keywords):
+        * find the LAST page whose body matches a Methods-style anchor
+        * find the FIRST subsequent page matching a Discussion-style anchor
+        * pages in [last_methods, first_discussion) are the Results region
+        * if either anchor is missing we degrade gracefully:
+            - only Discussion found  → keep [0, first_discussion)
+            - only Methods found     → keep [last_methods, end)
+            - neither found          → leave it to Phase 2
 
-    Falls back to the leading chunk if no Results-section pages can be
-    identified, so the caller is never handed an empty string.
+      Phase 2 — Table/Figure pickup paper-wide:
+        * any page with a "Table N" header, a raw <table> tag, or a
+          figure legend; include i+1 to catch 2-column wrap-around.
+
+    Returns at most max_total_chars of `<!-- Page N -->\\n…` blocks in
+    reading order. Never returns an empty string for non-empty input —
+    final fallback is `pdf_text[:max_total_chars]`.
     """
     pages = split_pages(pdf_text)
     if not pages:
         return ""
 
-    # Pass 1: find Results-section span.
-    results_start: int = -1
-    results_end: int = len(pages)
+    # Phase 1: anchor-based Results region.
+    #
+    # Two layouts to handle:
+    #   (a) Traditional IMRAD — Methods → Results → Discussion in order.
+    #       Results region = [first_methods, first_discussion).
+    #   (b) Nature/Cell style — Results → Discussion → Methods (STAR
+    #       methods at the back). Methods late, before References.
+    #       Results region = [start, first_discussion).
+    #
+    # Distinguishing the two: compare positions of first Methods anchor
+    # and first Discussion anchor. If Methods comes BEFORE Discussion →
+    # traditional. If Methods comes AFTER → Nature-style. If Methods is
+    # missing → degrade to [start, first_discussion).
+    first_methods_idx = -1
     for i, (_, body) in enumerate(pages):
-        if results_start < 0 and _RESULTS_HEADERS.search(body):
-            results_start = i
-            continue
-        if results_start >= 0 and _END_OF_RESULTS_HEADERS.search(body):
-            results_end = i
+        if _METHODS_ANCHOR.search(body):
+            first_methods_idx = i
+            break
+
+    first_discussion_idx = len(pages)
+    for i, (_, body) in enumerate(pages):
+        if _DISCUSSION_ANCHOR.search(body):
+            first_discussion_idx = i
             break
 
     keep_idx: Set[int] = set()
-    if results_start >= 0:
-        for i in range(results_start, min(results_end, len(pages))):
+    if (
+        first_methods_idx >= 0
+        and first_discussion_idx < len(pages)
+        and first_methods_idx < first_discussion_idx
+    ):
+        # Traditional layout: take Methods through (just before) Discussion.
+        for i in range(first_methods_idx, first_discussion_idx):
             keep_idx.add(i)
+    elif first_discussion_idx < len(pages):
+        # Either Nature-style (Methods after Discussion) or Methods absent.
+        # Either way, the Results we care about lives BEFORE Discussion.
+        for i in range(0, first_discussion_idx):
+            keep_idx.add(i)
+    elif first_methods_idx >= 0:
+        # Methods anchor but no Discussion — supplement, take from Methods on.
+        for i in range(first_methods_idx, len(pages)):
+            keep_idx.add(i)
+    # else: neither anchor; Phase 2 + final fallback handle it.
 
-    # Pass 2: tables, table content, figure legends — anywhere in the paper.
+    # Phase 2: Table / Figure pickup paper-wide.
     for i, (_, body) in enumerate(pages):
         if (
             _TABLE_HEADER.search(body)
@@ -785,7 +917,7 @@ def select_results_and_tables(
     keep_idx = {i for i in keep_idx if 0 <= i < len(pages)}
 
     if not keep_idx:
-        # No headers, no tables, no figures — best effort: front of paper.
+        # No anchors, no tables, no figures — front of paper.
         return pdf_text[:max_total_chars]
 
     parts: List[str] = []

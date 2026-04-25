@@ -50,6 +50,7 @@ from .review import (
     filter_edges_by_priority,
     generate_quality_report,
     has_placeholder,
+    reconcile_pi,
     rerank_hpp_mapping,
     spot_check_values,
 )
@@ -453,6 +454,92 @@ def post_step2_hard_match(
 # Step 2: Fill one edge (simplified -- no retry loop)
 
 
+def _is_fill_marker(v: Any) -> bool:
+    """True if v is a string carrying the template's `<<FILL_ME:…>>` marker."""
+    if not isinstance(v, str):
+        return False
+    return "<<FILL_ME" in v or "FILL_ME:" in v
+
+
+def _clean_fill_markers(filled: Dict) -> Dict[str, int]:
+    """
+    Sweep an edge produced by Step 2 and replace any `<<FILL_ME:…>>` markers
+    the LLM left behind:
+      - hpp_mapping.{X|Y|Z[*]}.{dataset|field|name}  → ""  + status='missing'
+      - paper_title / paper_abstract                 → ""
+      - equation_type (top-level) FILL_ME or slash list → recover from
+            literature_estimate.equation_type if that one is a single E1..E6,
+            else ""
+      - epsilon.rho.{X|Y}, epsilon.iota.core.name, epsilon.o.name → ""
+
+    Returns counters of what was cleaned, e.g. {"hpp_mapping": 3, "top": 1}.
+    Mutates `filled` in place.
+    """
+    cleaned: Dict[str, int] = {"hpp_mapping": 0, "top": 0, "rho_iota_o": 0}
+
+    # hpp_mapping: X / Y
+    hm = filled.get("hpp_mapping", {}) or {}
+    for role in ("X", "Y"):
+        mapping = hm.get(role)
+        if isinstance(mapping, dict):
+            hit = False
+            for k in ("dataset", "field", "name"):
+                if _is_fill_marker(mapping.get(k)):
+                    mapping[k] = ""
+                    hit = True
+            if hit or _is_fill_marker(mapping.get("status")):
+                mapping["status"] = "missing"
+                cleaned["hpp_mapping"] += 1
+
+    # hpp_mapping: Z list
+    z_list = hm.get("Z")
+    if isinstance(z_list, list):
+        for z in z_list:
+            if isinstance(z, dict):
+                hit = False
+                for k in ("dataset", "field", "name"):
+                    if _is_fill_marker(z.get(k)):
+                        z[k] = ""
+                        hit = True
+                if hit or _is_fill_marker(z.get("status")):
+                    z["status"] = "missing"
+                    cleaned["hpp_mapping"] += 1
+
+    # equation_type: FILL_ME or slash list ("E1/E2/E3/...") rescue
+    eq_top = filled.get("equation_type", "")
+    if _is_fill_marker(eq_top) or "/" in str(eq_top):
+        lit_eq = filled.get("literature_estimate", {}).get("equation_type", "")
+        if isinstance(lit_eq, str) and lit_eq in {"E1", "E2", "E3", "E4", "E5", "E6"}:
+            filled["equation_type"] = lit_eq
+        else:
+            filled["equation_type"] = ""
+        cleaned["top"] += 1
+
+    # paper_title / paper_abstract
+    for k in ("paper_title", "paper_abstract"):
+        if _is_fill_marker(filled.get(k)):
+            filled[k] = ""
+            cleaned["top"] += 1
+
+    # epsilon.rho.{X,Y}, epsilon.iota.core.name, epsilon.o.name
+    eps = filled.get("epsilon", {}) or {}
+    rho = eps.get("rho", {}) or {}
+    for k in ("X", "Y"):
+        if _is_fill_marker(rho.get(k)):
+            rho[k] = ""
+            cleaned["rho_iota_o"] += 1
+    iota_core = (eps.get("iota", {}) or {}).get("core", {}) or {}
+    if _is_fill_marker(iota_core.get("name")):
+        iota_core["name"] = ""
+        cleaned["rho_iota_o"] += 1
+    o = eps.get("o", {}) or {}
+    if _is_fill_marker(o.get("name")):
+        o["name"] = ""
+        cleaned["rho_iota_o"] += 1
+
+    return cleaned
+
+
 def step2_fill_one_edge(
     client: GLMClient,
     pdf_text: str,
@@ -549,6 +636,17 @@ def step2_fill_one_edge(
         evidence_type=evidence_type,
         pdf_name=pdf_name,
     )
+
+    # Sweep <<FILL_ME:...>> markers the LLM left in the output. We do this
+    # BEFORE step3_review's placeholder check so a partially-mapped edge
+    # (e.g. real X/Y/theta_hat but no HPP field) survives as a valid edge
+    # with status='missing' instead of being dropped wholesale.
+    cleaned_counts = _clean_fill_markers(filled)
+    if any(cleaned_counts.values()):
+        print(
+            f"  [Step 2] Cleaned FILL_ME markers: {cleaned_counts}",
+            file=sys.stderr,
+        )
 
     # Preserve Step 1's priority tag through Step 2 so the Step 3 priority
     # filter actually has something to act on (the template doesn't include
@@ -1283,6 +1381,7 @@ def step3_review(
     print(f"\n[Step 3] Reviewing {len(edges)} edges ...", file=sys.stderr)
 
     pre_issues: List[Dict] = []
+    dropped_by_review: List[Dict] = []
 
     # 3pre-0. Detect placeholder leaks (Chinese template skeleton, "TBD",
     # "E1/E2/E3/...", etc). These edges should never reach rerank /
@@ -1293,6 +1392,14 @@ def step3_review(
         bad_idx = {
             ix for iss in placeholder_issues for ix in iss.get("edge_indices", [])
         }
+        for i in sorted(bad_idx):
+            dropped_by_review.append(
+                {
+                    "edge_id": edges[i].get("edge_id", f"#{i+1}"),
+                    "edge_index": i + 1,
+                    "reason": "placeholder_leak",
+                }
+            )
         print(
             f"  [3pre-0] {len(bad_idx)} edge(s) carry template placeholders — "
             f"flagged as errors and excluded from rerank/spot_check",
@@ -1306,9 +1413,22 @@ def step3_review(
     pre_issues.extend(canonicalize_paper_titles(edges))
     pre_issues.extend(canonicalize_edge_ids(edges))
 
+    # 3pre-1a. Force a single Pi across the paper. With a 14-value whitelist,
+    # the LLM picks legitimate-but-different labels per edge (e.g. GERD paper
+    # gets {gi_disease, adult_general, other}); reconcile to the most-specific
+    # majority before population_inconsistency check fires.
+    pre_issues.extend(reconcile_pi(edges))
+
     # 3pre-2. Filter exploratory edges by priority
     kept, removed = filter_edges_by_priority(edges)
     if removed:
+        for e in removed:
+            dropped_by_review.append(
+                {
+                    "edge_id": e.get("edge_id", "?"),
+                    "reason": f"priority={e.get('priority', '?')}",
+                }
+            )
         print(
             f"  [3pre-2] Filtered {len(removed)} exploratory edges "
             f"({len(kept)} kept)",
@@ -1394,6 +1514,12 @@ def step3_review(
     report = generate_quality_report(
         edges, consistency_issues, spot_checks, all_rerank_changes
     )
+
+    # Surface what review threw out so it shows up at the top of the
+    # report instead of buried in consistency_issues. Empty list means
+    # "review kept everything"; non-empty entries cite reason per edge.
+    report["summary"]["dropped_edges_by_review"] = len(dropped_by_review)
+    report["dropped_edges_by_review"] = dropped_by_review
 
     s = report["summary"]
     print(
@@ -1510,6 +1636,10 @@ class EdgeExtractionPipeline:
         enable_step4: bool = True,
         enable_step4_llm: bool = True,
         step4_max_edges_per_call: int = 5,
+        # Phase C deterministic autofix using Phase B suggested_fix.
+        # Off by default — only flip on once you've eyeballed the diff
+        # on a small batch and decided LLM corrections are net-positive.
+        enable_phase_c_autofix: bool = False,
         error_patterns_path: Optional[str] = None,
         # Reference GT options (NEW)
         reference_dir: Optional[str] = None,
@@ -1547,6 +1677,7 @@ class EdgeExtractionPipeline:
         self.enable_step4 = enable_step4
         self.enable_step4_llm = enable_step4_llm
         self.step4_max_edges_per_call = step4_max_edges_per_call
+        self.enable_phase_c_autofix = enable_phase_c_autofix
 
         # Hard-match flag (off by default; see constructor docstring above)
         self.enable_hard_match = enable_hard_match
@@ -1717,27 +1848,96 @@ class EdgeExtractionPipeline:
         )
         all_filled_edges: List[Dict] = []
 
-        # Resume support: load partially completed Step 2 results
+        # Resume support: load partially completed Step 2 results.
+        #
+        # Staleness guard: a partial from a previous run may reference
+        # an outdated edge set. We refuse to load the partial if any of
+        # the following hold:
+        #   - the user did not pass resume=True
+        #   - step1_edges.json is newer than step2_partial.json
+        #     (Step 1 was rerun, edge IDs may have shifted)
+        #   - none of the partial's _step2_edge_index values fall inside
+        #     the current Step 1 edge index range
+        # This prevents the 38365951-style case where a stale 1-edge
+        # partial overwrites a 6-edge fresh run.
         step2_partial_path = pdf_dir / "step2_partial.json" if pdf_dir else None
         step2_cached_edges: Dict[int, Dict] = {}  # edge_index -> filled_edge
-        if resume and step2_partial_path and step2_partial_path.exists():
+
+        def _partial_is_stale() -> Tuple[bool, str]:
+            if not step2_partial_path or not step2_partial_path.exists():
+                return True, "no partial file"
             try:
+                step1_path = pdf_dir / "step1_edges.json" if pdf_dir else None
+                if step1_path and step1_path.exists():
+                    if step1_path.stat().st_mtime > step2_partial_path.stat().st_mtime:
+                        return True, "step1_edges.json newer than partial"
                 with open(step2_partial_path, "r", encoding="utf-8") as f:
-                    cached_list = json.load(f)
-                for ce in cached_list:
-                    ce_idx = ce.get("_step2_edge_index")
-                    if ce_idx is not None:
-                        step2_cached_edges[ce_idx] = ce
-                print(
-                    f"  [Step 2] RESUME: loaded {len(step2_cached_edges)} "
-                    f"cached edges from step2_partial.json",
-                    file=sys.stderr,
+                    sample = json.load(f)
+                if not isinstance(sample, list):
+                    return True, "partial is not a list"
+                # Compare against current edge count: any cached _step2_edge_index
+                # must be within [0, len(edges_list)).
+                max_cached_idx = max(
+                    (
+                        ce.get("_step2_edge_index", -1)
+                        for ce in sample
+                        if isinstance(ce, dict)
+                    ),
+                    default=-1,
                 )
+                if max_cached_idx >= len(edges_list):
+                    return (
+                        True,
+                        f"partial references edge_index {max_cached_idx} "
+                        f"but only {len(edges_list)} step1 edges exist",
+                    )
+                return False, ""
             except Exception as e:
+                return True, f"failed to read: {e}"
+
+        if resume and step2_partial_path and step2_partial_path.exists():
+            stale, reason = _partial_is_stale()
+            if stale:
                 print(
-                    f"  [Step 2] Failed to load partial cache: {e}",
+                    f"  [Step 2] Ignoring step2_partial.json "
+                    f"(stale: {reason})",
                     file=sys.stderr,
                 )
+                try:
+                    step2_partial_path.unlink()
+                except OSError:
+                    pass
+            else:
+                try:
+                    with open(step2_partial_path, "r", encoding="utf-8") as f:
+                        cached_list = json.load(f)
+                    for ce in cached_list:
+                        ce_idx = ce.get("_step2_edge_index")
+                        if ce_idx is not None:
+                            step2_cached_edges[ce_idx] = ce
+                    print(
+                        f"  [Step 2] RESUME: loaded {len(step2_cached_edges)} "
+                        f"cached edges from step2_partial.json",
+                        file=sys.stderr,
+                    )
+                except Exception as e:
+                    print(
+                        f"  [Step 2] Failed to load partial cache: {e}",
+                        file=sys.stderr,
+                    )
+        elif step2_partial_path and step2_partial_path.exists():
+            # Not in resume mode but partial exists — almost certainly
+            # leftover from a previous crashed run. Delete so it can't
+            # confuse any later resume.
+            try:
+                step2_partial_path.unlink()
+                print(
+                    "  [Step 2] Removed stale step2_partial.json from "
+                    "a previous run (no resume requested)",
+                    file=sys.stderr,
+                )
+            except OSError:
+                pass
 
         # Build GT few-shot context once (reuse across edges)
         gt_fewshot_context = None
@@ -1919,6 +2119,7 @@ class EdgeExtractionPipeline:
                 client=self.client if self.enable_step4_llm else None,
                 max_edges_per_llm_call=self.step4_max_edges_per_call,
                 error_patterns_path=self.error_patterns_path,  # NEW
+                enable_phase_c_autofix=self.enable_phase_c_autofix,
             )
             if pdf_dir:
                 save_json(pdf_dir / "step4_audit.json", audit_report)
@@ -2037,6 +2238,7 @@ class EdgeExtractionPipeline:
                 client=self.client if self.enable_step4_llm else None,
                 max_edges_per_llm_call=self.step4_max_edges_per_call,
                 error_patterns_path=self.error_patterns_path,
+                enable_phase_c_autofix=self.enable_phase_c_autofix,
             )
 
             save_json(edges_path, updated)

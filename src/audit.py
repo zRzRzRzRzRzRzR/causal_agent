@@ -1318,12 +1318,126 @@ def parse_phase_b_response(response: Dict) -> List[Dict]:
     return all_issues
 
 
+def _phase_c_autofix(
+    edges: List[Dict],
+    phase_b_issues: List[Dict],
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Apply Phase B's `suggested_fix` for issues that pass a sanity gate.
+
+    Sanity gate (all must hold):
+      - severity == "error"  (we never autofix warnings — too noisy)
+      - suggested_fix is present and not None / "null" / ""
+      - suggested_fix's Python type matches current_value's type
+        (string ↔ string, list ↔ list, number ↔ number)
+      - the field path resolves cleanly to a leaf value
+      - skip floats and ints with very different magnitudes
+        (catches the "5000 → 478" subgroup-n fix only when the LLM
+        gave a plausible candidate, not a wild number)
+
+    Returns (autofixed_edges, applied_fixes_log).
+    """
+
+    def _resolve(path: str, edge: Dict) -> Tuple[Any, Any, str]:
+        """
+        Walk a dotted path (e.g. 'literature_estimate.n') down into
+        edge and return (parent_dict_or_list, leaf_key, current_value).
+        Returns (None, None, None) on any miss.
+        """
+        if not path:
+            return None, None, None
+        parts = path.split(".")
+        node: Any = edge
+        for p in parts[:-1]:
+            if isinstance(node, dict) and p in node:
+                node = node[p]
+            else:
+                return None, None, None
+        leaf = parts[-1]
+        if isinstance(node, dict) and leaf in node:
+            return node, leaf, node[leaf]
+        return None, None, None
+
+    def _types_compatible(old: Any, new: Any) -> bool:
+        if old is None:
+            # If old is None, accept any non-None new value of a primitive
+            # type — this is the common "fill in missing" case.
+            return new is not None and not isinstance(new, dict)
+        if isinstance(old, list):
+            return isinstance(new, list)
+        if isinstance(old, bool):
+            return isinstance(new, bool)
+        if isinstance(old, (int, float)):
+            return isinstance(new, (int, float)) and not isinstance(new, bool)
+        if isinstance(old, str):
+            return isinstance(new, str)
+        return type(old) is type(new)
+
+    def _passes_magnitude_check(old: Any, new: Any) -> bool:
+        if not isinstance(old, (int, float)) or not isinstance(new, (int, float)):
+            return True
+        if old == 0:
+            return abs(new) < 1e6  # arbitrary cap
+        ratio = abs(new / old) if old else 1.0
+        # Reject changes more extreme than 100× — those are usually wild
+        # LLM guesses rather than legitimate corrections.
+        return 0.01 <= ratio <= 100.0
+
+    edge_by_id: Dict[str, Dict] = {}
+    for e in edges:
+        eid = e.get("edge_id")
+        if eid:
+            edge_by_id[eid] = e
+
+    applied: List[Dict] = []
+    for iss in phase_b_issues:
+        if iss.get("severity") != "error":
+            continue
+        eid = iss.get("edge_id")
+        path = iss.get("field")
+        suggested = iss.get("suggested_fix")
+        if not eid or not path or suggested is None:
+            continue
+        if isinstance(suggested, str) and suggested.strip().lower() in (
+            "",
+            "null",
+            "none",
+            "n/a",
+            "tbd",
+        ):
+            continue
+        edge = edge_by_id.get(eid)
+        if edge is None:
+            continue
+        parent, leaf, current = _resolve(path, edge)
+        if parent is None or leaf is None:
+            continue
+        if not _types_compatible(current, suggested):
+            continue
+        if not _passes_magnitude_check(current, suggested):
+            continue
+        # All gates passed — apply.
+        parent[leaf] = suggested
+        applied.append(
+            {
+                "edge_id": eid,
+                "field": path,
+                "before": current,
+                "after": suggested,
+                "check": iss.get("check", "?"),
+            }
+        )
+
+    return edges, applied
+
+
 def run_step4_audit(
     edges: List[Dict],
     pdf_text: str,
     client=None,  # GLMClient instance, None to skip Phase B
     max_edges_per_llm_call: int = 5,
     error_patterns_path: str = None,  # NEW: path to error_patterns.json
+    enable_phase_c_autofix: bool = False,  # NEW: opt-in Phase C
 ) -> Tuple[List[Dict], Dict[str, Any]]:
     """
     Run full Step 4 audit.
@@ -1414,6 +1528,26 @@ def run_step4_audit(
     else:
         print("[Step 4] Phase B: Skipped (no LLM client)", file=sys.stderr)
 
+    # ── Phase C: opt-in deterministic autofix using Phase B suggested_fix ──
+    phase_c_applied: List[Dict] = []
+    if enable_phase_c_autofix and phase_b_issues:
+        print(
+            "[Step 4] Phase C: applying Phase B suggested_fix where safe ...",
+            file=sys.stderr,
+        )
+        fixed_edges, phase_c_applied = _phase_c_autofix(fixed_edges, phase_b_issues)
+        print(
+            f"  Applied {len(phase_c_applied)} Phase C autofixes "
+            f"(out of {sum(1 for i in phase_b_issues if i.get('severity')=='error')} "
+            f"error-severity Phase B issues)",
+            file=sys.stderr,
+        )
+    elif phase_b_issues:
+        print(
+            "[Step 4] Phase C: skipped (enable_phase_c_autofix=False)",
+            file=sys.stderr,
+        )
+
     # ── Compile report ──
     all_issues = phase_a_issues + phase_b_issues
 
@@ -1423,11 +1557,13 @@ def run_step4_audit(
         "phase_a": phase_a_report,
         "phase_a_fixes_applied": applied_fixes,
         "phase_b_issues": phase_b_issues,
+        "phase_c_fixes_applied": phase_c_applied,
         "total_issues": len(all_issues),
         "summary": {
             "phase_a_issues": len(phase_a_issues),
             "phase_a_fixes": len(applied_fixes),
             "phase_b_issues": len(phase_b_issues),
+            "phase_c_fixes": len(phase_c_applied),
             "edges_with_errors": len(
                 set(
                     iss["edge_id"]

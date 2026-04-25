@@ -43,9 +43,13 @@ from .edge_prevalidator import prevalidate_edges
 from .hpp_mapper import HPPMapper, get_hpp_context
 from .llm_client import GLMClient
 from .review import (
+    canonicalize_edge_ids,
+    canonicalize_paper_titles,
     check_cross_edge_consistency,
+    detect_placeholder_edges,
     filter_edges_by_priority,
     generate_quality_report,
+    has_placeholder,
     rerank_hpp_mapping,
     spot_check_values,
 )
@@ -546,6 +550,13 @@ def step2_fill_one_edge(
         pdf_name=pdf_name,
     )
 
+    # Preserve Step 1's priority tag through Step 2 so the Step 3 priority
+    # filter actually has something to act on (the template doesn't include
+    # priority, so build_filled_edge would otherwise drop it).
+    step1_priority = edge.get("priority")
+    if step1_priority:
+        filled["priority"] = step1_priority
+
     # Apply pre-validated overrides (deterministic corrections)
     filled = _apply_prevalidation_overrides(filled, preval)
 
@@ -625,6 +636,22 @@ def step2_5_recover_nulls(
     accepted as-is — at scale this avoids false rejections from OCR
     or formatting drift.
     """
+    # Lazy import to avoid a cycle on module load.
+    from .review import (
+        _select_relevant_chunks,
+        _spot_check_keywords,
+        select_results_and_tables,
+    )
+
+    # For long papers (>30K chars) we can't fit the whole text into the
+    # recovery prompt — pre-build the Results/Tables-biased excerpt and
+    # then keyword-refine per edge.
+    long_paper = len(pdf_text) > 30000
+    if long_paper:
+        results_pool = select_results_and_tables(pdf_text, max_total_chars=40000)
+    else:
+        results_pool = pdf_text
+
     for i, edge in enumerate(edges):
         efr = edge.get("equation_formula_reported", {})
         lit = edge.get("literature_estimate", {})
@@ -660,6 +687,21 @@ def step2_5_recover_nulls(
             file=sys.stderr,
         )
 
+        # For long papers, pull the most keyword-relevant ~28K out of the
+        # Results/Tables-biased pool; for short papers, pass the whole thing.
+        if long_paper:
+            kw = _spot_check_keywords(edge, theta if theta is not None else 0.0)
+            paper_excerpt = _select_relevant_chunks(
+                results_pool, kw, max_total_chars=28000
+            )
+            excerpt_label = (
+                f"--- 论文原文（关键词召回，约 {len(paper_excerpt)} chars / "
+                f"{len(pdf_text)} chars 全文） ---"
+            )
+        else:
+            paper_excerpt = pdf_text
+            excerpt_label = "--- 论文原文 ---"
+
         prompt = (
             f"你是医学统计学专家。请从论文中精确提取以下统计效应的数值。\n\n"
             f"**要提取的关系**: {x_name} → {y_name}\n"
@@ -677,7 +719,7 @@ def step2_5_recover_nulls(
             f'{{"effect_value": ..., "ci": [lower, upper], '
             f'"p_value": ..., "source_location": "...", '
             f'"effect_type": "HR/OR/beta/MD/..."}}\n\n'
-            f"--- 论文原文 ---\n{pdf_text[:30000]}"
+            f"{excerpt_label}\n{paper_excerpt}"
         )
 
         try:
@@ -938,6 +980,16 @@ def _final_schema_enforcement(edge: Dict) -> None:
         if key.startswith("_"):
             del edge[key]
 
+    # 1a. Normalize priority to a known whitelist value. Anything else
+    # falls back to "secondary" (the safe default) so the Step 3 priority
+    # filter behaves predictably. We keep the field on the edge — the
+    # downstream filter_edges_by_priority needs it to do anything.
+    _PRIORITY_WHITELIST = {"primary", "secondary", "exploratory"}
+    p = edge.get("priority")
+    if p is not None:
+        p = str(p).strip().lower()
+        edge["priority"] = p if p in _PRIORITY_WHITELIST else "secondary"
+
     # 1b. Fix edge_id format: EV-YEAR-Author#N (hyphen, not underscore)
     eid = edge.get("edge_id", "")
     if eid:
@@ -1187,21 +1239,33 @@ def _is_edge_content_empty(edge: Dict) -> bool:
 
 def filter_low_quality_edges(edges: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
     """
-    Drop edges that carry no numeric effect, CI, theta_hat, or p-value
-    unless has_numeric_estimate is explicitly False. Safety: if every
-    edge would be dropped, keep everything (same rule as
-    filter_edges_by_priority).
+    Drop edges that:
+      * contain template placeholder strings (e.g. '论文完整标题'), OR
+      * carry no numeric effect, CI, theta_hat, or p-value
+        (unless has_numeric_estimate is explicitly False).
+
+    Safety: if every edge would be dropped on the numeric grounds alone
+    we keep them (same rule as filter_edges_by_priority); but placeholder
+    edges are dropped even in that fallback path because they cannot be
+    salvaged by downstream review.
     """
     kept: List[Dict] = []
     dropped: List[Dict] = []
+    placeholder_dropped: List[Dict] = []
     for e in edges:
+        if has_placeholder(e):
+            placeholder_dropped.append(e)
+            continue
         if _is_edge_content_empty(e):
             dropped.append(e)
         else:
             kept.append(e)
+
     if not kept:
-        return edges, []
-    return kept, dropped
+        # Numeric-empty fallback: keep them, but still throw out placeholder edges.
+        return edges, placeholder_dropped
+
+    return kept, dropped + placeholder_dropped
 
 
 # Step 3: Review (with robust JSON parsing)
@@ -1218,11 +1282,35 @@ def step3_review(
 ) -> Tuple[List[Dict], Dict]:
     print(f"\n[Step 3] Reviewing {len(edges)} edges ...", file=sys.stderr)
 
-    # 3pre. Filter exploratory edges by priority
+    pre_issues: List[Dict] = []
+
+    # 3pre-0. Detect placeholder leaks (Chinese template skeleton, "TBD",
+    # "E1/E2/E3/...", etc). These edges should never reach rerank /
+    # spot_check — rerank confabulates a candidate for "暴露变量名称"
+    # and spot_check wastes a sample slot.
+    placeholder_issues = detect_placeholder_edges(edges)
+    if placeholder_issues:
+        bad_idx = {
+            ix for iss in placeholder_issues for ix in iss.get("edge_indices", [])
+        }
+        print(
+            f"  [3pre-0] {len(bad_idx)} edge(s) carry template placeholders — "
+            f"flagged as errors and excluded from rerank/spot_check",
+            file=sys.stderr,
+        )
+        pre_issues.extend(placeholder_issues)
+        edges = [e for i, e in enumerate(edges) if i not in bad_idx]
+
+    # 3pre-1. Canonicalize paper_title and edge_id across the paper so the
+    # downstream consistency checks don't re-flag pure formatting noise.
+    pre_issues.extend(canonicalize_paper_titles(edges))
+    pre_issues.extend(canonicalize_edge_ids(edges))
+
+    # 3pre-2. Filter exploratory edges by priority
     kept, removed = filter_edges_by_priority(edges)
     if removed:
         print(
-            f"  [3pre] Filtered {len(removed)} exploratory edges "
+            f"  [3pre-2] Filtered {len(removed)} exploratory edges "
             f"({len(kept)} kept)",
             file=sys.stderr,
         )
@@ -1258,6 +1346,8 @@ def step3_review(
     # 3b. Cross-edge consistency
     print("  [3b] Cross-edge consistency ...", file=sys.stderr)
     consistency_issues = check_cross_edge_consistency(edges)
+    if pre_issues:
+        consistency_issues = pre_issues + consistency_issues
 
     # 3b+. Fuzzy duplicate detection
     fuzzy_dups = detect_fuzzy_duplicates_step3(edges)
@@ -1277,11 +1367,19 @@ def step3_review(
     # 3c. Spot-check (with safe JSON parsing)
     spot_checks: List[Dict] = []
     if enable_spot_check:
-        ns = min(spot_check_sample, len(edges))
-        print(f"  [3c] Spot-checking {ns} edges ...", file=sys.stderr)
+        # Auto-scale sample size for big papers — checking 5 of 46 edges is
+        # statistically meaningless, and the new keyword-chunk retrieval
+        # makes individual checks cheap enough to afford a few more.
+        effective_sample = max(spot_check_sample, min(10, len(edges) // 5))
+        ns = min(effective_sample, len(edges))
+        print(
+            f"  [3c] Spot-checking {ns} edges "
+            f"(requested={spot_check_sample}, scaled={effective_sample}) ...",
+            file=sys.stderr,
+        )
         try:
             spot_checks = _safe_spot_check(
-                edges, pdf_text, client, sample_size=spot_check_sample
+                edges, pdf_text, client, sample_size=effective_sample
             )
             verdicts = Counter(c.get("verdict", "?") for c in spot_checks)
             print(f"    Results: {dict(verdicts)}", file=sys.stderr)
@@ -1341,15 +1439,21 @@ def _safe_spot_check(
             if theta is not None and isinstance(theta, (int, float)):
                 checkable.append((i, e, theta))
 
+        # Lazy import to avoid a cycle on module load.
+        from .review import _select_relevant_chunks, _spot_check_keywords
+
         for idx, (i, e, theta_val) in enumerate(checkable[:sample_size]):
             rho = e.get("epsilon", {}).get("rho", {})
+            keywords = _spot_check_keywords(e, theta_val)
+            excerpt = _select_relevant_chunks(pdf_text, keywords, max_total_chars=14000)
             try:
                 prompt = (
                     f"Verify: {rho.get('X', '?')} -> {rho.get('Y', '?')}\n"
                     f"Extracted theta_hat (log scale): {theta_val}\n"
                     f'Reply JSON: {{"verdict": "correct/incorrect/not_found", '
                     f'"correct_value": null}}\n\n'
-                    f"Paper (first 15000 chars):\n{pdf_text[:15000]}"
+                    f"Paper (keyword-selected excerpt, "
+                    f"{len(excerpt)} chars of {len(pdf_text)} total):\n{excerpt}"
                 )
                 result = client.call_json(prompt)
                 result["edge_index"] = i

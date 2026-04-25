@@ -5,8 +5,8 @@
     "edge_id": "EV-{YEAR}-{STUDY}#{EDGE_NUM}",
     // ─── 论文元数据 ───
     // 用于溯源和上下文理解（管线代码不直接通过这些字段运行，但对人类验证至关重要）
-    "paper_title": "论文完整标题",
-    "paper_abstract": "论文摘要文本...",
+    "paper_title": "<<FILL_ME:paper_title — replace with actual paper title>>",
+    "paper_abstract": "<<FILL_ME:paper_abstract — replace with 1-3 sentence summary>>",
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // ─── 研究队列/数据集信息 (Study Cohort) ───
     // 描述论文中实际使用的原始数据队列的详细信息
@@ -333,7 +333,7 @@
     //     α      — 截距 (role: baseline)
     //     X₂     — 第二处理变量 (需在 hpp_mapping.X2 中映射)
     //
-    "equation_type": "E1/E2/E3/E4/E5/E6",
+    "equation_type": "<<FILL_ME:equation_type — pick exactly ONE of E1..E6, never a slash list>>",
     // ─── 本地构建方程（基于 E1-6 框架）───
     // 根据论文的统计方法，选择对应的 E1-6 方程模板，填入具体变量
     // 作用: 管线执行时使用此方程
@@ -402,14 +402,14 @@
         // 例: "LDL-C", "Metformin", "Systolic Blood Pressure"
         "iota": {
             "core": {
-                "name": "暴露/干预变量名称"
+                "name": "<<FILL_ME:iota.core.name — short exposure label>>"
             }
         },
         // ─── o: 结局坐标 ───
         // name: 结局变量名称（从论文 outcome 提取）/
         // type: "binary" (有/无事件) | "continuous" (连续指标) | "survival" (时间到事件)
         "o": {
-            "name": "结局变量名称",
+            "name": "<<FILL_ME:o.name — short outcome label>>",
             "type": "binary"
         },
         // ─── tau: 时间坐标 ───
@@ -461,8 +461,8 @@
         // IV: 工具变量（仅孟德尔随机化需要，其他设 null）
         // M: 中介变量名（仅 E4 需要，其他可省略）
         "rho": {
-            "X": "暴露变量名称",
-            "Y": "结局变量名称",
+            "X": "<<FILL_ME:rho.X — full step1 X string, including 'vs ...'>>",
+            "Y": "<<FILL_ME:rho.Y — full step1 Y string, including unit/timepoint>>",
             "Z": [],
             "IV": null
         }
@@ -513,7 +513,7 @@
         "adjustment_set": [],
         // ─── equation_type: 此效应值对应的方程类型 ───
         // 从 E1-E6 中选择，应与顶层 equation_type 一致
-        "equation_type": "E1/E2/E3/E4/E5/E6",
+        "equation_type": "<<FILL_ME:equation_type — pick exactly ONE of E1..E6, never a slash list>>",
         // ─── equation_formula: 此效应值对应的数学公式 ───
         // ⚠ 必须使用数学符号表达，严禁纯文字描述！
         // 应与顶层 equation_formula.formula 一致或高度相似
@@ -534,18 +534,18 @@
         // tentative: 数据集中没有直接对应的字段，但可以通过现有字段计算得出（例如：BMI若未直接提供，需由身高体重计算）。，仅为猜测，不确定匹配是否正确。
         // missing: 在提供的 JSON 文件中完全找不到相关数据集或字段。
         "X": {
-            "name": "暴露变量名称",
-            "dataset": "016-blood_tests",
-            "field": "bt__ldl_cholesterol_float_value",
-            "status": "exact"
+            "name": "<<FILL_ME:hpp_mapping.X.name — short X label, must match iota.core.name>>",
+            "dataset": "<<FILL_ME:hpp_mapping.X.dataset>>",
+            "field": "<<FILL_ME:hpp_mapping.X.field>>",
+            "status": "<<FILL_ME:exact|close|tentative|missing>>"
         },
         // Y: 结局变量的 HPP 字段（所有方程类型必需）
         // name: 论文中该变量的名称（应与 epsilon.rho.Y 一致）
         "Y": {
-            "name": "结局变量名称",
-            "dataset": "021-medical_conditions",
-            "field": "icd11_code",
-            "status": "exact"
+            "name": "<<FILL_ME:hpp_mapping.Y.name — short Y label, must match o.name>>",
+            "dataset": "<<FILL_ME:hpp_mapping.Y.dataset>>",
+            "field": "<<FILL_ME:hpp_mapping.Y.field>>",
+            "status": "<<FILL_ME:exact|close|tentative|missing>>"
         },
         // ─── Z: 协变量/调整变量的 HPP 字段映射 ───
         // 对应 epsilon.rho.Z 和 literature_estimate.adjustment_set 中列出的每个变量

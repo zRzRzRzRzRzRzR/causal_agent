@@ -301,7 +301,11 @@ def _extract_methods_section(pdf_text: str) -> str:
         if idx != -1:
             methods_ends.append(idx)
 
-    end = min(methods_ends) if methods_ends else min(start + METHODS_MAX_LENGTH, len(pdf_text))
+    end = (
+        min(methods_ends)
+        if methods_ends
+        else min(start + METHODS_MAX_LENGTH, len(pdf_text))
+    )
     return pdf_text[start:end]
 
 

@@ -142,7 +142,22 @@ Z: ["Age", "Sex", "TDI"]  ← 错！公式中没有 γ^T·Z 项，Z 必须为 []
 正确做法：如果你的 equation 中没有 `+ γ^T·Z` 或 `+ γ₁·Age + γ₂·Sex` 等协变量项，那么 Z 就必须是 `[]`。**公式和 Z 必须一致。**
 
 ### 4. epsilon字段（来自论文）
-- `epsilon.Pi`: 人群标签 — `"adult_general"`（成人一般人群）、`"cvd"`（心血管疾病）、`"diabetes"`（糖尿病）、`"oncology"`（肿瘤）、`"pediatric"`（儿科）
+- `epsilon.Pi`: 人群标签 — **必须**从下面的白名单里精确挑一个；不在白名单内的就填 `"other"`，**不要乱套 cvd/adult_general**：
+  - `"adult_general"`（成人一般人群，如 UKB / NHANES 普通成人队列）
+  - `"cvd"`（明确以心血管疾病/CHD/卒中为主的人群）
+  - `"diabetes"`（糖尿病/前驱糖尿病人群）
+  - `"oncology"`（肿瘤人群）
+  - `"pediatric"`（儿科）
+  - `"respiratory"`（COPD、哮喘、肺纤维化等呼吸系统疾病）
+  - `"gi_disease"`（GERD / IBD / celiac 等消化系统疾病）
+  - `"infection"`（疟疾、结核、HIV 等感染人群）
+  - `"mental_health"`（抑郁、焦虑、PTSD 等精神健康人群）
+  - `"pregnancy"`（孕产妇队列）
+  - `"elderly"`（≥65 岁老年人为主）
+  - `"metabolic_syndrome"`（代谢综合征 / 肥胖人群）
+  - `"mr_general"`（孟德尔随机化使用 GWAS 汇总数据，无单一人群）
+  - `"other"`（任何不在以上 13 个里的人群）
+- **绝对禁止**：把 GERD/celiac/COPD/孕妇/精神健康人群硬贴成 `"cvd"` 或 `"adult_general"`。如果论文是 GERD → `"gi_disease"`；产后焦虑 RCT → `"pregnancy"` 或 `"mental_health"`；COPD → `"respiratory"`；MR 全表型 → `"mr_general"`。
 - `epsilon.iota.core.name`: 暴露变量的**简洁名称**（例如 `"Healthy Lifestyle Score"` 而非 `"Healthy Lifestyle Score 4 (Never smoking, Physically active, ...)"）`。
   - **仅对 `iota.core.name` 简化**：X 原始是 `"Healthy Lifestyle Score 4 vs 0"`，`iota.core.name` 填 `"Healthy Lifestyle Score"`。
   - **⚠️ `equation_formula_reported.X` 和 `epsilon.rho.X` 必须原样保留 step1 的完整 X**，包括 "vs Control" / "vs reference" / 剂量/层次等所有信息。**不要**为了与 iota.core.name 一致就从 rho.X 或 efr.X 里剥掉对照信息。三者允许不一致：iota 是简洁名，rho.X 和 efr.X 是完整 X。
@@ -318,6 +333,10 @@ step1 的 `Estimate:` 字段已经是从论文里抽出来的数值。step2 的 
 
 输出**一个完整的JSON对象**。它必须：
 
+0. **绝对不允许**输出模板里的中文占位符字符串。模板里出现的 `"论文完整标题"`、`"暴露变量名称"`、`"结局变量名称"`、`"协变量名称"`、`"对照组名称"` 等都是**示例**，**必须**用论文实际值替换。如果某字段无法从论文确定，填 `null`，**不要**保留中文占位符。下游 review 会把任何含这些字符串的边整条丢弃。
+0a. `equation_type` **必须**是 `"E1"`、`"E2"`、`"E3"`、`"E4"`、`"E5"`、`"E6"` 中的**恰好一个**。**禁止**输出 `"E1/E2/E3/E4/E5/E6"`、`"E1/E2"`、`"E1 or E2"` 等"全选"或多选答案。如果实在判断不准，按照"预验证方程元数据"给的建议填一个具体值。
+0b. `epsilon.Pi` 必须从前文 §4 给出的 14 项白名单里**精确**挑一个。**禁止**为了套规则把 GERD/celiac/COPD 标成 `"cvd"`。
+0c. `paper_title` 在同一篇论文的所有 edge 之间**必须完全一致**（一字不差）。下游会用 paper_title 做聚合，连字符 / 冒号 / 空格的差异都会导致同一篇被当成 4 篇。
 1. 匹配模板结构 — 所有顶级键都存在，**不多不少**
 2. 对未知字段使用`null`（不是`"..."`或空字符串）
 3. `theta_hat`必须是**数字**或`null`（不是字符串）

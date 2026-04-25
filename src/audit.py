@@ -1247,10 +1247,35 @@ def build_phase_b_prompt(
 
     edges_section = "\n".join(edge_section_parts)
 
-    # Truncate paper text
-    truncated_text = pdf_text[:max_text_chars]
+    # Long-paper handling: instead of slicing the front of the OCR text
+    # (which silently drops Tables sitting on later pages of papers like
+    # 32895551), pull a Results/Tables-biased excerpt and then keyword-
+    # refine using the X/Y/theta_hat of the edges currently being audited.
     if len(pdf_text) > max_text_chars:
-        truncated_text += "\n\n[... truncated ...]"
+        # Lazy import to avoid a cycle on module load.
+        from .review import (
+            _select_relevant_chunks,
+            _spot_check_keywords,
+            select_results_and_tables,
+        )
+
+        keywords: List[str] = []
+        for edge in edges[:max_edges_per_call]:
+            theta = edge.get("literature_estimate", {}).get("theta_hat") or 0.0
+            keywords.extend(_spot_check_keywords(edge, theta))
+
+        results_pool = select_results_and_tables(
+            pdf_text, max_total_chars=max(max_text_chars + 8000, 32000)
+        )
+        truncated_text = _select_relevant_chunks(
+            results_pool, keywords, max_total_chars=max_text_chars
+        )
+        truncated_text += (
+            f"\n\n[... keyword-selected excerpt — "
+            f"{len(truncated_text)} chars of {len(pdf_text)} total ...]"
+        )
+    else:
+        truncated_text = pdf_text
 
     prompt = (
         f"{error_patterns_section}"

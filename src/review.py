@@ -1,10 +1,145 @@
 import json
+import re
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Set, Tuple
 
 from .hpp_mapper import HPPMapper
 from .llm_client import GLMClient
 from .template_utils import compute_fill_rate, validate_filled_edge
+
+# ---------------------------------------------------------------------------
+# Placeholder & normalization helpers
+# ---------------------------------------------------------------------------
+
+# Strings that almost always indicate an unfilled template slot.
+# Hit on any of these → the edge is poisoned and must be flagged.
+PLACEHOLDER_TOKENS: Tuple[str, ...] = (
+    # Chinese template skeleton placeholders (templates/hpp_mapping_template.json)
+    "论文完整标题",
+    "暴露变量名称",
+    "结局变量名称",
+    "变量名称",
+    "协变量名称",
+    "对照组名称",
+    "请填",
+    "待填",
+    "占位",
+    "示例值",
+    # English placeholders sometimes left by LLMs
+    "TBD",
+    "TODO",
+    "PLACEHOLDER",
+    "<example>",
+    "<EXAMPLE>",
+    "{{",
+    "}}",
+    # Self-describing markers we plant in the template
+    "<<FILL_ME",
+    "FILL_ME:",
+    # equation_type "全选" leakage
+    "E1/E2",
+    "E2/E3",
+    "E3/E4",
+    "E4/E5",
+    "E5/E6",
+)
+
+
+def _looks_like_placeholder_string(s: str) -> bool:
+    if not s:
+        return False
+    s = s.strip()
+    if not s:
+        return False
+    for tok in PLACEHOLDER_TOKENS:
+        if tok in s:
+            return True
+    # Pure Chinese-noun placeholder pattern: ends with a generic role word.
+    if len(s) <= 12 and any(s.endswith(suf) for suf in ("名称", "占位符", "变量")):
+        return True
+    return False
+
+
+def has_placeholder(value: Any) -> bool:
+    """Recursively scan an edge / dict / list / scalar for placeholder strings."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return _looks_like_placeholder_string(value)
+    if isinstance(value, dict):
+        return any(has_placeholder(v) for v in value.values())
+    if isinstance(value, list):
+        return any(has_placeholder(v) for v in value)
+    return False
+
+
+def collect_placeholder_locations(edge: Dict) -> List[str]:
+    """Return a list of dotted-path strings pointing at placeholder fields in edge."""
+    hits: List[str] = []
+
+    def _walk(node: Any, path: str) -> None:
+        if isinstance(node, str):
+            if _looks_like_placeholder_string(node):
+                hits.append(f"{path}={node!r}")
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, f"{path}.{k}" if path else str(k))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                _walk(v, f"{path}[{i}]")
+
+    _walk(edge, "")
+    return hits
+
+
+_DASH_CHARS = ("–", "—", "‑", "−", "‐")
+
+
+def _normalize_for_match(s: str) -> str:
+    """Normalize a variable string for comparison.
+
+    - lower-case
+    - fold Unicode dashes to ASCII '-'
+    - collapse whitespace and underscores into a single space
+    - strip simple quoting noise
+    """
+    if not s:
+        return ""
+    s = str(s).lower().strip()
+    for d in _DASH_CHARS:
+        s = s.replace(d, "-")
+    s = s.replace("'", "").replace('"', "")
+    s = re.sub(r"[\s_]+", " ", s)
+    return s.strip()
+
+
+# ---------------------------------------------------------------------------
+# Pi (population label) whitelist
+# ---------------------------------------------------------------------------
+
+# Keep this in sync with prompts/step2_fill_template.md.
+# Adding a value here without updating the prompt won't help — the LLM
+# still won't emit it. But removing a hard requirement here lets you
+# experiment with new labels in the prompt without false positives.
+VALID_PI_VALUES: Set[str] = {
+    "adult_general",
+    "cvd",
+    "diabetes",
+    "oncology",
+    "pediatric",
+    "respiratory",
+    "gi_disease",
+    "infection",
+    "mental_health",
+    "pregnancy",
+    "elderly",
+    "metabolic_syndrome",
+    "mr_general",
+    "other",
+}
+
+
+_STATUS_RANK = {"missing": 0, "tentative": 1, "close": 2, "exact": 3}
 
 
 def rerank_hpp_mapping(
@@ -15,17 +150,38 @@ def rerank_hpp_mapping(
 ) -> Dict[str, Any]:
     """
     For each role (X, Y), ask the LLM to pick the best HPP field from
-    the top-6 RAG candidates.  Updates edge['hpp_mapping'] in place.
+    the top-6 RAG candidates. Updates edge['hpp_mapping'] in place.
 
-    Returns a dict of changes: {role: {before, after, status, reason}}
+    Behavior changes vs. the original implementation:
+    - Skip rerank entirely when X / Y is a placeholder string.
+    - Prompt explicitly allows "all candidates wrong → status='missing'".
+    - When the LLM returns status='missing' with best>0, the candidate
+      is NOT applied — only the status is downgraded.
+    - When the LLM tries to demote an 'exact' mapping to a worse status,
+      the change is rejected unless the candidate itself is being kept.
     """
     changes: Dict[str, Any] = {}
     queries = _extract_role_queries(edge)
     hm = edge.get("hpp_mapping", {})
 
+    # Hard skip: if the edge itself is poisoned by template placeholders,
+    # rerank can only confabulate. Refuse to touch it.
+    if has_placeholder(edge):
+        return {
+            "skipped": True,
+            "reason": "edge contains placeholder strings; rerank refused",
+        }
+
     for role in roles:
         query = queries.get(role)
         if not query:
+            continue
+
+        if _looks_like_placeholder_string(query):
+            changes[role] = {
+                "skipped": True,
+                "reason": f"role query is a placeholder ({query!r})",
+            }
             continue
 
         candidates = mapper.index.search(query, top_k=8)
@@ -42,18 +198,32 @@ def rerank_hpp_mapping(
             current = {}
         current_ds = current.get("dataset", "N/A")
         current_field = current.get("field", "N/A")
+        old_status = current.get("status", "tentative")
 
         prompt = (
             f'Paper variable: "{query}" (role: {role})\n'
-            f"Current mapping: {current_ds} / {current_field}\n\n"
+            f"Current mapping: {current_ds} / {current_field}"
+            f" (status: {old_status})\n\n"
             f"Candidate HPP fields from data dictionary:\n"
             + "\n".join(candidate_lines)
             + "\n\n"
-            f"Reply in JSON:\n"
-            f'{{"best": index(1-{len(candidates[:6])}), '
+            "DECISION RULES — read carefully:\n"
+            "- status='exact'    → candidate measures the SAME concept,"
+            " same unit, same scale.\n"
+            "- status='close'    → candidate measures the same concept"
+            " but differs in unit / definition slightly.\n"
+            "- status='tentative'→ candidate captures a partial or related"
+            " aspect (composite).\n"
+            "- status='missing'  → NONE of the 6 candidates is a"
+            " reasonable match for the paper variable.\n"
+            "- DO NOT pick the 'least bad' candidate. If all 6 are wrong"
+            " concepts, set best=0 and status='missing'.\n"
+            "- If the current mapping is already best, set best=0"
+            " (status may still update).\n\n"
+            "Reply in JSON:\n"
+            f'{{"best": 0 or 1-{len(candidates[:6])}, '
             f'"status": "exact|close|tentative|missing", '
-            f'"reason": "brief reason"}}\n'
-            f"If current mapping is already best, set best=0."
+            f'"reason": "brief reason"}}'
         )
 
         try:
@@ -64,14 +234,45 @@ def rerank_hpp_mapping(
 
         best_idx = result.get("best", 0)
         reason = result.get("reason", "")
-        new_status = result.get("status", current.get("status", "tentative"))
+        new_status = result.get("status", old_status)
 
+        if new_status not in _STATUS_RANK:
+            new_status = old_status
+
+        # Branch 1: LLM said "all candidates are wrong" — keep mapping, downgrade status.
+        if new_status == "missing":
+            hm.setdefault(role, {})["status"] = "missing"
+            changes[role] = {
+                "before_status": old_status,
+                "after_status": "missing",
+                "kept_existing": True,
+                "reason": f"all candidates rejected: {reason}",
+            }
+            continue
+
+        # Branch 2: candidate selected.
         if 0 < best_idx <= len(candidates[:6]):
             chosen = candidates[best_idx - 1]
-            new_ds = chosen.dataset_id  # Keep original hyphen format
+            new_ds = chosen.dataset_id
             new_field = chosen.field_name
 
-            if new_ds != current_ds or new_field != current_field:
+            same_target = new_ds == current_ds and new_field == current_field
+
+            if not same_target:
+                # Refuse to demote a confidently 'exact' mapping by swapping
+                # in a different candidate at lower confidence. The LLM tends
+                # to confabulate "close" matches when the real answer is missing.
+                if _STATUS_RANK.get(old_status, 1) > _STATUS_RANK.get(new_status, 1):
+                    changes[role] = {
+                        "kept_existing": True,
+                        "before": f"{current_ds}/{current_field}",
+                        "rejected_after": f"{new_ds}/{new_field}",
+                        "before_status": old_status,
+                        "rejected_status": new_status,
+                        "reason": f"refused downgrade: {reason}",
+                    }
+                    continue
+
                 changes[role] = {
                     "before": f"{current_ds}/{current_field}",
                     "after": f"{new_ds}/{new_field}",
@@ -83,13 +284,40 @@ def rerank_hpp_mapping(
                     "field": new_field,
                     "status": new_status,
                 }
-        elif best_idx == 0 and new_status != current.get("status"):
-            hm.setdefault(role, {})["status"] = new_status
-            changes[role] = {
-                "before_status": current.get("status"),
-                "after_status": new_status,
-                "reason": f"status updated: {reason}",
-            }
+            elif new_status != old_status:
+                # Same target, just status update. Still don't allow demotion
+                # without evidence — the LLM saying "exact→close" with no field
+                # change is usually self-doubt, not new information.
+                if _STATUS_RANK.get(old_status, 1) > _STATUS_RANK.get(new_status, 1):
+                    changes[role] = {
+                        "kept_existing": True,
+                        "before_status": old_status,
+                        "rejected_status": new_status,
+                        "reason": f"refused status downgrade: {reason}",
+                    }
+                else:
+                    hm.setdefault(role, {})["status"] = new_status
+                    changes[role] = {
+                        "before_status": old_status,
+                        "after_status": new_status,
+                        "reason": f"status updated: {reason}",
+                    }
+        elif best_idx == 0 and new_status != old_status:
+            # Branch 3: best=0, only status changes. Same demotion guard.
+            if _STATUS_RANK.get(old_status, 1) > _STATUS_RANK.get(new_status, 1):
+                changes[role] = {
+                    "kept_existing": True,
+                    "before_status": old_status,
+                    "rejected_status": new_status,
+                    "reason": f"refused status downgrade: {reason}",
+                }
+            else:
+                hm.setdefault(role, {})["status"] = new_status
+                changes[role] = {
+                    "before_status": old_status,
+                    "after_status": new_status,
+                    "reason": f"status updated: {reason}",
+                }
 
     return changes
 
@@ -166,14 +394,27 @@ def filter_edges_by_priority(
 def check_population_consistency(edges: List[Dict]) -> List[Dict]:
     """
     All edges from the same paper should have the same Pi (population).
-    Flag inconsistency.
+    Also checks each Pi value against the VALID_PI_VALUES whitelist.
     """
-    issues = []
+    issues: List[Dict] = []
     pi_values = set()
-    for e in edges:
+    for i, e in enumerate(edges):
         pi = e.get("epsilon", {}).get("Pi", "")
         if pi:
             pi_values.add(pi)
+            if pi not in VALID_PI_VALUES:
+                issues.append(
+                    {
+                        "type": "pi_not_in_whitelist",
+                        "severity": "warning",
+                        "message": (
+                            f"Edge #{i+1}: Pi={pi!r} not in VALID_PI_VALUES; "
+                            f"prompt may have offered an unfit option for this paper "
+                            f"(consider adding to whitelist or fixing prompt)."
+                        ),
+                        "edge_indices": [i],
+                    }
+                )
 
     if len(pi_values) > 1:
         issues.append(
@@ -190,6 +431,129 @@ def check_population_consistency(edges: List[Dict]) -> List[Dict]:
     return issues
 
 
+def canonicalize_paper_titles(edges: List[Dict]) -> List[Dict]:
+    """
+    Collapse paper_title variants (whitespace / dash / colon noise) onto the
+    longest non-placeholder variant. Mutates edges in place. Returns issue
+    dicts for ANY remaining inconsistency that is not pure formatting noise.
+    """
+    issues: List[Dict] = []
+    titles = [e.get("paper_title", "") for e in edges]
+    real = [t for t in titles if t and not _looks_like_placeholder_string(t)]
+    if not real:
+        if any(t and _looks_like_placeholder_string(t) for t in titles):
+            issues.append(
+                {
+                    "type": "metadata_inconsistency",
+                    "severity": "error",
+                    "message": "All paper_title values are template placeholders.",
+                }
+            )
+        return issues
+
+    groups: Dict[str, List[str]] = {}
+    for t in real:
+        groups.setdefault(_normalize_for_match(t), []).append(t)
+
+    canonical = max(real, key=len)
+
+    for e in edges:
+        t = e.get("paper_title", "")
+        if not t:
+            continue
+        if _looks_like_placeholder_string(t) or _normalize_for_match(t) in groups:
+            e["paper_title"] = canonical
+
+    if len(groups) > 1:
+        issues.append(
+            {
+                "type": "metadata_inconsistency",
+                "severity": "warning",
+                "message": (
+                    f"{len(groups)} paper_title variants merged into "
+                    f"canonical form (longest variant kept)."
+                ),
+            }
+        )
+
+    return issues
+
+
+def canonicalize_edge_ids(edges: List[Dict]) -> List[Dict]:
+    """
+    Force a single EV-{year}-{author}#{n} prefix across all edges of a paper.
+    Picks the most-common (year, author) tuple. Mutates edges in place.
+    """
+    issues: List[Dict] = []
+    if not edges:
+        return issues
+
+    pat = re.compile(r"^EV-(\d{4}|YYYY)-([A-Za-z][A-Za-z0-9\-]*)")
+    parsed: List[Tuple[str, str]] = []
+    for e in edges:
+        eid = e.get("edge_id", "")
+        m = pat.match(eid)
+        if m:
+            parsed.append((m.group(1), m.group(2)))
+
+    if not parsed:
+        return issues
+
+    # Author tokens like "ZHENG", "Zheng-NatGen", "ZhengPhenome-wide" should
+    # collapse to the shortest pure-alpha prefix to maximize agreement.
+    def _author_root(a: str) -> str:
+        a = re.split(r"[-_]", a, maxsplit=1)[0]
+        # Trim any non-alpha tail glued on (e.g. "ZhengPhenome" → "Zheng")
+        m = re.match(r"^[A-Za-z]+", a)
+        return (m.group(0) if m else a).capitalize()
+
+    rooted = [(y, _author_root(a)) for y, a in parsed]
+    counter: Counter = Counter(rooted)
+    canonical_year, canonical_author = counter.most_common(1)[0][0]
+
+    distinct_prefixes = len({(y, a) for y, a in parsed})
+    if distinct_prefixes > 1:
+        issues.append(
+            {
+                "type": "edge_id_inconsistency",
+                "severity": "warning",
+                "message": (
+                    f"{distinct_prefixes} distinct edge_id prefixes detected; "
+                    f"unified to EV-{canonical_year}-{canonical_author}#N."
+                ),
+            }
+        )
+
+    for i, e in enumerate(edges):
+        new_eid = f"EV-{canonical_year}-{canonical_author}#{i + 1}"
+        e["edge_id"] = new_eid
+
+    return issues
+
+
+def detect_placeholder_edges(edges: List[Dict]) -> List[Dict]:
+    """
+    Scan filled edges for placeholder strings leaked from the Step 2 template
+    (e.g., '论文完整标题', '暴露变量名称'). Returns one issue per affected edge.
+    """
+    issues: List[Dict] = []
+    for i, e in enumerate(edges):
+        hits = collect_placeholder_locations(e)
+        if hits:
+            issues.append(
+                {
+                    "type": "placeholder_leak",
+                    "severity": "error",
+                    "message": (
+                        f"Edge #{i+1} (id={e.get('edge_id','?')}) carries "
+                        f"{len(hits)} unfilled template field(s): {hits[:5]}"
+                    ),
+                    "edge_indices": [i],
+                }
+            )
+    return issues
+
+
 def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
     """
     Check for issues across the full set of edges from one paper.
@@ -202,13 +566,19 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
     # -- Population consistency --
     issues.extend(check_population_consistency(edges))
 
-    # -- Exact duplicate detection (original) --
+    # -- Exact duplicate detection --
+    # Use _normalize_for_match so that underscores vs spaces vs Unicode
+    # dashes don't fragment the signature. Without this, the LLM emitting
+    # "Sleep_deprivation_..." on some edges and "Sleep deprivation ..." on
+    # others (common in the 51-batch papers) would silently bypass dedup.
     edge_sigs: List[Tuple[int, Tuple[str, str, str]]] = []
     for i, e in enumerate(edges):
         rho = e.get("epsilon", {}).get("rho", {})
-        x = str(rho.get("X", "")).lower().strip()
-        y = str(rho.get("Y", "")).lower().strip()
-        sub = str(e.get("literature_estimate", {}).get("subgroup", "")).lower().strip()
+        x = _normalize_for_match(rho.get("X", ""))
+        y = _normalize_for_match(rho.get("Y", ""))
+        sub = _normalize_for_match(
+            e.get("literature_estimate", {}).get("subgroup", "") or ""
+        )
         edge_sigs.append((i, (x, y, sub)))
 
     sig_counter = Counter(sig for _, sig in edge_sigs)
@@ -228,17 +598,24 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
             )
 
     # -- Metadata consistency --
-    titles: Set[str] = set()
+    # Use normalized comparison so that ":" vs "," vs "_" vs space variants
+    # of the same title don't all fire as separate inconsistencies. After
+    # canonicalize_paper_titles has run upstream this should usually be 1.
+    title_groups: Dict[str, List[str]] = {}
     for e in edges:
         t = e.get("paper_title", "")
-        if t:
-            titles.add(t)
-    if len(titles) > 1:
+        if not t:
+            continue
+        title_groups.setdefault(_normalize_for_match(t), []).append(t)
+    if len(title_groups) > 1:
         issues.append(
             {
                 "type": "metadata_inconsistency",
                 "severity": "error",
-                "message": f"Multiple paper_titles: {titles}",
+                "message": (
+                    f"{len(title_groups)} distinct paper_titles after "
+                    f"normalization: {[v[0] for v in title_groups.values()]}"
+                ),
             }
         )
 
@@ -307,6 +684,213 @@ def check_cross_edge_consistency(edges: List[Dict]) -> List[Dict]:
     return issues
 
 
+_PAGE_MARK_RE = re.compile(r"<!--\s*Page\s+(\d+)\s*-->", re.IGNORECASE)
+
+
+def split_pages(pdf_text: str) -> List[Tuple[int, str]]:
+    """
+    Split an OCR `combined.md` into [(page_no, text), ...] using the
+    `<!-- Page N -->` markers planted by src/ocr.py. If no markers are
+    present (e.g. an old cache or a non-OCR text), return [(1, pdf_text)].
+    """
+    if not pdf_text:
+        return []
+    marks = list(_PAGE_MARK_RE.finditer(pdf_text))
+    if not marks:
+        return [(1, pdf_text)]
+
+    pages: List[Tuple[int, str]] = []
+    for i, m in enumerate(marks):
+        page_no = int(m.group(1))
+        body_start = m.end()
+        body_end = marks[i + 1].start() if i + 1 < len(marks) else len(pdf_text)
+        body = pdf_text[body_start:body_end].strip()
+        if body:
+            pages.append((page_no, body))
+    return pages
+
+
+# Sections we usually want when verifying numeric extractions.
+_RESULTS_HEADERS = re.compile(
+    r"^\s*#{1,4}\s*"
+    r"(results?|findings?|primary outcomes?|secondary outcomes?|"
+    r"main findings?|protein.{0,30}phenotype|associations?)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_END_OF_RESULTS_HEADERS = re.compile(
+    r"^\s*#{1,4}\s*"
+    r"(discussion|conclusions?|limitations?|references?|"
+    r"acknowled?gments?|funding|competing interests?|data availability)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_TABLE_HEADER = re.compile(r"(?:^|\n)\s*(?:#{0,4}\s*)?Table\s+\d+[^\n]*", re.IGNORECASE)
+_TABLE_CONTENT = re.compile(r"<table[\s>]", re.IGNORECASE)
+_FIGURE_LEGEND = re.compile(
+    r"(?:^|\n)\s*(?:#{0,4}\s*)?(?:Fig(?:ure)?|Extended Data Fig)\.?\s*\d+",
+    re.IGNORECASE,
+)
+
+
+def select_results_and_tables(
+    pdf_text: str,
+    max_total_chars: int = 28000,
+) -> str:
+    """
+    Pull pages that are likely to contain numeric findings:
+
+      1. Every page from the first Results/Findings header up to (but not
+         including) the first Discussion/Conclusion/References header.
+         This is what the LLM actually wants — the Results section runs
+         multiple pages and they need to stay together.
+      2. Every page with an explicit "Table N" header, plus the next
+         page (table data sometimes wraps in 2-column layouts).
+      3. Every page containing raw <table> markup (numeric tables that
+         survived OCR but lost their caption).
+      4. Every page with a figure legend (small but often quotes the
+         specific values).
+
+    Falls back to the leading chunk if no Results-section pages can be
+    identified, so the caller is never handed an empty string.
+    """
+    pages = split_pages(pdf_text)
+    if not pages:
+        return ""
+
+    # Pass 1: find Results-section span.
+    results_start: int = -1
+    results_end: int = len(pages)
+    for i, (_, body) in enumerate(pages):
+        if results_start < 0 and _RESULTS_HEADERS.search(body):
+            results_start = i
+            continue
+        if results_start >= 0 and _END_OF_RESULTS_HEADERS.search(body):
+            results_end = i
+            break
+
+    keep_idx: Set[int] = set()
+    if results_start >= 0:
+        for i in range(results_start, min(results_end, len(pages))):
+            keep_idx.add(i)
+
+    # Pass 2: tables, table content, figure legends — anywhere in the paper.
+    for i, (_, body) in enumerate(pages):
+        if (
+            _TABLE_HEADER.search(body)
+            or _TABLE_CONTENT.search(body)
+            or _FIGURE_LEGEND.search(body)
+        ):
+            keep_idx.add(i)
+            keep_idx.add(i + 1)
+
+    keep_idx = {i for i in keep_idx if 0 <= i < len(pages)}
+
+    if not keep_idx:
+        # No headers, no tables, no figures — best effort: front of paper.
+        return pdf_text[:max_total_chars]
+
+    parts: List[str] = []
+    used = 0
+    for i in sorted(keep_idx):
+        page_no, body = pages[i]
+        chunk = f"<!-- Page {page_no} -->\n{body}"
+        if used + len(chunk) > max_total_chars and parts:
+            break
+        parts.append(chunk)
+        used += len(chunk)
+    return "\n\n".join(parts) if parts else pdf_text[:max_total_chars]
+
+
+def _select_relevant_chunks(
+    pdf_text: str,
+    keywords: List[str],
+    chunk_chars: int = 4000,
+    max_total_chars: int = 28000,
+) -> str:
+    """
+    Score sliding chunks of pdf_text by keyword count and return the
+    top-scoring concatenation (up to max_total_chars).
+
+    This replaces the naive pdf_text[:30000] slice, which silently lost
+    the results section of long papers (e.g. 51/32895551 phenome-wide MR,
+    where 4/5 spot_checks came back 'not_found' because the relevant
+    tables sit past the 30 000 char mark).
+    """
+    if not pdf_text:
+        return ""
+    if len(pdf_text) <= max_total_chars:
+        return pdf_text
+
+    # Prefer page-aligned chunking when OCR page markers are present —
+    # tables don't sit cleanly on 4000-char windows, and LLMs do better
+    # with intact page bodies than with sliding-window slices.
+    pages = split_pages(pdf_text)
+    chunks: List[Tuple[int, int, str]] = []
+    if len(pages) >= 2:
+        cursor = 0
+        for page_no, body in pages:
+            piece = f"<!-- Page {page_no} -->\n{body}"
+            chunks.append((cursor, cursor + len(piece), piece))
+            cursor += len(piece) + 2
+    else:
+        # Build chunks with 25% overlap so a result split across boundaries
+        # is still likely to land inside one chunk.
+        step = max(chunk_chars * 3 // 4, 1)
+        for start in range(0, len(pdf_text), step):
+            piece = pdf_text[start : start + chunk_chars]
+            if not piece.strip():
+                continue
+            chunks.append((start, start + len(piece), piece))
+
+    norm_keywords = [k.lower() for k in keywords if k]
+
+    def _score(piece: str) -> int:
+        low = piece.lower()
+        return sum(low.count(k) for k in norm_keywords)
+
+    scored = sorted(
+        ((idx, _score(p), p) for idx, (_, _, p) in enumerate(chunks)),
+        key=lambda x: (-x[1], x[0]),
+    )
+
+    selected: List[Tuple[int, str]] = []
+    used = 0
+    for idx, sc, piece in scored:
+        if sc <= 0:
+            break
+        if used + len(piece) > max_total_chars:
+            continue
+        selected.append((idx, piece))
+        used += len(piece)
+        if used >= max_total_chars:
+            break
+
+    if not selected:
+        return pdf_text[:max_total_chars]
+
+    selected.sort(key=lambda x: x[0])  # restore reading order
+    return "\n\n".join(p for _, p in selected)
+
+
+def _spot_check_keywords(edge: Dict, theta_val: float) -> List[str]:
+    """Build a set of strings the relevant paper passage probably contains."""
+    rho = edge.get("epsilon", {}).get("rho", {})
+    out: List[str] = []
+    for v in (rho.get("X"), rho.get("Y")):
+        if not v:
+            continue
+        s = str(v)
+        # Strip parenthetical noise so token matches more readily.
+        s_clean = re.sub(r"\([^)]*\)", " ", s)
+        for tok in re.split(r"[\s/_,;]+", s_clean):
+            tok = tok.strip(":,.;'\"")
+            if len(tok) >= 4 and not tok.isdigit():
+                out.append(tok)
+    if isinstance(theta_val, (int, float)):
+        out.append(f"{theta_val:.2f}")
+        out.append(f"{theta_val:.3f}")
+    return out
+
+
 def spot_check_values(
     edges: List[Dict],
     pdf_text: str,
@@ -315,25 +899,39 @@ def spot_check_values(
 ) -> List[Dict]:
     """
     Ask LLM to verify a sample of extracted numeric values against the paper.
+
+    Sampling strategy (changed from "first 5 with theta_hat"):
+    - Spread across distinct (X, Y) pairs to avoid wasting all 5 slots
+      on duplicates from the same Table row.
+    - For each sampled edge, retrieve the most keyword-relevant ~28 KB of
+      paper text instead of slicing the front of the PDF.
     """
     checkable: List[Tuple[int, Dict, float]] = []
+    seen_pairs: Set[Tuple[str, str]] = set()
     for i, e in enumerate(edges):
         lit = e.get("literature_estimate", {})
-        # Use theta_hat for spot checking since reported_HR etc are no longer stored
         theta = lit.get("theta_hat")
-        if theta is not None and isinstance(theta, (int, float)):
-            checkable.append((i, e, theta))
+        if theta is None or not isinstance(theta, (int, float)):
+            continue
+        rho = e.get("epsilon", {}).get("rho", {})
+        pair = (
+            _normalize_for_match(rho.get("X", "")),
+            _normalize_for_match(rho.get("Y", "")),
+        )
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        checkable.append((i, e, theta))
 
     to_check = checkable[:sample_size]
     if not to_check:
         return [{"status": "skipped", "reason": "No reported ratios to check"}]
 
     check_items: List[str] = []
+    keywords: List[str] = []
     for idx, (i, e, theta_val) in enumerate(to_check):
         rho = e.get("epsilon", {}).get("rho", {})
-        lit = e.get("literature_estimate", {})
         mu_type = e.get("epsilon", {}).get("mu", {}).get("core", {}).get("type", "")
-        # Convert theta back to ratio scale for human-readable check
         import math as _math
 
         if mu_type.startswith("log") and theta_val is not None:
@@ -351,6 +949,9 @@ def spot_check_values(
             f"{idx + 1}. {rho.get('X', '?')} -> {rho.get('Y', '?')}\n"
             f"   Extracted: {effect_label}={display_val}, theta_hat(log)={theta_val}\n"
         )
+        keywords.extend(_spot_check_keywords(e, theta_val))
+
+    paper_excerpt = _select_relevant_chunks(pdf_text, keywords)
 
     prompt = (
         "Verify each extracted result against the paper content below.\n"
@@ -359,7 +960,9 @@ def spot_check_values(
         + "\nReply in JSON:\n"
         '{"checks": [{"item": index, "verdict": "correct/incorrect/not_found", '
         '"correct_value": null_or_correct_value, "note": ""}]}\n\n'
-        f"--- Paper content ---\n{pdf_text[:30000]}"
+        f"--- Paper content (keyword-selected excerpt; "
+        f"{len(paper_excerpt)} chars of {len(pdf_text)} total) ---\n"
+        f"{paper_excerpt}"
     )
 
     try:
@@ -550,12 +1153,25 @@ def _generate_action_items(
         )
 
     # Spot check failures
+    nf_count = 0
+    sc_total = 0
     for c in spot_checks:
-        if c.get("verdict") == "incorrect":
+        v = c.get("verdict")
+        if v in ("correct", "incorrect", "not_found"):
+            sc_total += 1
+        if v == "incorrect":
             actions.append(
                 f"[SPOT_CHECK] Failed: {c.get('edge_id', '?')} "
                 f"correct_value={c.get('correct_value')}"
             )
+        elif v == "not_found":
+            nf_count += 1
+    if sc_total > 0 and nf_count >= max(2, sc_total // 2):
+        actions.append(
+            f"[SPOT_CHECK_LOW_COVERAGE] {nf_count}/{sc_total} spot-checks "
+            f"returned not_found — the relevant numbers may live outside the "
+            f"keyword-selected excerpt; manually verify these edges."
+        )
 
     if not actions:
         actions.append(

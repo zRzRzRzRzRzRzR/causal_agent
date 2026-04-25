@@ -1899,8 +1899,7 @@ class EdgeExtractionPipeline:
             stale, reason = _partial_is_stale()
             if stale:
                 print(
-                    f"  [Step 2] Ignoring step2_partial.json "
-                    f"(stale: {reason})",
+                    f"  [Step 2] Ignoring step2_partial.json " f"(stale: {reason})",
                     file=sys.stderr,
                 )
                 try:

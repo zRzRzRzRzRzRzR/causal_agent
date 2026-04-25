@@ -1358,11 +1358,148 @@ def _phase_c_autofix(
             return node, leaf, node[leaf]
         return None, None, None
 
-    def _types_compatible(old: Any, new: Any) -> bool:
+    # Field paths that the schema says hold a number (or None). When old=None
+    # we can't infer type from old alone; this list keeps prose suggestions
+    # from getting stuffed into numeric slots.
+    _NUMERIC_FIELDS: Set[str] = {
+        "literature_estimate.theta_hat",
+        "literature_estimate.p_value",
+        "literature_estimate.n",
+        "literature_estimate.ci_level",
+        "equation_formula_reported.reported_effect_value",
+        "equation_formula_reported.reported_p",
+        "study_cohort.sample_size.value",
+    }
+    _LIST_FIELDS: Set[str] = {
+        "literature_estimate.ci",
+        "literature_estimate.adjustment_set",
+        "epsilon.rho.Z",
+        "equation_formula_reported.Z",
+        "equation_formula_reported.reported_ci",
+    }
+    # Phrases that betray "this is a description, not a value". The LLM
+    # sometimes writes prose into suggested_fix when it doesn't know the
+    # answer ("Should extract OR value from Table 2"). We never apply those.
+    _PROSE_TOKENS_EN = (
+        "should ",
+        "extract ",
+        "should be",
+        "would be",
+        "could be",
+        "needs ",
+        "need to",
+        "from table",
+        "from figure",
+        "see ",
+        "refer to",
+        "verify",
+        "confirm ",
+        "clarify ",
+        "imputed ",
+        "approximate ",
+        "approximately",
+        "not reported",
+        "not provided",
+        "if using",
+        "if the",
+        "if effect",
+        "if applicable",
+        "if adjusted",
+        "if modeling",
+        "if no",
+        "remove this",
+        "reclassify",
+        "documented as",
+        "either ",
+        "rather than",
+        "unclear",
+        "ambiguous",
+        "cannot ",
+    )
+    # Common Chinese imperative / suggestive markers. Even one of these
+    # in suggested_fix means it's a comment to a human, not a value.
+    _PROSE_TOKENS_ZH = (
+        "应",
+        "如",
+        "或",
+        "建议",
+        "推荐",
+        "不能",
+        "必须",
+        "而非",
+        "如果",
+        "如无法",
+        "如使用",
+        "请",
+        "请填",
+        "待定",
+        "需要",
+        "可能",
+    )
+    # Markers that the LLM gave alternatives instead of one value.
+    _ALTERNATIVE_MARKERS = (
+        " or ",
+        " OR ",
+        " and/or ",
+        " 或 ",
+        "/或",
+        "或者",
+    )
+
+    def _looks_like_prose(s: str) -> bool:
+        if not isinstance(s, str):
+            return False
+        s_strip = s.strip()
+        if not s_strip:
+            return False
+        low = s_strip.lower()
+        for tok in _PROSE_TOKENS_EN:
+            if tok in low:
+                return True
+        for tok in _PROSE_TOKENS_ZH:
+            if tok in s_strip:
+                return True
+        # "X or Y" / "X 或 Y" — LLM gave alternatives, not a value.
+        # Only flag when the alternatives marker is *between* tokens
+        # (avoid catching "color" → contains "or" as substring).
+        for marker in _ALTERNATIVE_MARKERS:
+            if marker in s_strip:
+                return True
+        # Long strings with several spaces and no obvious numeric structure
+        # are almost always descriptive — values are short.
+        if len(s_strip) > 60 and s_strip.count(" ") >= 5:
+            return True
+        # Sentence-ending punctuation outside of common medical units is
+        # almost always prose (e.g. "...rather than 'reported'.").
+        if s_strip.endswith((".", "。", "?", "？", "!", "！")):
+            return True
+        return False
+
+    def _looks_like_number(s: str) -> bool:
+        try:
+            float(s.strip())
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def _types_compatible(old: Any, new: Any, path: str) -> bool:
         if old is None:
-            # If old is None, accept any non-None new value of a primitive
-            # type — this is the common "fill in missing" case.
-            return new is not None and not isinstance(new, dict)
+            # We don't know the schema type from old alone — consult the
+            # numeric/list field maps before accepting strings.
+            if new is None or isinstance(new, dict):
+                return False
+            if path in _NUMERIC_FIELDS:
+                if isinstance(new, (int, float)) and not isinstance(new, bool):
+                    return True
+                # Allow numeric strings ("4.1") — caller will coerce.
+                return isinstance(new, str) and _looks_like_number(new)
+            if path in _LIST_FIELDS:
+                return isinstance(new, list)
+            # Unknown field path: be conservative — accept primitive scalars,
+            # but never accept prose-like strings.
+            if isinstance(new, str):
+                return not _looks_like_prose(new)
+            return isinstance(new, (int, float, list, bool))
         if isinstance(old, list):
             return isinstance(new, list)
         if isinstance(old, bool):
@@ -1370,8 +1507,20 @@ def _phase_c_autofix(
         if isinstance(old, (int, float)):
             return isinstance(new, (int, float)) and not isinstance(new, bool)
         if isinstance(old, str):
-            return isinstance(new, str)
+            # Old was a string; reject prose-style replacements regardless
+            # (they're suggestions about what to do, not values).
+            return isinstance(new, str) and not _looks_like_prose(new)
         return type(old) is type(new)
+
+    def _coerce_numeric_string(new: Any, path: str) -> Any:
+        """If suggested fix is '4.1' (string) for a numeric field, return float(4.1)."""
+        if path in _NUMERIC_FIELDS and isinstance(new, str) and _looks_like_number(new):
+            try:
+                f = float(new.strip())
+                return int(f) if f.is_integer() and "." not in new.strip() else f
+            except ValueError:
+                return new
+        return new
 
     def _passes_magnitude_check(old: Any, new: Any) -> bool:
         if not isinstance(old, (int, float)) or not isinstance(new, (int, float)):
@@ -1412,8 +1561,10 @@ def _phase_c_autofix(
         parent, leaf, current = _resolve(path, edge)
         if parent is None or leaf is None:
             continue
-        if not _types_compatible(current, suggested):
+        if not _types_compatible(current, suggested, path):
             continue
+        # Coerce numeric strings ("4.1") into floats before magnitude check.
+        suggested = _coerce_numeric_string(suggested, path)
         if not _passes_magnitude_check(current, suggested):
             continue
         # All gates passed — apply.

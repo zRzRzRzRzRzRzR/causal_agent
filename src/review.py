@@ -137,10 +137,7 @@ _GENERIC_PI_LABELS: Set[str] = {"adult_general", "other", "general", ""}
 
 
 def _pi_is_generic(label: str) -> bool:
-    return (
-        not isinstance(label, str)
-        or label.strip().lower() in _GENERIC_PI_LABELS
-    )
+    return not isinstance(label, str) or label.strip().lower() in _GENERIC_PI_LABELS
 
 
 def reconcile_pi(edges: List[Dict]) -> List[Dict]:

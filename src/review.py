@@ -1060,23 +1060,35 @@ def spot_check_values(
     keywords: List[str] = []
     for idx, (i, e, theta_val) in enumerate(to_check):
         rho = e.get("epsilon", {}).get("rho", {})
-        mu_type = e.get("epsilon", {}).get("mu", {}).get("core", {}).get("type", "")
+        mu_core = e.get("epsilon", {}).get("mu", {}).get("core", {})
+        mu_type = mu_core.get("type", "")
+        mu_scale = mu_core.get("scale", "")
         import math as _math
 
-        if mu_type.startswith("log") and theta_val is not None:
+        # Build a faithful "Extracted: …" line. The previous version always
+        # appended `theta_hat(log)=…` regardless of the edge's actual
+        # mu.core.scale, which made the LLM flag identity-scale edges
+        # (continuous outcomes, MD/BETA) as "incorrect" because the label
+        # contradicted the value. Now: print the scale only when it really
+        # is log; for identity-scale edges, just print "theta_hat=…".
+        on_log_scale = (mu_scale == "log") or mu_type.startswith("log")
+
+        if on_log_scale and theta_val is not None:
             try:
                 display_val = round(_math.exp(theta_val), 2)
-                effect_label = mu_type.replace("log", "")
+                effect_label = mu_type.replace("log", "") or mu_type
             except (OverflowError, ValueError):
                 display_val = theta_val
                 effect_label = mu_type
+            theta_label = f"theta_hat(log)={theta_val}"
         else:
             display_val = theta_val
-            effect_label = mu_type
+            effect_label = mu_type or "value"
+            theta_label = f"theta_hat={theta_val}"
 
         check_items.append(
             f"{idx + 1}. {rho.get('X', '?')} -> {rho.get('Y', '?')}\n"
-            f"   Extracted: {effect_label}={display_val}, theta_hat(log)={theta_val}\n"
+            f"   Extracted: {effect_label}={display_val}, {theta_label}\n"
         )
         keywords.extend(_spot_check_keywords(e, theta_val))
 

@@ -1578,12 +1578,17 @@ def _safe_spot_check(
 
         for idx, (i, e, theta_val) in enumerate(checkable[:sample_size]):
             rho = e.get("epsilon", {}).get("rho", {})
+            mu_core = e.get("epsilon", {}).get("mu", {}).get("core", {})
+            mu_scale = mu_core.get("scale", "")
+            mu_type = mu_core.get("type", "")
+            on_log = (mu_scale == "log") or mu_type.startswith("log")
+            scale_hint = "log scale" if on_log else "identity scale"
             keywords = _spot_check_keywords(e, theta_val)
             excerpt = _select_relevant_chunks(pdf_text, keywords, max_total_chars=14000)
             try:
                 prompt = (
                     f"Verify: {rho.get('X', '?')} -> {rho.get('Y', '?')}\n"
-                    f"Extracted theta_hat (log scale): {theta_val}\n"
+                    f"Extracted theta_hat ({scale_hint}): {theta_val}\n"
                     f'Reply JSON: {{"verdict": "correct/incorrect/not_found", '
                     f'"correct_value": null}}\n\n'
                     f"Paper (keyword-selected excerpt, "

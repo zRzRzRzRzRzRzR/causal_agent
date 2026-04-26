@@ -1645,13 +1645,16 @@ class EdgeExtractionPipeline:
         enable_step4_llm: bool = True,
         step4_max_edges_per_call: int = 5,
         # Phase C deterministic autofix using Phase B suggested_fix.
-        # Off by default. When on, the safe default is "fill-only" mode:
-        # only fills missing/empty values (None, "", [], [None,None]),
-        # never overwrites an existing value with the LLM's suggestion.
-        enable_phase_c_autofix: bool = False,
+        # Defaults to ON in fill-only mode — only fills missing/empty
+        # values (None, "", [], [None,None]), never overwrites existing
+        # ones, so it cannot stomp on correct data with an LLM "correction".
+        # The fill-only fixes (covering empty Z lists, missing theta_hat /
+        # CI / sample_size) are essentially free quality wins.
+        enable_phase_c_autofix: bool = True,
         # Allow Phase C to overwrite existing non-empty values too. Riskier
         # — Phase B's LLM suggestions overwrite ~5–10% of correct values
-        # with wrong ones in our test runs. Off by default.
+        # with wrong ones in our test runs. Off by default. Enable only
+        # after manually eyeballing Phase B output on a small batch.
         phase_c_aggressive: bool = False,
         error_patterns_path: Optional[str] = None,
         # Reference GT options (NEW)

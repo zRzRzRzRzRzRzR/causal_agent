@@ -1,6 +1,14 @@
-# 证据边缘提取工具 3.20
+# 证据边缘提取工具 3.30
 
 从学术论文 PDF 中自动提取因果关系边，并映射到 HPP（Human Phenotype Project）数据字典，生成符合统一模板的 JSON 输出。
+
+> **3.30 主要变化（vs 3.20）**：
+> - **`--resume` / `--phase-c-autofix` 默认 ON**——推荐配置直接 `python batch_run.py -i ./pdfs -o ./output` 即可，无需手动加 flag。
+> - 新增 Step 4 **Phase C** 确定性自动修复，默认 `fill-only` 模式（只填空，不覆盖正确值）；激进模式需显式 `--phase-c-aggressive`。
+> - Step 3 `review.py` 新增**占位符过滤** / **paper_title 与 edge_id canonicalize** / **Pi 软共识**（无白名单依赖，对未见过的人群标签自动适应） / **rerank 状态降级保护** / **去重键归一化**。
+> - 长论文 `select_results_and_tables` 改用 **IMRAD 结构锚点**召回 Results 区域，不再依赖章节标题关键词列表（解决 review 论文 / Nature-style Methods-后置 layout / 章节命名千变万化等问题）。
+> - 模板里的中文占位符（`论文完整标题` / `暴露变量名称` 等）替换为 `<<FILL_ME:...>>` 自描述标记；Step 2 LLM 输出后立即 `_clean_fill_markers` 清扫，未填的字段自动转 `status="missing"`。
+> - `equation_type` 强校验为 `{E1..E6}` enum，任何 `E0` / `linear` / `Cox` 等乱字符串都会被拦截并尝试从 `literature_estimate.equation_type` 恢复。
 
 ---
 
@@ -56,6 +64,8 @@ PDF 论文
 │  Step 4: 内容审计         │  → Phase A: 确定性检查（协变量/数值/HPP 幻觉检测）
 │                          │  → Phase A 自动修复（移除幻觉协变量、多余字段）
 │                          │  → Phase B: LLM 审计（Y 标签、协变量语义、样本量）
+│                          │  → Phase C: 把 Phase B 的 suggested_fix 安全应用回边
+│                          │    （fill-only 默认；--phase-c-aggressive 显式开覆盖）
 └────────┬─────────────────┘
          │
          ▼
@@ -91,7 +101,9 @@ Step 3b 一致性检查 + 模糊重复检测 → 只读
 Step 3c 抽查数值 → 只读（批量失败时自动降级为逐边检查）
   ↓
 Step 4 Phase A → 自动移除幻觉协变量和多余字段
-Step 4 Phase B → LLM 审计，生成 issues 列表
+Step 4 Phase B → LLM 审计，生成 issues 列表（每条带 suggested_fix）
+Step 4 Phase C → 默认 ON，把 Phase B suggested_fix 安全写回边（fill-only：
+                  只填 None / [] / [None,None] 等空值，不覆盖现有非空值）
   ↓
 最终 schema 清洗 → 删除 _validation 等内部字段，执行白名单过滤
   ↓
@@ -161,6 +173,18 @@ cp .env.example .env
 
 ## 运行方式
 
+### 推荐命令（默认就是生产配置）
+
+```bash
+# 默认行为：
+#   - --resume 默认 ON（已完成的文件跳过）
+#   - --phase-c-autofix 默认 ON 且为 fill-only（只填空，不覆盖）
+#   - 其他保护性逻辑（占位符过滤、Pi 共识、IMRAD 结构召回等）总是开
+python batch_run.py -i ./pdfs -o ./output
+```
+
+如果你的 PDF 多到分了 batch 子目录（见下方"批量处理"），命令一样不变。
+
 ### 单个 PDF 处理
 
 ```bash
@@ -174,8 +198,14 @@ python batch_run.py -i ./pdfs -o ./output \
 # 跳过分类，强制指定类型
 python batch_run.py -i ./pdfs -o ./output --type associational
 
-# 启用断点续传（跳过已完成文件 + 跳过已缓存步骤）
-python batch_run.py -i ./pdfs -o ./output --resume
+# 强制重跑（忽略 --resume 默认值）
+python batch_run.py -i ./pdfs -o ./output --no-resume
+
+# 关掉 Phase C autofix（只看报告不改边）
+python batch_run.py -i ./pdfs -o ./output --no-phase-c-autofix
+
+# 谨慎：开启 aggressive Phase C（覆盖现有非空值，前提是你已人工核对过 Phase B 输出）
+python batch_run.py -i ./pdfs -o ./output --phase-c-aggressive
 ```
 
 ### 批量处理
@@ -247,7 +277,11 @@ python batch_run.py --type interventional
 | `--ocr-dir`           | OCR 缓存目录（默认 `./cache_ocr`）                  |
 | `--dpi`               | PDF 转图片 DPI（默认 400）                         |
 | `--no-validate-pages` | 跳过 OCR 尾页过滤                                 |
-| `--resume`            | 跳过已有缓存的步骤（step0/step1）+ 跳过已完成文件         |
+| `--resume`            | **默认 ON**。跳过已有缓存的步骤 + 跳过已完成文件。`--no-resume` 强制重跑 |
+| `--no-resume`         | 关闭 `--resume`，忽略已有产物全部重跑                       |
+| `--phase-c-autofix`   | **默认 ON（fill-only）**。Step 4 Phase C 把 Phase B 的 `suggested_fix` 写回 edge，但**只填空**（None/`""`/`[]`/`[None,None]`），永不覆盖。`--no-phase-c-autofix` 关闭 |
+| `--no-phase-c-autofix`| 关闭 Phase C，仅保留 Phase B 报告供人工审核                   |
+| `--phase-c-aggressive`| **默认 OFF**。允许 Phase C 覆盖现有非空值（如 `n: 5800 → 5792`、`model_type: linear → ANCOVA`）。LLM 偶尔把对的改错的，仅用于在小批人工核对过 Phase B 输出后才开 |
 | `--reference-dir`     | GT 参考数据目录（默认自动检测 `./reference/`）             |
 | `--error-patterns`    | 错误模式 JSON 路径（默认自动检测 `./reference/error_patterns.json`） |
 
@@ -451,11 +485,31 @@ v3 的 Step 2 对每条边做**单次 LLM 调用**，不再有重试循环。核
 
 | 子步骤 | 功能 |
 |--------|------|
-| 3a | HPP Rerank：LLM 从 top-6 RAG 候选中精排最佳映射 |
-| 3b | 跨边一致性：精确重复检测、metadata 一致性、model↔equation_type 跨边矛盾、theta 量级/符号检查 |
+| 3pre-0 | **占位符过滤**：识别并丢弃含 `<<FILL_ME:...>>` / 中文模板骨架 / `E1/E2/E3/...` slash list 的边 |
+| 3pre-1 | **Canonicalize 一致性字段**：paper_title 多变体折叠到最长版本；edge_id prefix 按多数票统一为 `EV-{year}-{author_root}#{N}` |
+| 3pre-1a | **Pi 软共识**：把 paper 内不同 Pi 投票收敛到一个值（按 count + "具体疾病 > 通用"二档），不依赖白名单 |
+| 3pre-2 | priority 过滤：丢弃 `priority="exploratory"` 的边 |
+| 3a | HPP Rerank：LLM 从 top-6 RAG 候选中精排最佳映射，带"全军覆没→status='missing'"出口 + 状态降级保护 |
+| 3b | 跨边一致性：归一化重复检测（折叠下划线/空格/Unicode dashes）、metadata 一致性、model↔equation_type 跨边矛盾、theta 量级检查 |
 | 3b+ | 模糊重复检测：token overlap 近重复边警告 |
-| 3c | Spot-check：LLM 核对抽样边的数值是否与论文原文一致（批量失败时自动降级为逐边检查） |
-| 3d | 质量报告：汇总所有检查结果，生成 action items（含语义错误标记） |
+| 3c | Spot-check：用关键词召回 PDF 相关段落（不再 `pdf_text[:30000]` 切片），优先采 distinct (X, Y) 对，大论文自动放大 sample_size |
+| 3d | 质量报告：含 `dropped_edges_by_review` 列出 review 丢弃的边及理由（占位符 / priority=exploratory 等） |
+
+**Pi 软共识规则**：从 100+ 篇跑批数据观察，LLM 在多边间常给同一篇论文不同的 Pi 值（如 GERD 论文出 `{gi_disease, adult_general, other}`）。`reconcile_pi` 不依赖任何硬白名单——按 (出现次数, 是否 generic) 字典序排序，generic 标签（`adult_general` / `other` / `general` / `""`）排后面，把多数票写回所有边。新人群（`hiv_pediatric` / `wtc_survivors` / `cirrhosis` 等）自动适配，无需修代码。
+
+**Results 区域召回（`select_results_and_tables`）**：长论文（>30K 字符）下游 spot_check / step2.5 null recovery / step4 audit 都需要"挑出最可能含数值结果的几页"喂 LLM。算法用 IMRAD **结构**判据，不依赖具体章节标题关键词：
+
+```
+1. 找出 first_methods_idx (Methods/Patients/Materials/Subjects/Study design 等)
+2. 找出 first_discussion_idx (Discussion/Conclusion/References/Acknowledgments 等)
+3. 若 methods < discussion → 传统 IMRAD：取 [methods, discussion) 的所有页
+   若 methods > discussion → Nature/Cell 风格：取 [start, discussion)（Methods 在尾部）
+   两个 anchor 任一缺失 → 各种降级
+4. 此外，paper 任意位置含 Table 标题 / <table> 标签 / Figure 图例的页都进集合
+5. 按页码排序、装到 max_total_chars 预算内
+```
+
+实测 32895551（112K Nature genetics 论文）从 0/3 命中关键 IL23R/Crohn 数据 → 3/3 命中。
 
 ### Step 4 内容审计（`audit.py`）
 
@@ -486,6 +540,38 @@ Phase A 检测到的 `action=remove`、`action=nullify`、`action=clear_ci_and_e
 以 few-shot 方式调用 LLM 对照论文原文逐字段核验，重点检查 4 类错误模式：Y 标签混淆、协变量语义错误（matching vs adjustment）、样本量混淆（screening vs final analysis）、统计方法误判。Phase A 已检测到的问题会注入 Phase B prompt 供参考。
 
 如果 `reference/error_patterns.json` 存在，Phase B 会在 prompt 开头注入历史错误模式分布和典型示例，引导 LLM 审核员重点关注高频错误类型。支持分批处理（`max_edges_per_llm_call` 控制每次 LLM 调用的边数）。
+
+每条 Phase B issue 带一个 `suggested_fix` 字段（LLM 给的建议值），写入 `step4_audit.json:phase_b_issues`。
+
+**Phase C（确定性自动修复，默认 ON / fill-only）**：
+
+把 Phase B 的 `suggested_fix` **不调用任何 LLM**地按规则写回 edge。设计目标：在不引入新风险的前提下吃掉那些"明显的填空"，避免人工审核每一篇都要重新填 Z / theta_hat / CI。
+
+两种模式：
+
+| 模式 | 触发 | 行为 | 风险 |
+|---|---|---|---|
+| fill-only（默认）| `--phase-c-autofix`（默认 ON）| 只在 `current_value` 是 None / `""` / `[]` / `[None, None]` 时写 | 0 风险覆盖正确值 |
+| aggressive | `--phase-c-aggressive` | 也允许覆盖非空值（如 `n: 5800 → 5792`） | LLM 偶尔把对的改错的（实测约 5–10%）|
+
+**安全门**（无论哪种模式都过这些）：
+
+1. `severity == "error"`（warning 永远不自动修）
+2. `suggested_fix` 不为空、不是 `"null"` / `"TBD"` / `""`
+3. **类型相符**：numeric 字段（theta_hat / n / p_value / ci_level / reported_effect_value 等）只接受 number 或可以转成 number 的字符串；list 字段（rho.Z / adjustment_set / ci）只接受 list；其他字段类型也对齐
+4. **量级合理**：number 改动幅度 ≤ 100×，避免 `0.5 → 5000` 这种明显的 LLM 误判
+5. **散文检测**：含 "should", "extract from", "if X then", 中文 "应/或/建议/修正" 等指示性词语的字符串被拒
+6. **多选项检测**：含 ` or ` / ` OR ` / ` 或 ` 等"alternative"标记的字符串被拒（LLM 给了多个选项而非一个值）
+7. **句末标点**：以 `.` / `。` / `?` / `？` 等结尾的字符串视为散文被拒
+
+修复结果写入 `step4_audit.json:phase_c_fixes_applied`：每条记录 `{edge_id, field, before, after, check}`，方便事后 diff。
+
+**为什么 fill-only 是默认**：
+
+实测在 100+ 篇论文上的统计：
+- Phase B 报告的 error 中，约 27% 是 `current_value=None` 的"填空"——这些 LLM 给的值通常是对的（因为 LLM 直接读到了论文里的数）
+- 剩 73% 是覆盖现有值——LLM 觉得"边的值不对，应该改成 X"，但其中 5–10% 实际上 LLM 自己判错了
+- fill-only 拿走前 27% 的免费收益，把后 73% 留给人工审核（看 `step4_audit.json:phase_b_issues` 即可），整体净安全
 
 ### 最终 Schema 清洗（`_final_schema_enforcement`）
 

@@ -224,10 +224,23 @@ def main():
         default=2,
         help="Max retries per edge when semantic validation fails (default: 2)",
     )
+    # --resume defaults to True (skip already-completed files). Pass
+    # --no-resume to force-rerun everything (e.g. after a code change
+    # that should regenerate outputs).
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Skip files whose edges.json already exists, and skip steps whose cache exists",
+        default=True,
+        help=(
+            "Skip files whose edges.json already exists, and skip steps "
+            "whose cache exists. Default: ON. Pass --no-resume to disable."
+        ),
+    )
+    parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Force re-run; ignore existing outputs.",
     )
     # ── Batch control ──
     parser.add_argument(
@@ -258,17 +271,26 @@ def main():
         action="store_true",
         help="Skip using vision model to cut paper references",
     )
+    # --phase-c-autofix defaults to True in fill-only mode — only fills
+    # missing/empty values, never overwrites existing ones. Free quality
+    # wins with no risk of stomping correct data. Pass --no-phase-c-autofix
+    # to disable entirely (Phase B report still produced for manual review).
     parser.add_argument(
         "--phase-c-autofix",
         action="store_true",
+        default=True,
         help=(
-            "Enable Step 4 Phase C: deterministic autofix using Phase B "
-            "suggested_fix. Off by default. With this flag alone, runs in "
-            "fill-only mode — only fills missing/empty values "
-            "(None / '' / [] / [None,None]) and never overwrites a "
-            "non-empty value, eliminating the risk of LLM 'corrections' "
-            "stomping on correct data."
+            "Enable Step 4 Phase C deterministic autofix in fill-only mode. "
+            "Default: ON. Only fills missing/empty values "
+            "(None / '' / [] / [None,None]); never overwrites non-empty. "
+            "Pass --no-phase-c-autofix to disable."
         ),
+    )
+    parser.add_argument(
+        "--no-phase-c-autofix",
+        dest="phase_c_autofix",
+        action="store_false",
+        help="Disable Step 4 Phase C autofix entirely.",
     )
     parser.add_argument(
         "--phase-c-aggressive",

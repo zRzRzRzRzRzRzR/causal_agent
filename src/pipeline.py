@@ -795,9 +795,9 @@ def step2_1_scale_conversion(
 
         efr = edge.setdefault("equation_formula_reported", {})
         lit = edge.setdefault("literature_estimate", {})
-        mu_core = (edge.setdefault("epsilon", {})
-                       .setdefault("mu", {})
-                       .setdefault("core", {}))
+        mu_core = (
+            edge.setdefault("epsilon", {}).setdefault("mu", {}).setdefault("core", {})
+        )
 
         rev = efr.get("reported_effect_value")
         rci = efr.get("reported_ci", [None, None])
@@ -813,14 +813,16 @@ def step2_1_scale_conversion(
             mu_core["scale"] = "identity"
             report["edges_processed"] += 1
             report["by_action"]["forced_null_non_model_statistic"] += 1
-            report["details"].append({
-                "edge_index": i,
-                "edge_id": edge.get("edge_id", "?"),
-                "statistic_type": st,
-                "action": "forced_null",
-                "before": {"theta_hat": old_theta, "ci": old_ci},
-                "after": {"theta_hat": None, "ci": [None, None]},
-            })
+            report["details"].append(
+                {
+                    "edge_index": i,
+                    "edge_id": edge.get("edge_id", "?"),
+                    "statistic_type": st,
+                    "action": "forced_null",
+                    "before": {"theta_hat": old_theta, "ci": old_ci},
+                    "after": {"theta_hat": None, "ci": [None, None]},
+                }
+            )
             continue
 
         # Compute branch: model_effect / between_group_effect.
@@ -875,15 +877,17 @@ def step2_1_scale_conversion(
                 mu_core["type"] = f"log{em}"
             report["edges_processed"] += 1
             report["by_action"]["computed_ratio_log"] += 1
-            report["details"].append({
-                "edge_index": i,
-                "edge_id": edge.get("edge_id", "?"),
-                "statistic_type": st,
-                "action": "ratio_log_conversion",
-                "reported": rev_f,
-                "computed_theta_hat": new_theta,
-                "computed_ci": [new_ci_lo, new_ci_hi],
-            })
+            report["details"].append(
+                {
+                    "edge_index": i,
+                    "edge_id": edge.get("edge_id", "?"),
+                    "statistic_type": st,
+                    "action": "ratio_log_conversion",
+                    "reported": rev_f,
+                    "computed_theta_hat": new_theta,
+                    "computed_ci": [new_ci_lo, new_ci_hi],
+                }
+            )
         elif em in difference_measures or st == "between_group_effect":
             # Difference: identity scale.
             lit["theta_hat"] = rev_f
@@ -894,15 +898,17 @@ def step2_1_scale_conversion(
                 mu_core["type"] = em or "MD"
             report["edges_processed"] += 1
             report["by_action"]["computed_difference_identity"] += 1
-            report["details"].append({
-                "edge_index": i,
-                "edge_id": edge.get("edge_id", "?"),
-                "statistic_type": st,
-                "action": "difference_identity_conversion",
-                "reported": rev_f,
-                "computed_theta_hat": rev_f,
-                "computed_ci": [lo_f, hi_f],
-            })
+            report["details"].append(
+                {
+                    "edge_index": i,
+                    "edge_id": edge.get("edge_id", "?"),
+                    "statistic_type": st,
+                    "action": "difference_identity_conversion",
+                    "reported": rev_f,
+                    "computed_theta_hat": rev_f,
+                    "computed_ci": [lo_f, hi_f],
+                }
+            )
         else:
             # effect_measure unknown — leave as-is, let Step 2.5 / audit flag.
             report["by_action"]["skipped_unknown_effect_measure"] += 1
@@ -955,11 +961,13 @@ def _step5_hpp_mapping(
             changes = rerank_hpp_mapping(edge, mapper, client)
             if changes:
                 report["edges_mapped"] += 1
-                report["changes"].append({
-                    "edge_index": i,
-                    "edge_id": edge.get("edge_id", "?"),
-                    "changes": changes,
-                })
+                report["changes"].append(
+                    {
+                        "edge_index": i,
+                        "edge_id": edge.get("edge_id", "?"),
+                        "changes": changes,
+                    }
+                )
         except Exception as e:
             print(
                 f"  [Step 5] Edge #{i+1} mapping failed: {e}",
@@ -1187,12 +1195,16 @@ def _apply_recovery_result(
     if workflow_mode == "evidence_first":
         require_hard_match = True
         if confidence == "low":
-            edge.setdefault("_step2_5_provenance", []).append({
-                "phase": "rejected_low_confidence",
-                "values_attempted": {
-                    "effect_value": new_val, "ci": new_ci, "p_value": new_p
-                },
-            })
+            edge.setdefault("_step2_5_provenance", []).append(
+                {
+                    "phase": "rejected_low_confidence",
+                    "values_attempted": {
+                        "effect_value": new_val,
+                        "ci": new_ci,
+                        "p_value": new_p,
+                    },
+                }
+            )
             return
     else:
         require_hard_match = enable_hard_match
@@ -1297,14 +1309,16 @@ def _apply_recovery_result(
     # _final_schema_enforcement strips it from the final edges.json).
     if recovered or rejected:
         prov = edge.setdefault("_step2_5_provenance", [])
-        prov.append({
-            "accepted": recovered,
-            "rejected": rejected,
-            "confidence": confidence or None,
-            "source_location": result.get("source_location"),
-            "evidence_text": result.get("evidence_text"),
-            "calculation": result.get("calculation"),
-        })
+        prov.append(
+            {
+                "accepted": recovered,
+                "rejected": rejected,
+                "confidence": confidence or None,
+                "source_location": result.get("source_location"),
+                "evidence_text": result.get("evidence_text"),
+                "calculation": result.get("calculation"),
+            }
+        )
 
 
 def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
@@ -2457,9 +2471,7 @@ class EdgeExtractionPipeline:
             try:
                 # Defer HPP mapping → don't pass dict path, Step 2 will
                 # leave hpp_mapping fields empty and Step 5 fills them later.
-                step2_hpp_path = (
-                    None if self.defer_hpp_mapping else self.hpp_dict_path
-                )
+                step2_hpp_path = None if self.defer_hpp_mapping else self.hpp_dict_path
                 filled = step2_fill_one_edge(
                     client=self.client,
                     pdf_text=pdf_text,
@@ -2588,9 +2600,7 @@ class EdgeExtractionPipeline:
             # When defer_hpp_mapping=True, force rerank off here. Step 5
             # below runs the HPP rerank as its own pass.
             step3_rerank = self.enable_rerank and not self.defer_hpp_mapping
-            step3_hpp_dict = (
-                None if self.defer_hpp_mapping else self.hpp_dict_path
-            )
+            step3_hpp_dict = None if self.defer_hpp_mapping else self.hpp_dict_path
             all_filled_edges, quality_report = step3_review(
                 edges=all_filled_edges,
                 pdf_text=pdf_text,

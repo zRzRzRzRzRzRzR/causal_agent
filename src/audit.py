@@ -899,8 +899,7 @@ def _check_ci_contains_point_estimate(edge: Dict) -> List[Dict[str, Any]]:
                     "severity": "error",
                     "field": field_label,
                     "message": (
-                        f"{field_label}={point_f} falls outside CI "
-                        f"[{lo_f}, {hi_f}]"
+                        f"{field_label}={point_f} falls outside CI " f"[{lo_f}, {hi_f}]"
                     ),
                 }
             )
@@ -1006,7 +1005,9 @@ def _check_equation_type_model_match(edge: Dict) -> List[Dict[str, Any]]:
         return issues
     efr = edge.get("equation_formula_reported", {}) or {}
     lit = edge.get("literature_estimate", {}) or {}
-    model_str = str(efr.get("model_type", "") or "") + " " + str(lit.get("model", "") or "")
+    model_str = (
+        str(efr.get("model_type", "") or "") + " " + str(lit.get("model", "") or "")
+    )
     model_norm = model_str.lower()
     if model_norm.strip() == "":
         return issues  # nothing to compare against
@@ -1048,8 +1049,13 @@ def _check_statistic_type_consistency(edge: Dict) -> List[Dict[str, Any]]:
     if not isinstance(sev, dict):
         return issues  # legacy mode — no Step 1 evidence to check against
     st_type = sev.get("statistic_type")
-    if not st_type or st_type in ("model_effect", "between_group_effect", "subgroup",
-                                  "sensitivity", "unknown"):
+    if not st_type or st_type in (
+        "model_effect",
+        "between_group_effect",
+        "subgroup",
+        "sensitivity",
+        "unknown",
+    ):
         return issues
 
     edge_id = edge.get("edge_id", "?")
@@ -1092,9 +1098,9 @@ def _check_statistic_type_consistency(edge: Dict) -> List[Dict[str, Any]]:
             )
 
     if st_type == "within_group_change":
-        c_field = (edge.get("epsilon", {}).get("rho", {}).get("C")
-                   or edge.get("C", "")
-                   or "")
+        c_field = (
+            edge.get("epsilon", {}).get("rho", {}).get("C") or edge.get("C", "") or ""
+        )
         c_norm = str(c_field).lower()
         if c_norm and "baseline" not in c_norm and "pre" not in c_norm:
             issues.append(
@@ -1480,31 +1486,40 @@ def apply_phase_a_fixes(
                     ci = edge.get("literature_estimate", {}).get("ci")
                     if isinstance(ci, list) and len(ci) == 2:
                         edge["literature_estimate"]["ci"] = [ci[1], ci[0]]
-                        applied_fixes.append({
-                            "edge_id": iss.get("edge_id", "?"),
-                            "action": "swapped_ci",
-                            "field": ci_field,
-                        })
+                        applied_fixes.append(
+                            {
+                                "edge_id": iss.get("edge_id", "?"),
+                                "action": "swapped_ci",
+                                "field": ci_field,
+                            }
+                        )
                 elif ci_field == "equation_formula_reported.reported_ci":
                     ci = edge.get("equation_formula_reported", {}).get("reported_ci")
                     if isinstance(ci, list) and len(ci) == 2:
-                        edge["equation_formula_reported"]["reported_ci"] = [ci[1], ci[0]]
-                        applied_fixes.append({
-                            "edge_id": iss.get("edge_id", "?"),
-                            "action": "swapped_reported_ci",
-                            "field": ci_field,
-                        })
+                        edge["equation_formula_reported"]["reported_ci"] = [
+                            ci[1],
+                            ci[0],
+                        ]
+                        applied_fixes.append(
+                            {
+                                "edge_id": iss.get("edge_id", "?"),
+                                "action": "swapped_reported_ci",
+                                "field": ci_field,
+                            }
+                        )
 
             elif action == "downgrade_grade":
                 # A15: theta_hat present but ci null → grade='C'
                 lit = edge.setdefault("literature_estimate", {})
                 lit["grade"] = "C"
-                applied_fixes.append({
-                    "edge_id": iss.get("edge_id", "?"),
-                    "action": "downgraded_grade",
-                    "before": iss.get("before"),
-                    "after": "C",
-                })
+                applied_fixes.append(
+                    {
+                        "edge_id": iss.get("edge_id", "?"),
+                        "action": "downgraded_grade",
+                        "before": iss.get("before"),
+                        "after": "C",
+                    }
+                )
 
             elif action == "drop_edge":
                 # A16: mark for removal. We don't actually delete here
@@ -1513,11 +1528,13 @@ def apply_phase_a_fixes(
                 edge["_drop_reason"] = iss.get(
                     "drop_reason", "phase_a_drop_unspecified"
                 )
-                applied_fixes.append({
-                    "edge_id": iss.get("edge_id", "?"),
-                    "action": "marked_for_drop",
-                    "drop_reason": edge["_drop_reason"],
-                })
+                applied_fixes.append(
+                    {
+                        "edge_id": iss.get("edge_id", "?"),
+                        "action": "marked_for_drop",
+                        "drop_reason": edge["_drop_reason"],
+                    }
+                )
 
     # After per-edge processing, materialize any drops requested.
     drop_count = sum(1 for e in fixed_edges if e.get("_drop_reason"))
@@ -1525,11 +1542,13 @@ def apply_phase_a_fixes(
         survivors: List[Dict] = []
         for e in fixed_edges:
             if e.get("_drop_reason"):
-                applied_fixes.append({
-                    "edge_id": e.get("edge_id", "?"),
-                    "action": "edge_dropped",
-                    "drop_reason": e.get("_drop_reason"),
-                })
+                applied_fixes.append(
+                    {
+                        "edge_id": e.get("edge_id", "?"),
+                        "action": "edge_dropped",
+                        "drop_reason": e.get("_drop_reason"),
+                    }
+                )
             else:
                 survivors.append(e)
         fixed_edges = survivors

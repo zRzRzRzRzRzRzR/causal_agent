@@ -57,7 +57,6 @@ Output (the third-tuple field):
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
-
 # Lower rank = higher priority = more likely to be "real" evidence.
 _STATISTIC_TYPE_RANK: Dict[str, int] = {
     "model_effect": 0,
@@ -142,14 +141,23 @@ def filter_edges_by_study_value(
         mutate the input). Each dropped edge gets a `_drop_reason` key.
     """
     if not edges:
-        return [], [], {
-            "kept_edges": [], "dropped_edges": [], "merge_or_duplicate_groups": [],
-            "needs_review": [],
-            "summary": {
-                "step1_count": 0, "step1_6_kept": 0, "step1_6_dropped": 0,
-                "by_drop_reason": {}, "paper_classification": paper_classification,
+        return (
+            [],
+            [],
+            {
+                "kept_edges": [],
+                "dropped_edges": [],
+                "merge_or_duplicate_groups": [],
+                "needs_review": [],
+                "summary": {
+                    "step1_count": 0,
+                    "step1_6_kept": 0,
+                    "step1_6_dropped": 0,
+                    "by_drop_reason": {},
+                    "paper_classification": paper_classification,
+                },
             },
-        }
+        )
 
     # ── Pass 1: tag each edge with index, group, score
     indexed: List[Tuple[int, Dict, Tuple, Tuple]] = []
@@ -171,12 +179,14 @@ def filter_edges_by_study_value(
         members.sort(key=lambda m: m[2])
         winner_idx = members[0][0]
         kept_indices.add(winner_idx)
-        merged_groups.append({
-            "group_key": list(gk),
-            "kept": winner_idx,
-            "dropped": [m[0] for m in members[1:]],
-            "reason": "duplicate_or_redundant_in_group",
-        })
+        merged_groups.append(
+            {
+                "group_key": list(gk),
+                "kept": winner_idx,
+                "dropped": [m[0] for m in members[1:]],
+                "reason": "duplicate_or_redundant_in_group",
+            }
+        )
 
     # ── Pass 3: blanket exclusions on the survivors
     needs_review_idx: List[int] = []
@@ -194,19 +204,23 @@ def filter_edges_by_study_value(
         has_num = e.get("has_numeric_estimate") is not False
 
         if prio == "exploratory" and not has_num:
-            drop_records.append({
-                "edge_index": i,
-                "drop_reason": "exploratory_without_numeric_estimate",
-                "statistic_type": st,
-                "priority": prio,
-            })
+            drop_records.append(
+                {
+                    "edge_index": i,
+                    "drop_reason": "exploratory_without_numeric_estimate",
+                    "statistic_type": st,
+                    "priority": prio,
+                }
+            )
             continue
 
         # Reviews don't usually carry primary evidence (the underlying
         # studies do). Keep but flag for human review.
-        if paper_classification.lower() in (
-            "review", "meta-analysis", "meta_analysis", "systematic_review"
-        ) and st == "unknown":
+        if (
+            paper_classification.lower()
+            in ("review", "meta-analysis", "meta_analysis", "systematic_review")
+            and st == "unknown"
+        ):
             needs_review_idx.append(i)
 
         # statistic_type=unknown without numbers → flag, don't drop.
@@ -219,16 +233,17 @@ def filter_edges_by_study_value(
     kept_edges: List[Dict] = []
     dropped_edges: List[Dict] = []
 
-    grouped_drops = {
-        d["edge_index"]: d for d in drop_records
-    }
+    grouped_drops = {d["edge_index"]: d for d in drop_records}
     for grp in merged_groups:
         for idx in grp["dropped"]:
-            grouped_drops.setdefault(idx, {
-                "edge_index": idx,
-                "drop_reason": grp["reason"],
-                "kept_winner": grp["kept"],
-            })
+            grouped_drops.setdefault(
+                idx,
+                {
+                    "edge_index": idx,
+                    "drop_reason": grp["reason"],
+                    "kept_winner": grp["kept"],
+                },
+            )
 
     for i, e in enumerate(edges):
         if i in final_keep:

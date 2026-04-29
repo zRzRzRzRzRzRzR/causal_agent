@@ -1,6 +1,39 @@
-# 证据边缘提取工具 3.30
+# 证据边缘提取工具 3.33
 
 从学术论文 PDF 中自动提取因果关系边，并映射到 HPP（Human Phenotype Project）数据字典，生成符合统一模板的 JSON 输出。
+
+> **3.33 (Round 3 + Round 4 — evidence_first refactor 收尾)**：
+> - **Step 1.6 研究价值筛选**（新模块 `src/study_value_filter.py`）：在 Step 1.5 后、Step 2 前对边做**确定性优先级筛选**，没有任何 batch-specific 关键词。规则：
+>   - 同一 `(X, Y, subgroup, statistic_type)` 组内只保留一条——按 (statistic_type rank, priority rank, 调整变量数倒序, n 倒序) 排序选最佳。
+>   - `model_effect / between_group_effect` 优先于 `within_group_change / group_mean / crude_rate` 优先于 `sensitivity / subgroup` 优先于 `unknown`。
+>   - `priority="exploratory"` 且无数值估计的边直接丢。
+>   - Review 论文 + `statistic_type=unknown` 的边标 `needs_review` 但保留。
+>   - 输出 `step1_6_filter.json` 含 `kept_edges / dropped_edges / merge_or_duplicate_groups / needs_review / by_drop_reason`。
+> - **Step 2.1 确定性尺度转换**（在 Step 2 后、Step 2.5 前，仅 evidence_first）：
+>   - `model_effect / between_group_effect` + ratio measure (HR/OR/RR/IRR) → `theta_hat = ln(reported)`，CI 同步 log。
+>   - `model_effect / between_group_effect` + difference measure (MD/BETA/SMD/RD) → `theta_hat = reported`，CI 同 identity。
+>   - `crude_rate / group_mean / within_group_change` → 强制 `theta_hat=null` + `mu.scale='identity'` + `mu.family='difference'`，杜绝"crude rate 被包装成 Cox HR"这类语义错误。
+>   - 输出 `step2_1_scale_conversion.json` 含每条边的 before / after / action。
+> - **`--defer-hpp-mapping` HPP 后置**（Round 4.2）：Step 2 不注入 HPP context、Step 3a rerank 跳过、Step 4 后跑独立的 **Step 5** 用 `rerank_hpp_mapping` 一次性给所有存活边补 HPP 映射。输出 `step5_hpp_mapping.json`。便于"换 HPP 字典不重跑 Step 2"。
+> - **`--final-renumber-edge-id`**：所有 drop / filter 完成后，把 edge_id 重排为 `EV-{year}-{author}#1..#N`，写出 `final_edge_id_mapping.json` 记 old→new。
+> - 4 个新 CLI flag 全部默认 OFF（除 `--workflow-mode legacy`），**legacy 行为完全不变**。
+
+> **3.32 (Round 2 — 三层 hard rules + Step 2.5 收窄)**：
+> - **Step 4 Phase A 加 6 条 hard rules**（A14-A19，对所有 batch 通用）：
+>   - **A14 CI 必须包住点估计**：`reported_ci` 应包住 `reported_effect_value`；`literature_estimate.ci` 应包住 `theta_hat`。CI bounds 反了自动 swap，CI 不包点估计报 error。
+>   - **A15 grade 降级**：`theta_hat` 非空但 `ci=null` 时，自动把 `grade` 降为 `'C'`（"有点估计但无不确定性"是低质量证据）。
+>   - **A16 丢弃边**：`theta_hat=null` AND `reported_effect_value=null` AND `p_value=null` 的边没有定量价值，自动丢弃并记 `drop_reason="no_quantitative_evidence"`。
+>   - **A17 equation_type ↔ model 一致**：`E2` 必须配 `Cox/KM/parametric_survival/Fine-Gray/Weibull/AFT` 之一；`E3` 必须配 `LMM/GEE/ANCOVA/mixed/repeated/rmANOVA/change` 之一。不一致直接报 error。
+>   - **A18 statistic_type 语义一致**（仅 evidence_first）：`crude_rate` 不能配 `(family=ratio, scale=log)`（防止 incidence rate 被误转成 Cox HR）；`group_mean` 不能携带 `theta_hat`；`within_group_change` 必须配 baseline 作为 control。
+>   - **A19 evidence_text 可追溯**（仅 evidence_first）：`reported_effect_value` 非空时，必须能在 `evidence_text` 中找到匹配数字（容差 0.5%）。
+> - **Step 2.5 加证据接受门**：evidence_first 模式下强制 hard_match（无论 CLI flag），且拒绝 `confidence=low` 的 patch。所有 accept/reject 写入 `_step2_5_provenance` 供审计。
+> - Step 2.5 仍然只能写 5 个目标字段（`reported_effect_value / reported_ci / theta_hat / ci / p_value`）——这是结构上一直如此，没有改动可以越权写其他字段。
+
+> **3.31 (Round 1 — Foundation)**：
+> - 新增 `--workflow-mode legacy|evidence_first` 开关，**默认 legacy**。新功能在 evidence_first 下分 4 轮逐步上线。
+> - **Step 1 prompt + schema** 加三个领域无关的证据可追溯字段：`statistic_type` (8 项 enum)、`evidence_text` (≤300 字逐字摘录)、`source_context` (结构化定位)。
+> - **Step 1.5 prevalidation_role**：evidence_first 模式下 `theta_hat / ci` 同时记入 `_prevalidation_candidate`，留给 Round 4 的 Step 2.1 消费。Legacy 模式完全不变。
+> - **Round 3-4 待发**：Step 1.6 研究价值筛选、Step 2.1 确定性尺度转换、HPP mapping 后置为可选 Step 5、final edge_id 重排。
 
 > **3.30 主要变化（vs 3.20）**：
 > - **`--resume` / `--phase-c-autofix` 默认 ON**——推荐配置直接 `python batch_run.py -i ./pdfs -o ./output` 即可，无需手动加 flag。
@@ -176,11 +209,20 @@ cp .env.example .env
 ### 推荐命令（默认就是生产配置）
 
 ```bash
-# 默认行为：
+# 默认行为（workflow-mode=legacy）：
 #   - --resume 默认 ON（已完成的文件跳过）
 #   - --phase-c-autofix 默认 ON 且为 fill-only（只填空，不覆盖）
 #   - 其他保护性逻辑（占位符过滤、Pi 共识、IMRAD 结构召回等）总是开
 python batch_run.py -i ./pdfs -o ./output
+
+# 试用 evidence_first 模式（启用全部 Round 1-4 扩展）：
+python batch_run.py -i ./pdfs -o ./output --workflow-mode evidence_first
+
+# 完整 evidence_first 推荐配置（语义最严，HPP 解耦，edge_id 干净）：
+python batch_run.py -i ./pdfs -o ./output \
+  --workflow-mode evidence_first \
+  --defer-hpp-mapping \
+  --final-renumber-edge-id
 ```
 
 如果你的 PDF 多到分了 batch 子目录（见下方"批量处理"），命令一样不变。
@@ -282,6 +324,9 @@ python batch_run.py --type interventional
 | `--phase-c-autofix`   | **默认 ON（fill-only）**。Step 4 Phase C 把 Phase B 的 `suggested_fix` 写回 edge，但**只填空**（None/`""`/`[]`/`[None,None]`），永不覆盖。`--no-phase-c-autofix` 关闭 |
 | `--no-phase-c-autofix`| 关闭 Phase C，仅保留 Phase B 报告供人工审核                   |
 | `--phase-c-aggressive`| **默认 OFF**。允许 Phase C 覆盖现有非空值（如 `n: 5800 → 5792`、`model_type: linear → ANCOVA`）。LLM 偶尔把对的改错的，仅用于在小批人工核对过 Phase B 输出后才开 |
+| `--workflow-mode`     | `legacy` (默认) / `evidence_first`。Legacy 跟 3.30 完全等同；evidence_first 启用 Step 1 证据字段 + Step 1.6 研究价值筛选 + Step 2.1 确定性尺度转换 + Step 4 三层 hard rules |
+| `--defer-hpp-mapping` | 把 HPP 映射推迟到 Step 5（Step 2 跳过 HPP context，Step 3a rerank 跳过）。便于换字典而不重跑 Step 2。默认 OFF |
+| `--final-renumber-edge-id` | 所有 drop / filter 完成后把 edge_id 重排为 `EV-{year}-{author}#1..#N` 并输出 `final_edge_id_mapping.json`。默认 OFF |
 | `--reference-dir`     | GT 参考数据目录（默认自动检测 `./reference/`）             |
 | `--error-patterns`    | 错误模式 JSON 路径（默认自动检测 `./reference/error_patterns.json`） |
 

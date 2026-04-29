@@ -838,6 +838,341 @@ def _check_dual_equation_consistency(edge: Dict) -> List[Dict[str, Any]]:
     return issues
 
 
+# ──────────────────────────────────────────────────────────────────────
+# A14–A19: evidence_first hard rules. These run unconditionally for the
+# rules that don't require Step 1 evidence fields, and gracefully no-op
+# in legacy mode for the rules that consume `_step1_evidence`.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _check_ci_contains_point_estimate(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A14 — quant hard rule: a reported CI must straddle its point estimate.
+    Catches LLM transcription errors where the CI was lifted from a
+    different table row than the effect value.
+
+    Checks:
+      - equation_formula_reported.reported_ci contains reported_effect_value
+      - literature_estimate.ci contains literature_estimate.theta_hat
+    """
+    issues: List[Dict[str, Any]] = []
+    edge_id = edge.get("edge_id", "?")
+    efr = edge.get("equation_formula_reported", {}) or {}
+    lit = edge.get("literature_estimate", {}) or {}
+
+    def _check_pair(point: Any, ci: Any, field_label: str) -> None:
+        if point is None or not isinstance(ci, list) or len(ci) != 2:
+            return
+        lo, hi = ci
+        if lo is None or hi is None:
+            return
+        try:
+            point_f = float(point)
+            lo_f = float(lo)
+            hi_f = float(hi)
+        except (TypeError, ValueError):
+            return
+        if lo_f > hi_f:
+            issues.append(
+                {
+                    "edge_id": edge_id,
+                    "check": "ci_bounds_inverted",
+                    "severity": "error",
+                    "field": field_label,
+                    "message": (
+                        f"{field_label}: CI lower={lo_f} > upper={hi_f} "
+                        f"(swapped or transcription error)"
+                    ),
+                    "action": "swap_ci",
+                    "ci_field": field_label,
+                }
+            )
+            lo_f, hi_f = hi_f, lo_f
+        # Use a small tolerance — extracted CIs sometimes round differently
+        # from the point. 1% of the half-width is plenty.
+        slack = max(abs(hi_f - lo_f) * 0.01, 1e-9)
+        if not (lo_f - slack <= point_f <= hi_f + slack):
+            issues.append(
+                {
+                    "edge_id": edge_id,
+                    "check": "ci_does_not_contain_point",
+                    "severity": "error",
+                    "field": field_label,
+                    "message": (
+                        f"{field_label}={point_f} falls outside CI "
+                        f"[{lo_f}, {hi_f}]"
+                    ),
+                }
+            )
+
+    _check_pair(
+        efr.get("reported_effect_value"),
+        efr.get("reported_ci"),
+        "equation_formula_reported.reported_ci",
+    )
+    _check_pair(
+        lit.get("theta_hat"),
+        lit.get("ci"),
+        "literature_estimate.ci",
+    )
+    return issues
+
+
+def _check_grade_downgrade_when_no_ci(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A15 — quant hard rule: if theta_hat is present but ci is missing, the
+    edge is "estimate without uncertainty" — downgrade grade to 'C'.
+    """
+    issues: List[Dict[str, Any]] = []
+    lit = edge.get("literature_estimate", {}) or {}
+    theta = lit.get("theta_hat")
+    ci = lit.get("ci", [None, None])
+    has_ci = isinstance(ci, list) and any(v is not None for v in ci)
+    grade = lit.get("grade")
+
+    if theta is not None and not has_ci and grade not in ("C", None):
+        issues.append(
+            {
+                "edge_id": edge.get("edge_id", "?"),
+                "check": "grade_downgrade_no_ci",
+                "severity": "warning",
+                "field": "literature_estimate.grade",
+                "message": (
+                    f"theta_hat={theta} but ci is null; downgrading "
+                    f"grade from {grade!r} to 'C'."
+                ),
+                "action": "downgrade_grade",
+                "before": grade,
+                "after": "C",
+            }
+        )
+    return issues
+
+
+def _check_drop_when_no_theta_hat(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A16 — quant hard rule: edges with no theta_hat AND no reported_effect_value
+    AND no p_value are not actionable evidence — record drop_reason.
+
+    Marks the edge for removal via action="drop_edge". Edges explicitly
+    flagged `has_numeric_estimate=false` from Step 1 are exempt — those
+    are intentional qualitative records.
+    """
+    issues: List[Dict[str, Any]] = []
+    if edge.get("has_numeric_estimate") is False:
+        return issues
+
+    lit = edge.get("literature_estimate", {}) or {}
+    efr = edge.get("equation_formula_reported", {}) or {}
+    theta = lit.get("theta_hat")
+    rev = efr.get("reported_effect_value")
+    pval = lit.get("p_value")
+    if theta is None and rev is None and pval is None:
+        issues.append(
+            {
+                "edge_id": edge.get("edge_id", "?"),
+                "check": "no_quantitative_evidence",
+                "severity": "error",
+                "field": "literature_estimate",
+                "message": (
+                    "Edge has no theta_hat, no reported_effect_value, and no "
+                    "p_value — not actionable evidence. Drop with reason."
+                ),
+                "action": "drop_edge",
+                "drop_reason": "no_quantitative_evidence",
+            }
+        )
+    return issues
+
+
+# Map equation_type → required model_type tokens (case-insensitive substring).
+# Empty set means "no constraint" (e.g. E5 / E6 cover too much variety).
+_EQTYPE_TO_MODEL_TOKENS: Dict[str, Tuple[str, ...]] = {
+    "E2": ("cox", "km", "kaplan", "parametric_survival", "fine-gray", "weibull", "aft"),
+    "E3": ("lmm", "gee", "ancova", "mixed", "repeated", "rmanova", "change"),
+}
+
+
+def _check_equation_type_model_match(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A17 — semantic hard rule: the model_type must be plausible for the
+    equation_type. E2 (survival) is meaningless if model is "linear" or
+    "logistic"; E3 (longitudinal) is meaningless if model is "Cox".
+    """
+    issues: List[Dict[str, Any]] = []
+    eq_type = str(edge.get("equation_type", "") or "")
+    expected = _EQTYPE_TO_MODEL_TOKENS.get(eq_type)
+    if not expected:
+        return issues
+    efr = edge.get("equation_formula_reported", {}) or {}
+    lit = edge.get("literature_estimate", {}) or {}
+    model_str = str(efr.get("model_type", "") or "") + " " + str(lit.get("model", "") or "")
+    model_norm = model_str.lower()
+    if model_norm.strip() == "":
+        return issues  # nothing to compare against
+    if not any(tok in model_norm for tok in expected):
+        issues.append(
+            {
+                "edge_id": edge.get("edge_id", "?"),
+                "check": "equation_type_model_mismatch",
+                "severity": "error",
+                "field": "equation_type",
+                "message": (
+                    f"equation_type={eq_type} requires model_type to "
+                    f"contain one of {list(expected)}, got "
+                    f"model_type={efr.get('model_type')!r} / "
+                    f"model={lit.get('model')!r}"
+                ),
+            }
+        )
+    return issues
+
+
+def _check_statistic_type_consistency(edge: Dict) -> List[Dict[str, Any]]:
+    """
+    A18 — semantic hard rule (evidence_first only): the Step 1
+    `statistic_type` must be consistent with downstream packaging.
+
+    Rules:
+      - statistic_type='crude_rate' MUST NOT be packaged as Cox HR
+        (mu.family='ratio' + mu.scale='log' is the giveaway).
+      - statistic_type='group_mean' MUST NOT carry a non-null theta_hat
+        on identity scale unless the LLM was actually given a between-
+        group difference. Without a true MD, we cannot derive theta.
+      - statistic_type='within_group_change' MUST NOT be presented as a
+        between-group effect — control/reference must include "baseline"
+        or be empty.
+    """
+    issues: List[Dict[str, Any]] = []
+    sev = edge.get("_step1_evidence")
+    if not isinstance(sev, dict):
+        return issues  # legacy mode — no Step 1 evidence to check against
+    st_type = sev.get("statistic_type")
+    if not st_type or st_type in ("model_effect", "between_group_effect", "subgroup",
+                                  "sensitivity", "unknown"):
+        return issues
+
+    edge_id = edge.get("edge_id", "?")
+    mu = edge.get("epsilon", {}).get("mu", {}).get("core", {}) or {}
+    lit = edge.get("literature_estimate", {}) or {}
+
+    if st_type == "crude_rate":
+        if mu.get("family") == "ratio" and mu.get("scale") == "log":
+            issues.append(
+                {
+                    "edge_id": edge_id,
+                    "check": "crude_rate_packaged_as_ratio",
+                    "severity": "error",
+                    "field": "epsilon.mu.core",
+                    "message": (
+                        "statistic_type='crude_rate' but mu is "
+                        "(family=ratio, scale=log) — a crude incidence "
+                        "rate cannot be a Cox HR. Step 1 likely "
+                        "mis-labeled statistical_method."
+                    ),
+                }
+            )
+
+    if st_type == "group_mean":
+        theta = lit.get("theta_hat")
+        if theta is not None:
+            issues.append(
+                {
+                    "edge_id": edge_id,
+                    "check": "group_mean_packaged_as_difference",
+                    "severity": "error",
+                    "field": "literature_estimate.theta_hat",
+                    "message": (
+                        f"statistic_type='group_mean' but theta_hat={theta} "
+                        f"— group means alone do not give a between-group "
+                        f"effect. Either drop theta_hat or split into "
+                        f"separate per-group records."
+                    ),
+                }
+            )
+
+    if st_type == "within_group_change":
+        c_field = (edge.get("epsilon", {}).get("rho", {}).get("C")
+                   or edge.get("C", "")
+                   or "")
+        c_norm = str(c_field).lower()
+        if c_norm and "baseline" not in c_norm and "pre" not in c_norm:
+            issues.append(
+                {
+                    "edge_id": edge_id,
+                    "check": "within_group_change_misframed",
+                    "severity": "error",
+                    "field": "epsilon.rho.C",
+                    "message": (
+                        f"statistic_type='within_group_change' but "
+                        f"control/reference={c_field!r} suggests a "
+                        f"between-group framing. A within-group change "
+                        f"compares the same group at two time points."
+                    ),
+                }
+            )
+    return issues
+
+
+def _check_evidence_text_traceability(
+    edge: Dict, pdf_text: str
+) -> List[Dict[str, Any]]:
+    """
+    A19 — evidence hard rule (evidence_first only): when reported_effect_value
+    is not null, evidence_text MUST be non-empty AND must contain a number
+    matching the reported value (within rounding).
+
+    Skipped in legacy mode (no _step1_evidence field). Best-effort — small
+    rounding mismatches are OK.
+    """
+    issues: List[Dict[str, Any]] = []
+    sev = edge.get("_step1_evidence")
+    if not isinstance(sev, dict):
+        return issues
+    efr = edge.get("equation_formula_reported", {}) or {}
+    rev = efr.get("reported_effect_value")
+    if rev is None:
+        return issues
+    evid = sev.get("evidence_text", "") or ""
+    if not str(evid).strip():
+        issues.append(
+            {
+                "edge_id": edge.get("edge_id", "?"),
+                "check": "evidence_text_missing",
+                "severity": "warning",
+                "field": "_step1_evidence.evidence_text",
+                "message": (
+                    f"reported_effect_value={rev} but evidence_text is "
+                    f"empty — cannot verify provenance."
+                ),
+            }
+        )
+        return issues
+    try:
+        rev_f = float(rev)
+    except (TypeError, ValueError):
+        return issues
+    # Look for the number in the evidence quote, allow ± half-tick of
+    # last reported digit.
+    import re as _re
+
+    nums = [float(x) for x in _re.findall(r"-?\d+\.?\d*", str(evid))]
+    if nums and not any(abs(n - rev_f) <= max(abs(rev_f) * 0.005, 0.005) for n in nums):
+        issues.append(
+            {
+                "edge_id": edge.get("edge_id", "?"),
+                "check": "evidence_text_does_not_contain_value",
+                "severity": "warning",
+                "field": "_step1_evidence.evidence_text",
+                "message": (
+                    f"reported_effect_value={rev_f} not found in "
+                    f"evidence_text={evid[:80]!r} — possible mis-quote."
+                ),
+            }
+        )
+    return issues
+
+
 def phase_a_audit(
     edges: List[Dict], pdf_text: str
 ) -> Tuple[List[Dict], Dict[str, Any]]:
@@ -865,6 +1200,15 @@ def phase_a_audit(
         edge_issues.extend(_check_reported_p_format(edge))  # A11
         edge_issues.extend(_check_formula_z_consistency(edge))  # A12
         edge_issues.extend(_check_z_mapping_consistency(edge))  # A13
+        # Round 2 evidence_first quant + semantic + traceability checks.
+        # These run unconditionally when the data exists; A18 / A19 no-op
+        # silently in legacy mode (when _step1_evidence is absent).
+        edge_issues.extend(_check_ci_contains_point_estimate(edge))  # A14
+        edge_issues.extend(_check_grade_downgrade_when_no_ci(edge))  # A15
+        edge_issues.extend(_check_drop_when_no_theta_hat(edge))  # A16
+        edge_issues.extend(_check_equation_type_model_match(edge))  # A17
+        edge_issues.extend(_check_statistic_type_consistency(edge))  # A18
+        edge_issues.extend(_check_evidence_text_traceability(edge, pdf_text))  # A19
 
         for iss in edge_issues:
             iss["edge_id"] = edge_id
@@ -1126,6 +1470,69 @@ def apply_phase_a_fixes(
                         "reason": iss.get("message", ""),
                     }
                 )
+
+            # Round 2: new auto-fix actions for evidence_first hard rules.
+            elif action == "swap_ci":
+                # A14: lower > upper, swap. We don't try to validate the
+                # numbers further — that's a separate check.
+                ci_field = iss.get("ci_field", "")
+                if ci_field == "literature_estimate.ci":
+                    ci = edge.get("literature_estimate", {}).get("ci")
+                    if isinstance(ci, list) and len(ci) == 2:
+                        edge["literature_estimate"]["ci"] = [ci[1], ci[0]]
+                        applied_fixes.append({
+                            "edge_id": iss.get("edge_id", "?"),
+                            "action": "swapped_ci",
+                            "field": ci_field,
+                        })
+                elif ci_field == "equation_formula_reported.reported_ci":
+                    ci = edge.get("equation_formula_reported", {}).get("reported_ci")
+                    if isinstance(ci, list) and len(ci) == 2:
+                        edge["equation_formula_reported"]["reported_ci"] = [ci[1], ci[0]]
+                        applied_fixes.append({
+                            "edge_id": iss.get("edge_id", "?"),
+                            "action": "swapped_reported_ci",
+                            "field": ci_field,
+                        })
+
+            elif action == "downgrade_grade":
+                # A15: theta_hat present but ci null → grade='C'
+                lit = edge.setdefault("literature_estimate", {})
+                lit["grade"] = "C"
+                applied_fixes.append({
+                    "edge_id": iss.get("edge_id", "?"),
+                    "action": "downgraded_grade",
+                    "before": iss.get("before"),
+                    "after": "C",
+                })
+
+            elif action == "drop_edge":
+                # A16: mark for removal. We don't actually delete here
+                # (the calling code owns the list); we tag with
+                # _drop_reason so a downstream filter step can remove it.
+                edge["_drop_reason"] = iss.get(
+                    "drop_reason", "phase_a_drop_unspecified"
+                )
+                applied_fixes.append({
+                    "edge_id": iss.get("edge_id", "?"),
+                    "action": "marked_for_drop",
+                    "drop_reason": edge["_drop_reason"],
+                })
+
+    # After per-edge processing, materialize any drops requested.
+    drop_count = sum(1 for e in fixed_edges if e.get("_drop_reason"))
+    if drop_count > 0:
+        survivors: List[Dict] = []
+        for e in fixed_edges:
+            if e.get("_drop_reason"):
+                applied_fixes.append({
+                    "edge_id": e.get("edge_id", "?"),
+                    "action": "edge_dropped",
+                    "drop_reason": e.get("_drop_reason"),
+                })
+            else:
+                survivors.append(e)
+        fixed_edges = survivors
 
     return fixed_edges, applied_fixes
 

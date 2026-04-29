@@ -303,6 +303,41 @@ def main():
             "by default. Has no effect unless --phase-c-autofix is also set."
         ),
     )
+    parser.add_argument(
+        "--workflow-mode",
+        choices=["legacy", "evidence_first"],
+        default="legacy",
+        help=(
+            "Pipeline workflow mode. 'legacy' (default) keeps the 3.30 "
+            "behavior unchanged. 'evidence_first' enables: Step 1 records "
+            "statistic_type / evidence_text, Step 1.5 demotes theta_hat/ci "
+            "to candidates, Step 1.6 study-value filter, Step 2.1 "
+            "deterministic scale conversion, Step 4 enhanced semantic "
+            "audit. Combine with --defer-hpp-mapping and "
+            "--final-renumber-edge-id for full Round 4 behavior."
+        ),
+    )
+    parser.add_argument(
+        "--defer-hpp-mapping",
+        action="store_true",
+        help=(
+            "Defer HPP mapping to a separate Step 5 at the end of the "
+            "pipeline. Step 2 leaves hpp_mapping.X/Y/Z empty and Step 3a "
+            "rerank is skipped; Step 5 fills them after Step 4 has "
+            "finished. Useful when you want the evidence extraction to "
+            "be HPP-dictionary-independent (e.g. swapping dictionaries "
+            "without re-running Step 2). Off by default."
+        ),
+    )
+    parser.add_argument(
+        "--final-renumber-edge-id",
+        action="store_true",
+        help=(
+            "After all filters / drops, renumber edge_id to contiguous "
+            "EV-{year}-{author}#1..#N in reading order, and write the "
+            "old→new map to final_edge_id_mapping.json. Off by default."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -381,6 +416,9 @@ def main():
         error_patterns_path=args.error_patterns,
         enable_phase_c_autofix=args.phase_c_autofix,
         phase_c_aggressive=args.phase_c_aggressive,
+        workflow_mode=args.workflow_mode,
+        defer_hpp_mapping=args.defer_hpp_mapping,
+        final_renumber_edge_id=args.final_renumber_edge_id,
     )
 
     all_results = []

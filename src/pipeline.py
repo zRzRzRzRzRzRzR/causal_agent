@@ -34,7 +34,7 @@ import json
 import math
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -560,6 +560,7 @@ def step2_fill_one_edge(
     hpp_dict_path: Optional[str] = None,
     gt_fewshot_context: Optional[str] = None,  # NEW: GT few-shot examples
     enable_hard_match: bool = False,
+    workflow_mode: str = "legacy",
 ) -> Dict:
     """
     Fill a single edge into the HPP template.
@@ -663,8 +664,21 @@ def step2_fill_one_edge(
     if step1_priority:
         filled["priority"] = step1_priority
 
+    # Preserve Step 1's evidence-traceability fields (Round 1 of the
+    # evidence_first workflow). Stored under "_step1_evidence" so the
+    # underscore prefix lets _final_schema_enforcement strip them when
+    # writing edges.json — keeps the legacy schema unchanged. Step 3 / 4
+    # audit modules can read these fields for semantic checks.
+    evidence_payload = {
+        k: edge.get(k)
+        for k in ("statistic_type", "evidence_text", "source_context")
+        if edge.get(k) is not None
+    }
+    if evidence_payload:
+        filled["_step1_evidence"] = evidence_payload
+
     # Apply pre-validated overrides (deterministic corrections)
-    filled = _apply_prevalidation_overrides(filled, preval)
+    filled = _apply_prevalidation_overrides(filled, preval, workflow_mode=workflow_mode)
 
     # Hard-match numeric tracing is opt-in (off by default for scale safety).
     if enable_hard_match:
@@ -721,12 +735,293 @@ def step2_fill_one_edge(
 # Step 2.5: Strong Model Recovery for null values
 
 
+def step2_1_scale_conversion(
+    edges: List[Dict],
+    workflow_mode: str = "legacy",
+) -> Tuple[List[Dict], Dict[str, Any]]:
+    """
+    Step 2.1 — deterministic scale conversion (evidence_first only).
+
+    For each edge with `_step1_evidence.statistic_type`, decide what to
+    do with `theta_hat` and `ci`:
+
+      - `model_effect` / `between_group_effect`:
+          ratio family       → theta_hat = ln(reported_effect_value),
+                              ci  = [ln(lo), ln(hi)]
+          difference family  → theta_hat = reported_effect_value,
+                              ci  = reported_ci  (identity)
+      - `crude_rate` / `group_mean` / `within_group_change`:
+          theta_hat / ci forced to null AND mu.scale forced to identity,
+          mu.family forced to "difference". The reasoning: these aren't
+          model-derived effects, so packaging them as Cox HR (log-ratio)
+          would be a category error. They survive as raw values in
+          equation_formula_reported.{reported_effect_value, reported_ci}
+          but the canonical "log-scale theta_hat" goes empty.
+      - `sensitivity` / `subgroup` / `unknown`:
+          no-op (let Step 2 / Step 2.5 LLM decide; trust audit downstream)
+
+    No-op when workflow_mode != "evidence_first" or when an edge has no
+    `_step1_evidence` field.
+
+    Returns:
+        (edges, conversion_report)
+        Edges are mutated in place AND returned.
+    """
+    import math as _math
+
+    report: Dict[str, Any] = {
+        "step": 2.1,
+        "edges_total": len(edges),
+        "edges_processed": 0,
+        "edges_skipped_no_evidence": 0,
+        "edges_skipped_no_value": 0,
+        "by_action": defaultdict(int),
+        "details": [],
+    }
+    if workflow_mode != "evidence_first":
+        report["skipped_reason"] = "workflow_mode != evidence_first"
+        return edges, report
+
+    for i, edge in enumerate(edges):
+        sev = edge.get("_step1_evidence")
+        if not isinstance(sev, dict):
+            report["edges_skipped_no_evidence"] += 1
+            continue
+
+        st = str(sev.get("statistic_type", "") or "").lower()
+        if st in ("sensitivity", "subgroup", "unknown", ""):
+            report["by_action"]["noop_passthrough"] += 1
+            continue
+
+        efr = edge.setdefault("equation_formula_reported", {})
+        lit = edge.setdefault("literature_estimate", {})
+        mu_core = (edge.setdefault("epsilon", {})
+                       .setdefault("mu", {})
+                       .setdefault("core", {}))
+
+        rev = efr.get("reported_effect_value")
+        rci = efr.get("reported_ci", [None, None])
+        em = str(efr.get("effect_measure", "") or "").upper()
+
+        # Force-null branch: non-model statistic types must not carry a theta.
+        if st in ("crude_rate", "group_mean", "within_group_change"):
+            old_theta = lit.get("theta_hat")
+            old_ci = lit.get("ci")
+            lit["theta_hat"] = None
+            lit["ci"] = [None, None]
+            mu_core["family"] = "difference"
+            mu_core["scale"] = "identity"
+            report["edges_processed"] += 1
+            report["by_action"]["forced_null_non_model_statistic"] += 1
+            report["details"].append({
+                "edge_index": i,
+                "edge_id": edge.get("edge_id", "?"),
+                "statistic_type": st,
+                "action": "forced_null",
+                "before": {"theta_hat": old_theta, "ci": old_ci},
+                "after": {"theta_hat": None, "ci": [None, None]},
+            })
+            continue
+
+        # Compute branch: model_effect / between_group_effect.
+        if rev is None:
+            report["edges_skipped_no_value"] += 1
+            report["by_action"]["skipped_no_reported_value"] += 1
+            continue
+
+        # Decide ratio vs difference from effect_measure (most reliable
+        # signal — Step 1 / Step 2 fill this from the paper directly).
+        ratio_measures = {"HR", "OR", "RR", "IRR"}
+        difference_measures = {"MD", "BETA", "SMD", "RD", "AD"}
+
+        try:
+            rev_f = float(rev)
+        except (TypeError, ValueError):
+            report["by_action"]["skipped_unparseable_value"] += 1
+            continue
+
+        # Coerce CI bounds to floats; missing bounds become None.
+        def _to_float(v: Any):
+            if v is None:
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        if isinstance(rci, list) and len(rci) == 2:
+            lo_f = _to_float(rci[0])
+            hi_f = _to_float(rci[1])
+        else:
+            lo_f = hi_f = None
+
+        if em in ratio_measures:
+            # Ratio: log-transform.
+            if rev_f <= 0:
+                report["by_action"]["skipped_nonpositive_ratio"] += 1
+                continue
+            new_theta = round(_math.log(rev_f), 4)
+            new_ci_lo = (
+                round(_math.log(lo_f), 4) if lo_f is not None and lo_f > 0 else None
+            )
+            new_ci_hi = (
+                round(_math.log(hi_f), 4) if hi_f is not None and hi_f > 0 else None
+            )
+            lit["theta_hat"] = new_theta
+            lit["ci"] = [new_ci_lo, new_ci_hi]
+            mu_core["family"] = "ratio"
+            mu_core["scale"] = "log"
+            if not mu_core.get("type") or "log" not in str(mu_core.get("type", "")):
+                mu_core["type"] = f"log{em}"
+            report["edges_processed"] += 1
+            report["by_action"]["computed_ratio_log"] += 1
+            report["details"].append({
+                "edge_index": i,
+                "edge_id": edge.get("edge_id", "?"),
+                "statistic_type": st,
+                "action": "ratio_log_conversion",
+                "reported": rev_f,
+                "computed_theta_hat": new_theta,
+                "computed_ci": [new_ci_lo, new_ci_hi],
+            })
+        elif em in difference_measures or st == "between_group_effect":
+            # Difference: identity scale.
+            lit["theta_hat"] = rev_f
+            lit["ci"] = [lo_f, hi_f]
+            mu_core["family"] = "difference"
+            mu_core["scale"] = "identity"
+            if not mu_core.get("type"):
+                mu_core["type"] = em or "MD"
+            report["edges_processed"] += 1
+            report["by_action"]["computed_difference_identity"] += 1
+            report["details"].append({
+                "edge_index": i,
+                "edge_id": edge.get("edge_id", "?"),
+                "statistic_type": st,
+                "action": "difference_identity_conversion",
+                "reported": rev_f,
+                "computed_theta_hat": rev_f,
+                "computed_ci": [lo_f, hi_f],
+            })
+        else:
+            # effect_measure unknown — leave as-is, let Step 2.5 / audit flag.
+            report["by_action"]["skipped_unknown_effect_measure"] += 1
+
+    # Convert defaultdict for JSON serialization.
+    report["by_action"] = dict(report["by_action"])
+    return edges, report
+
+
+def _step5_hpp_mapping(
+    edges: List[Dict],
+    client: GLMClient,
+    hpp_dict_path: str,
+) -> Tuple[List[Dict], Dict[str, Any]]:
+    """
+    Step 5 — deferred HPP mapping pass (evidence_first / --defer-hpp-mapping).
+
+    When defer_hpp_mapping is enabled, Step 2 leaves hpp_mapping fields
+    empty (or with status='missing'), and Step 3a rerank is skipped. This
+    function runs at the end and populates hpp_mapping.X / Y / Z by
+    invoking the existing rerank_hpp_mapping machinery on each surviving
+    edge.
+
+    Returns (edges, report). The report records per-edge changes so you
+    can diff before/after.
+    """
+    from .review import rerank_hpp_mapping
+
+    report: Dict[str, Any] = {
+        "step": 5,
+        "edges_total": len(edges),
+        "edges_mapped": 0,
+        "changes": [],
+    }
+    if not hpp_dict_path:
+        report["skipped_reason"] = "no hpp_dict_path"
+        return edges, report
+
+    print(
+        f"\n[Step 5] Deferred HPP mapping for {len(edges)} edges ...",
+        file=sys.stderr,
+    )
+
+    with open(hpp_dict_path, "r", encoding="utf-8") as f:
+        raw_dict = json.load(f)
+    mapper = HPPMapper(raw_dict)
+
+    for i, edge in enumerate(edges):
+        try:
+            changes = rerank_hpp_mapping(edge, mapper, client)
+            if changes:
+                report["edges_mapped"] += 1
+                report["changes"].append({
+                    "edge_index": i,
+                    "edge_id": edge.get("edge_id", "?"),
+                    "changes": changes,
+                })
+        except Exception as e:
+            print(
+                f"  [Step 5] Edge #{i+1} mapping failed: {e}",
+                file=sys.stderr,
+            )
+
+    print(
+        f"  [Step 5] Mapped {report['edges_mapped']}/{len(edges)} edges",
+        file=sys.stderr,
+    )
+    return edges, report
+
+
+def _renumber_edge_ids(
+    edges: List[Dict],
+) -> Tuple[List[Dict], Dict[str, str]]:
+    """
+    Renumber edge_id to contiguous "EV-{year}-{author}#1, #2, ..." in
+    reading order. Returns (edges, old_to_new_map) so callers can dump
+    the mapping for downstream consumers that track edges by ID.
+
+    Picks the most-common (year, author_root) prefix across all edges
+    (matches review.canonicalize_edge_ids behavior).
+    """
+    if not edges:
+        return edges, {}
+
+    pat = re.compile(r"^EV-(\d{4}|YYYY)-([A-Za-z][A-Za-z0-9\-]*)")
+
+    def _author_root(a: str) -> str:
+        a = re.split(r"[-_]", a, maxsplit=1)[0]
+        m = re.match(r"^[A-Za-z]+", a)
+        return (m.group(0) if m else a).capitalize()
+
+    parsed: List[Tuple[str, str]] = []
+    for e in edges:
+        eid = str(e.get("edge_id", "") or "")
+        m = pat.match(eid)
+        if m:
+            parsed.append((m.group(1), _author_root(m.group(2))))
+    if not parsed:
+        return edges, {}
+
+    counter = Counter(parsed)
+    canonical_year, canonical_author = counter.most_common(1)[0][0]
+
+    old_to_new: Dict[str, str] = {}
+    for i, e in enumerate(edges):
+        new_id = f"EV-{canonical_year}-{canonical_author}#{i + 1}"
+        old_id = e.get("edge_id", f"#{i+1}")
+        old_to_new[old_id] = new_id
+        e["edge_id"] = new_id
+    return edges, old_to_new
+
+
 def step2_5_recover_nulls(
     client_strong: GLMClient,
     pdf_text: str,
     edges: List[Dict],
     anchor_set: Optional[Set[str]] = None,
     enable_hard_match: bool = False,
+    workflow_mode: str = "legacy",
 ) -> List[Dict]:
     """
     Step 2.5: Use a stronger model to recover null effect values.
@@ -837,6 +1132,7 @@ def step2_5_recover_nulls(
                 pdf_text,
                 mu,
                 enable_hard_match=enable_hard_match,
+                workflow_mode=workflow_mode,
             )
         except Exception as e:
             print(
@@ -854,13 +1150,26 @@ def _apply_recovery_result(
     pdf_text: str,
     mu: Dict,
     enable_hard_match: bool = False,
+    workflow_mode: str = "legacy",
 ) -> None:
     """
     Apply recovery result to edge.
 
-    When enable_hard_match=True and anchor_set is provided, recovered
-    values are gated by hard_match_value. Otherwise accept as-is —
-    at scale, OCR/rounding drift produces false rejections.
+    Step 2.5 by design only writes a narrow set of quant fields:
+    reported_effect_value, reported_ci, theta_hat, ci, p_value. It NEVER
+    rewrites X, Y, model, equation_type, etc.
+
+    Acceptance gating:
+      - legacy mode: accept new value if (enable_hard_match=False) OR
+        (enable_hard_match=True AND value found in paper anchor set)
+      - evidence_first mode: ALWAYS require hard_match against the paper,
+        regardless of enable_hard_match flag — recovery values that aren't
+        findable in OCR are rejected with a logged reason. This implements
+        the author's "直接报告值必须能在 OCR 中找到" requirement.
+
+    Provenance: every accepted/rejected attempt is appended to
+    edge["_step2_5_provenance"] so Step 4 evidence checks (A19) have
+    something to audit.
     """
     efr = edge.get("equation_formula_reported", {})
     lit = edge.get("literature_estimate", {})
@@ -868,13 +1177,34 @@ def _apply_recovery_result(
     new_val = result.get("effect_value")
     new_ci = result.get("ci")
     new_p = result.get("p_value")
+    confidence = str(result.get("confidence", "")).lower()
     recovered = []
+    rejected: List[Dict[str, Any]] = []
+
+    # In evidence_first mode we force hard_match regardless of flag, AND
+    # we reject low-confidence patches outright (matches the spec:
+    # "confidence=low 或证据不在 OCR 时拒绝 patch").
+    if workflow_mode == "evidence_first":
+        require_hard_match = True
+        if confidence == "low":
+            edge.setdefault("_step2_5_provenance", []).append({
+                "phase": "rejected_low_confidence",
+                "values_attempted": {
+                    "effect_value": new_val, "ci": new_ci, "p_value": new_p
+                },
+            })
+            return
+    else:
+        require_hard_match = enable_hard_match
 
     def _accept(v) -> bool:
         if v is None:
             return False
-        if enable_hard_match and anchor_set is not None:
-            return hard_match_value(v, anchor_set, pdf_text)
+        if require_hard_match and anchor_set is not None:
+            ok = hard_match_value(v, anchor_set, pdf_text)
+            if not ok:
+                rejected.append({"value": v, "reason": "not_in_ocr_anchor_set"})
+            return ok
         return True
 
     # Recover reported_effect_value
@@ -962,6 +1292,20 @@ def _apply_recovery_result(
             file=sys.stderr,
         )
 
+    # Record provenance — what was accepted, what was rejected, why.
+    # Stored under "_step2_5_provenance" (underscore-prefixed so
+    # _final_schema_enforcement strips it from the final edges.json).
+    if recovered or rejected:
+        prov = edge.setdefault("_step2_5_provenance", [])
+        prov.append({
+            "accepted": recovered,
+            "rejected": rejected,
+            "confidence": confidence or None,
+            "source_location": result.get("source_location"),
+            "evidence_text": result.get("evidence_text"),
+            "calculation": result.get("calculation"),
+        })
+
 
 def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
     """Build a guidance block for the LLM based on pre-validated metadata."""
@@ -1020,7 +1364,9 @@ def _build_prevalidation_guidance(edge: Dict, preval: Dict) -> str:
     return "\n".join(lines)
 
 
-def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
+def _apply_prevalidation_overrides(
+    filled: Dict, preval: Dict, workflow_mode: str = "legacy"
+) -> Dict:
     """
     Apply deterministic post-processing to the LLM-filled edge.
 
@@ -1029,6 +1375,11 @@ def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
 
     We DO override:
       - theta_hat and ci (log-scale conversion is deterministic math)
+        * legacy mode: hard override (current behavior since 3.30)
+        * evidence_first mode: stash as candidates under
+          _prevalidation_candidate; let Step 2.1 decide based on
+          statistic_type. This prevents Step 1.5 from baking a Cox HR
+          out of a crude_rate when Step 1 mislabels statistical_method.
       - id_strategy (derived from evidence_type, no ambiguity)
       - adjustment_variables (from Step 1 extraction)
       - Dual-check field sync (lit.equation_type ↔ top-level)
@@ -1039,11 +1390,27 @@ def _apply_prevalidation_overrides(filled: Dict, preval: Dict) -> Dict:
     lit = filled.setdefault("literature_estimate", {})
 
     # ── Override theta_hat and ci (deterministic log-scale conversion) ──
-    if preval.get("theta_hat") is not None:
-        lit["theta_hat"] = preval["theta_hat"]
+    pre_theta = preval.get("theta_hat")
+    pre_ci = preval.get("ci")
 
-    if preval.get("ci") and any(v is not None for v in preval["ci"]):
-        lit["ci"] = preval["ci"]
+    if workflow_mode == "evidence_first":
+        # Round 1: don't force overwrite. Stash as candidates that Step 2.1
+        # (Round 4) will resolve. Until Step 2.1 ships, fall back to the
+        # legacy override behavior so the edge still has a value, but
+        # record the candidate provenance for downstream auditing.
+        cand: Dict[str, Any] = {}
+        if pre_theta is not None:
+            cand["theta_hat"] = pre_theta
+        if pre_ci and any(v is not None for v in pre_ci):
+            cand["ci"] = pre_ci
+        if cand:
+            filled["_prevalidation_candidate"] = cand
+
+    if pre_theta is not None:
+        lit["theta_hat"] = pre_theta
+
+    if pre_ci and any(v is not None for v in pre_ci):
+        lit["ci"] = pre_ci
 
     # ── Override id_strategy (derived from evidence_type, no ambiguity) ──
     if preval.get("id_strategy"):
@@ -1671,6 +2038,31 @@ class EdgeExtractionPipeline:
         # that would mark or discard valid extractions. Turn on for
         # small, clean corpora where you want the extra safety.
         enable_hard_match: bool = False,
+        # Workflow mode. "legacy" (default) keeps every behavior of the
+        # 3.30 pipeline unchanged. "evidence_first" turns on the
+        # multi-step evidence-traceability extensions:
+        #   - Step 1 records statistic_type / evidence_text / source_context
+        #   - Step 1.5 produces theta_hat / ci as CANDIDATES (not forced)
+        #   - Step 1.6 (study-value filter)
+        #   - Step 2.1 (deterministic scale conversion)
+        #   - Step 2.5 narrowed to targeted quant repair
+        #   - Step 4 enhanced semantic + evidence hard-rules
+        #   - HPP mapping deferred to optional Step 5 (see defer_hpp_mapping)
+        workflow_mode: str = "legacy",
+        # Defer HPP mapping (originally inline in Step 2 + Step 3a rerank)
+        # to a separate Step 5. When True: Step 2 doesn't inject HPP
+        # context into its prompt, Step 3a rerank is skipped, and a new
+        # Step 5 pass runs at the end to populate hpp_mapping.X/Y/Z on
+        # the surviving edges. Useful for decoupling "extract evidence
+        # from PDF" from "match evidence to HPP fields" — easier to
+        # debug and lets you swap the dictionary without re-running
+        # everything.
+        defer_hpp_mapping: bool = False,
+        # Final renumber: after all drops/filters, rewrite edge_id to
+        # contiguous "EV-{year}-{author}#1", #2, ... and dump the
+        # old→new map to final_edge_id_mapping.json. Off by default
+        # because some downstream consumers track edges by ID.
+        final_renumber_edge_id: bool = False,
     ):
         self.client = client
         self.strong_client = strong_client
@@ -1700,6 +2092,30 @@ class EdgeExtractionPipeline:
         self.step4_max_edges_per_call = step4_max_edges_per_call
         self.enable_phase_c_autofix = enable_phase_c_autofix
         self.phase_c_aggressive = phase_c_aggressive
+
+        # Workflow mode validation.
+        if workflow_mode not in ("legacy", "evidence_first"):
+            print(
+                f"[Pipeline] Unknown workflow_mode={workflow_mode!r}; "
+                f"falling back to 'legacy'.",
+                file=sys.stderr,
+            )
+            workflow_mode = "legacy"
+        self.workflow_mode = workflow_mode
+        self.defer_hpp_mapping = defer_hpp_mapping
+        self.final_renumber_edge_id = final_renumber_edge_id
+        if workflow_mode == "evidence_first":
+            print(
+                "[Pipeline] workflow_mode=evidence_first: enabling new"
+                " evidence-traceability extensions where implemented.",
+                file=sys.stderr,
+            )
+        if defer_hpp_mapping:
+            print(
+                "[Pipeline] defer_hpp_mapping=True: Step 2 will skip HPP"
+                " context, Step 3a rerank disabled; Step 5 runs at the end.",
+                file=sys.stderr,
+            )
 
         # Hard-match flag (off by default; see constructor docstring above)
         self.enable_hard_match = enable_hard_match
@@ -1863,6 +2279,32 @@ class EdgeExtractionPipeline:
         if pdf_dir:
             save_json(pdf_dir / "step1_5_prevalidation.json", preval_report)
 
+        # -- Step 1.6: Study-value filter (evidence_first only) --
+        # Drops within-group changes / crude rates / redundant model
+        # specs / sensitivity dupes etc. before they cost an LLM call in
+        # Step 2. Pure deterministic priority logic — no batch tuning.
+        if self.workflow_mode == "evidence_first":
+            from .study_value_filter import filter_edges_by_study_value
+
+            paper_class = (
+                classification.get("primary_category", "")
+                if isinstance(classification, dict)
+                else ""
+            )
+            edges_kept, edges_dropped, sv_report = filter_edges_by_study_value(
+                edges_list, paper_classification=paper_class
+            )
+            print(
+                f"  [Step 1.6] Study-value filter: "
+                f"{len(edges_list)} → {len(edges_kept)} kept, "
+                f"{len(edges_dropped)} dropped "
+                f"(by reason: {sv_report['summary']['by_drop_reason']})",
+                file=sys.stderr,
+            )
+            if pdf_dir:
+                save_json(pdf_dir / "step1_6_filter.json", sv_report)
+            edges_list = edges_kept
+
         # -- Step 2: Fill templates (simplified, no retry) --
         print(
             f"\n[Step 2] Filling templates for {len(edges_list)} edges ...",
@@ -2013,6 +2455,11 @@ class EdgeExtractionPipeline:
                     pass  # fallback to generic context
 
             try:
+                # Defer HPP mapping → don't pass dict path, Step 2 will
+                # leave hpp_mapping fields empty and Step 5 fills them later.
+                step2_hpp_path = (
+                    None if self.defer_hpp_mapping else self.hpp_dict_path
+                )
                 filled = step2_fill_one_edge(
                     client=self.client,
                     pdf_text=pdf_text,
@@ -2022,9 +2469,10 @@ class EdgeExtractionPipeline:
                     annotated_template=self.annotated_template,
                     pdf_name=pdf_name,
                     template_path=self.template_path,
-                    hpp_dict_path=self.hpp_dict_path,
+                    hpp_dict_path=step2_hpp_path,
                     gt_fewshot_context=edge_gt_context,  # NEW
                     enable_hard_match=self.enable_hard_match,
+                    workflow_mode=self.workflow_mode,
                 )
             except Exception as e:
                 print(
@@ -2066,6 +2514,23 @@ class EdgeExtractionPipeline:
                 file=sys.stderr,
             )
 
+        # -- Step 2.1: Deterministic scale conversion (evidence_first) --
+        # Run AFTER Step 2 (so we have reported_effect_value/CI to convert)
+        # but BEFORE Step 2.5 (so the recovery prompt sees the canonical
+        # log/identity scale). No-op in legacy mode.
+        if self.workflow_mode == "evidence_first":
+            all_filled_edges, scale_report = step2_1_scale_conversion(
+                all_filled_edges, workflow_mode=self.workflow_mode
+            )
+            print(
+                f"  [Step 2.1] Scale conversion: "
+                f"{scale_report['edges_processed']} processed, "
+                f"actions={scale_report['by_action']}",
+                file=sys.stderr,
+            )
+            if pdf_dir:
+                save_json(pdf_dir / "step2_1_scale_conversion.json", scale_report)
+
         # -- Step 2.5: Strong Model Recovery for null values --
         if self.strong_client and all_filled_edges:
             # anchor_set only needed when hard_match is enabled
@@ -2091,6 +2556,7 @@ class EdgeExtractionPipeline:
                     all_filled_edges,
                     anchor_set=anchor_set,
                     enable_hard_match=self.enable_hard_match,
+                    workflow_mode=self.workflow_mode,
                 )
                 null_count_after = sum(
                     1
@@ -2119,12 +2585,18 @@ class EdgeExtractionPipeline:
         # -- Step 3: Review --
         quality_report = None
         if self.enable_step3 and all_filled_edges:
+            # When defer_hpp_mapping=True, force rerank off here. Step 5
+            # below runs the HPP rerank as its own pass.
+            step3_rerank = self.enable_rerank and not self.defer_hpp_mapping
+            step3_hpp_dict = (
+                None if self.defer_hpp_mapping else self.hpp_dict_path
+            )
             all_filled_edges, quality_report = step3_review(
                 edges=all_filled_edges,
                 pdf_text=pdf_text,
                 client=self.client,
-                hpp_dict_path=self.hpp_dict_path,
-                enable_rerank=self.enable_rerank,
+                hpp_dict_path=step3_hpp_dict,
+                enable_rerank=step3_rerank,
                 enable_spot_check=self.enable_spot_check,
                 spot_check_sample=self.spot_check_sample,
             )
@@ -2146,6 +2618,16 @@ class EdgeExtractionPipeline:
             if pdf_dir:
                 save_json(pdf_dir / "step4_audit.json", audit_report)
 
+        # -- Step 5: Deferred HPP mapping (evidence_first / defer_hpp_mapping) --
+        if self.defer_hpp_mapping and all_filled_edges and self.hpp_dict_path:
+            all_filled_edges, step5_report = _step5_hpp_mapping(
+                edges=all_filled_edges,
+                client=self.client,
+                hpp_dict_path=self.hpp_dict_path,
+            )
+            if pdf_dir:
+                save_json(pdf_dir / "step5_hpp_mapping.json", step5_report)
+
         # -- Save final edges --
         # Final cleanup: strip internal metadata and enforce schema
         for edge in all_filled_edges:
@@ -2161,6 +2643,20 @@ class EdgeExtractionPipeline:
                 file=sys.stderr,
             )
         all_filled_edges = kept_edges
+
+        # Optional final renumber: after every drop/filter, rewrite
+        # edge_id to contiguous #1..N. Keeps the IDs in the saved
+        # edges.json predictable; the old→new map is dumped alongside
+        # for any downstream consumer that tracks edges by old ID.
+        if self.final_renumber_edge_id and all_filled_edges:
+            all_filled_edges, eid_map = _renumber_edge_ids(all_filled_edges)
+            print(
+                f"  [Final] Renumbered {len(eid_map)} edge_ids to contiguous "
+                f"#1..#{len(all_filled_edges)}",
+                file=sys.stderr,
+            )
+            if pdf_dir and eid_map:
+                save_json(pdf_dir / "final_edge_id_mapping.json", eid_map)
 
         if pdf_dir:
             output_file = pdf_dir / "edges.json"

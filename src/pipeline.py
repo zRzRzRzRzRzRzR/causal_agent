@@ -804,7 +804,15 @@ def step2_1_scale_conversion(
         em = str(efr.get("effect_measure", "") or "").upper()
 
         # Force-null branch: non-model statistic types must not carry a theta.
-        if st in ("crude_rate", "group_mean", "within_group_change"):
+        # proportion / descriptive_estimate are single-arm / case-series only —
+        # they have no comparison structure so any "theta" would be ill-defined.
+        if st in (
+            "crude_rate",
+            "group_mean",
+            "within_group_change",
+            "proportion",
+            "descriptive_estimate",
+        ):
             old_theta = lit.get("theta_hat")
             old_ci = lit.get("ci")
             lit["theta_hat"] = None
@@ -2077,6 +2085,21 @@ class EdgeExtractionPipeline:
         # old→new map to final_edge_id_mapping.json. Off by default
         # because some downstream consumers track edges by ID.
         final_renumber_edge_id: bool = False,
+        # Stop pipeline early after a given step. Useful for cost control
+        # and debugging: e.g. stop_after="step2_1" runs through scale
+        # conversion (no LLM after step2) and skips Step 2.5/3/4/5.
+        # Recognized values:
+        #   "step1"   — classify + enumerate
+        #   "step1_5" — + prevalidate
+        #   "step1_6" — + study-value filter (evidence_first)
+        #   "step2"   — + fill template (LLM call per edge)
+        #   "step2_1" — + scale conversion (no LLM)
+        #   "step2_5" — + strong recovery (LLM)
+        #   "step3"   — + review (LLM rerank + spot-check)
+        #   "step4"   — + content audit (LLM Phase B)
+        #   "step5"   — + deferred HPP mapping
+        #   "all"     — run everything (default)
+        stop_after: str = "all",
     ):
         self.client = client
         self.strong_client = strong_client
@@ -2118,6 +2141,36 @@ class EdgeExtractionPipeline:
         self.workflow_mode = workflow_mode
         self.defer_hpp_mapping = defer_hpp_mapping
         self.final_renumber_edge_id = final_renumber_edge_id
+
+        # stop_after validation
+        _STOP_AFTER_ORDER = [
+            "step1",
+            "step1_5",
+            "step1_6",
+            "step2",
+            "step2_1",
+            "step2_5",
+            "step3",
+            "step4",
+            "step5",
+            "all",
+        ]
+        if stop_after not in _STOP_AFTER_ORDER:
+            print(
+                f"[Pipeline] Unknown stop_after={stop_after!r}; "
+                f"falling back to 'all'.",
+                file=sys.stderr,
+            )
+            stop_after = "all"
+        self.stop_after = stop_after
+        self._stop_after_idx = _STOP_AFTER_ORDER.index(stop_after)
+        self._STOP_AFTER_ORDER = _STOP_AFTER_ORDER
+
+    def _skip_step(self, step: str) -> bool:
+        """True if `step` should be skipped because stop_after is earlier."""
+        if step not in self._STOP_AFTER_ORDER:
+            return False
+        return self._STOP_AFTER_ORDER.index(step) > self._stop_after_idx
         if workflow_mode == "evidence_first":
             print(
                 "[Pipeline] workflow_mode=evidence_first: enabling new"
@@ -2518,13 +2571,36 @@ class EdgeExtractionPipeline:
             if step2_partial_path:
                 save_json(step2_partial_path, all_filled_edges)
 
-        # Clean up partial file after successful completion
+        # Clean up partial file after successful completion.
+        # Exception: when stop_after is going to halt before Step 2.5 / 3,
+        # KEEP step2_partial.json so a follow-up `--resume` run can re-enter
+        # Step 2 from cache without paying its LLM cost a second time.
         if step2_partial_path and step2_partial_path.exists():
-            step2_partial_path.unlink()
+            if self._skip_step("step2_5"):
+                print(
+                    f"  [Step 2] stop_after='{self.stop_after}' — KEEPING "
+                    f"step2_partial.json so a later --resume run can pick "
+                    f"up from cache without re-paying Step 2.",
+                    file=sys.stderr,
+                )
+            else:
+                step2_partial_path.unlink()
+                print(
+                    "  [Step 2] All edges filled, removed step2_partial.json",
+                    file=sys.stderr,
+                )
+
+        # -- Stop-after gate: stop_after in {step1, step1_5, step1_6, step2}
+        # would halt before Step 2.1 even runs. Save edges.json and return.
+        if self._skip_step("step2_1"):
             print(
-                "  [Step 2] All edges filled, removed step2_partial.json",
+                f"\n[Pipeline] stop_after='{self.stop_after}' — "
+                f"halting before Step 2.1 with {len(all_filled_edges)} edges.",
                 file=sys.stderr,
             )
+            if pdf_dir:
+                save_json(pdf_dir / "edges.json", all_filled_edges)
+            return all_filled_edges
 
         # -- Step 2.1: Deterministic scale conversion (evidence_first) --
         # Run AFTER Step 2 (so we have reported_effect_value/CI to convert)
@@ -2542,6 +2618,18 @@ class EdgeExtractionPipeline:
             )
             if pdf_dir:
                 save_json(pdf_dir / "step2_1_scale_conversion.json", scale_report)
+
+        # -- Stop-after early exit: step1 / step1_5 / step1_6 / step2 / step2_1 --
+        # If the user asked to stop here, save what we've got and return now.
+        if self._skip_step("step2_5"):
+            print(
+                f"\n[Pipeline] stop_after='{self.stop_after}' — "
+                f"halting before Step 2.5 with {len(all_filled_edges)} edges.",
+                file=sys.stderr,
+            )
+            if pdf_dir:
+                save_json(pdf_dir / "edges.json", all_filled_edges)
+            return all_filled_edges
 
         # -- Step 2.5: Strong Model Recovery for null values --
         if self.strong_client and all_filled_edges:
@@ -2595,6 +2683,17 @@ class EdgeExtractionPipeline:
                     )
 
         # -- Step 3: Review --
+        # -- Stop-after gate before Step 3 --
+        if self._skip_step("step3"):
+            print(
+                f"\n[Pipeline] stop_after='{self.stop_after}' — "
+                f"halting before Step 3 with {len(all_filled_edges)} edges.",
+                file=sys.stderr,
+            )
+            if pdf_dir:
+                save_json(pdf_dir / "edges.json", all_filled_edges)
+            return all_filled_edges
+
         quality_report = None
         if self.enable_step3 and all_filled_edges:
             # When defer_hpp_mapping=True, force rerank off here. Step 5
@@ -2613,6 +2712,17 @@ class EdgeExtractionPipeline:
             if pdf_dir:
                 save_json(pdf_dir / "step3_review.json", quality_report)
 
+        # -- Stop-after gate before Step 4 --
+        if self._skip_step("step4"):
+            print(
+                f"\n[Pipeline] stop_after='{self.stop_after}' — "
+                f"halting before Step 4.",
+                file=sys.stderr,
+            )
+            if pdf_dir:
+                save_json(pdf_dir / "edges.json", all_filled_edges)
+            return all_filled_edges
+
         # -- Step 4: Content Audit --
         audit_report = None
         if self.enable_step4 and all_filled_edges:
@@ -2627,6 +2737,17 @@ class EdgeExtractionPipeline:
             )
             if pdf_dir:
                 save_json(pdf_dir / "step4_audit.json", audit_report)
+
+        # -- Stop-after gate before Step 5 --
+        if self._skip_step("step5"):
+            print(
+                f"\n[Pipeline] stop_after='{self.stop_after}' — "
+                f"halting before Step 5.",
+                file=sys.stderr,
+            )
+            if pdf_dir:
+                save_json(pdf_dir / "edges.json", all_filled_edges)
+            return all_filled_edges
 
         # -- Step 5: Deferred HPP mapping (evidence_first / defer_hpp_mapping) --
         if self.defer_hpp_mapping and all_filled_edges and self.hpp_dict_path:

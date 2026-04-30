@@ -1,6 +1,22 @@
-# 证据边缘提取工具 3.33
+# 证据边缘提取工具 3.35
 
 从学术论文 PDF 中自动提取因果关系边，并映射到 HPP（Human Phenotype Project）数据字典，生成符合统一模板的 JSON 输出。
+
+> **3.35 (`--stop-after` 早停 + resume 友好)**：
+> - 新增 `--stop-after STEP`：提前终止 pipeline。可选 `step1 / step1_5 / step1_6 / step2 / step2_1 / step2_5 / step3 / step4 / step5 / all`（默认 all）。
+> - **关键修复**：当 `--stop-after` 在 Step 2.5 之前命中（即 step1/step1_5/step1_6/step2/step2_1）时，`step2_partial.json` 会被**保留**，让后续 `--resume` 跑可以从 cache 直接载入 Step 2 结果，**不重跑昂贵的 Step 2 LLM 调用**。
+> - 用例：先跑 `--stop-after step2_1` 验证抽边质量，再 `--resume` 接续跑 Step 3/4/5——成本只多一次 Step 3/4/5 的 LLM。
+
+> **3.34 (case-series / 单臂研究通用支持)**：基于 80 batch 人工评估发现的 4 处真通用改进（不是 batch 拟合）：
+> - **`statistic_type` enum 扩到 10 项**：新增 `"proportion"`（X% 患者达到 Y 终点）和 `"descriptive_estimate"`（中位数 / 四分位等描述性统计），覆盖 case series / 病例报告类论文。
+> - **`literature_estimate.design` enum 扩展**：新增 `"case_series"` / `"single_arm_trial"` / `"descriptive"`——之前 case series 被强塞成 `"cohort"` 或 `"RCT"`。
+> - **`epsilon.alpha.id_strategy` enum 加 `"descriptive"`**：单臂 / case series 没有反事实，不能标 `"observational"`（observational 隐含可比组结构）。配套：`assumptions=[]`、`status="not_identified"`。
+> - **`statistical_method` 加 `"descriptive"` / `"none"`**：不再被迫填 `"linear"` / `"logistic"` 凑数。
+> - **新 audit 规则**：`single_arm_packaged_as_ratio` / `single_arm_wrong_id_strategy` / `single_arm_has_causal_assumptions` 自动检测 case series 被错误"包装"的情况。
+> - **Step 2.1 扩展**：`proportion` / `descriptive_estimate` 加入"强制 theta_hat=null"列表——单臂数据天然没有 theta。
+> - **Step 1.6 ranking 同步**：`proportion` / `descriptive_estimate` rank=2（同 crude_rate），让 model_effect 在同一组里仍胜出。
+>
+> 适用范围：case series / 病例报告 / 单臂 phase I-II / 描述性研究——估计占临床文献 10-20%。10784580 类论文的 critical errors 应从 ~14 → ≤3。
 
 > **3.33 (Round 3 + Round 4 — evidence_first refactor 收尾)**：
 > - **Step 1.6 研究价值筛选**（新模块 `src/study_value_filter.py`）：在 Step 1.5 后、Step 2 前对边做**确定性优先级筛选**，没有任何 batch-specific 关键词。规则：
@@ -223,6 +239,18 @@ python batch_run.py -i ./pdfs -o ./output \
   --workflow-mode evidence_first \
   --defer-hpp-mapping \
   --final-renumber-edge-id
+
+# 只跑"抽边"部分到 Step 2.1，省 70-80% LLM 成本，之后可 --resume 接续：
+python batch_run.py -i ./pdfs -o ./output_partial \
+  --workflow-mode evidence_first \
+  --stop-after step2_1
+# ↑ 跑完输出含 edges.json + step1_edges.json + step1_5/1_6/2_1 报告 + step2_partial.json (保留)
+
+# 之后想接续跑剩余 Step 2.5/3/4/5：用同一个 output dir，去掉 --stop-after 即可：
+python batch_run.py -i ./pdfs -o ./output_partial \
+  --workflow-mode evidence_first
+# ↑ Step 0/1 cache 跳过；Step 2 从 step2_partial.json 直接载入（0 LLM 重跑）；
+#   Step 1.5/1.6/2.1 重新计算（无 LLM，几秒）；Step 2.5/3/4/5 首次跑
 ```
 
 如果你的 PDF 多到分了 batch 子目录（见下方"批量处理"），命令一样不变。
@@ -327,6 +355,7 @@ python batch_run.py --type interventional
 | `--workflow-mode`     | `legacy` (默认) / `evidence_first`。Legacy 跟 3.30 完全等同；evidence_first 启用 Step 1 证据字段 + Step 1.6 研究价值筛选 + Step 2.1 确定性尺度转换 + Step 4 三层 hard rules |
 | `--defer-hpp-mapping` | 把 HPP 映射推迟到 Step 5（Step 2 跳过 HPP context，Step 3a rerank 跳过）。便于换字典而不重跑 Step 2。默认 OFF |
 | `--final-renumber-edge-id` | 所有 drop / filter 完成后把 edge_id 重排为 `EV-{year}-{author}#1..#N` 并输出 `final_edge_id_mapping.json`。默认 OFF |
+| `--stop-after`        | 提前终止 pipeline，可选 `step1 / step1_5 / step1_6 / step2 / step2_1 / step2_5 / step3 / step4 / step5 / all`。默认 `all`（完整跑）。指定 `step2_1` 之前任何值时，`step2_partial.json` 会被保留——后续不带 `--stop-after` 重跑可走 `--resume`，**Step 2 不需要重跑** |
 | `--reference-dir`     | GT 参考数据目录（默认自动检测 `./reference/`）             |
 | `--error-patterns`    | 错误模式 JSON 路径（默认自动检测 `./reference/error_patterns.json`） |
 
@@ -349,6 +378,106 @@ output/
 ```
 
 批量处理额外生成 `_batch_summary.json`。
+
+### 边的数据结构示例（evidence_first 模式）
+
+**示例 1：model_effect 边**（来自 GWAS / MR / Cox / 回归类论文，绝大多数）
+
+来源：`output/.../80/27089180/edges.json` 中的 `EV-2016-Day#3`，论文 "Physical and neurobehavioral determinants of reproductive onset and behavior" (Day 2016 Nat Genet)。
+
+```json
+{
+  "edge_id": "EV-2016-Day#3",
+  "paper_title": "Physical_and_neurobehavioral_determinants_of_reproductive_onset_and_behavior",
+  "equation_type": "E1",
+  "epsilon": {
+    "rho": {
+      "X": "Earlier puberty timing (1 year decrease, genetically predicted)",
+      "Y": "Number of children (men)",
+      "Z": []
+    },
+    "Pi": "adult_general",
+    "mu": {"core": {"family": "difference", "scale": "identity", "type": "BETA"}},
+    "alpha": {"id_strategy": "MR", "assumptions": ["exchangeability", "consistency"], "status": "partially_identified"}
+  },
+  "literature_estimate": {
+    "theta_hat": 0.37,                         // ← Step 2.1 算出来的 (BETA→identity)
+    "ci": [0.25, 0.49],                        // ← 同上 (identity scale 不变)
+    "p_value": 5.8e-08,
+    "n": 125667,
+    "design": "MR",
+    "model": "MR_IVW"
+  },
+  "equation_formula_reported": {
+    "reported_effect_value": 0.37,             // ← 论文原始 BETA
+    "reported_ci": [0.25, 0.49],
+    "reported_p": 5.8e-08,
+    "effect_measure": "BETA",
+    "model_type": "MR_IVW"
+  },
+  "_step1_evidence": {                         // ← evidence_first 才有
+    "statistic_type": "model_effect",
+    "evidence_text": "Genetically predicted earlier puberty timing promoted earlier...",
+    "source_context": "Results section 'Biological determinants of AFS'"
+  }
+}
+```
+
+**示例 2：descriptive_estimate 边**（来自单臂 / case series 类论文）
+
+来源：`output/.../80/10784580/edges.json` 中的 `EV-2000-Morgner#1`，论文 "Helicobacter heilmannii-Associated Primary Gastric Lymphoma" (case series, n=5)。
+
+```json
+{
+  "edge_id": "EV-2000-Morgner#1",
+  "paper_title": "Helicobacter_heilmannii-Associated_Primary_Gastric_Lymphoma",
+  "equation_type": "E1",
+  "epsilon": {
+    "rho": {"X": "H._heilmannii_eradication_(omeprazole+amoxicillin+clarithromycin)", "Y": "Complete_lymphoma_remission", "Z": []},
+    "Pi": "case_series_population",
+    "mu": {"core": {"family": "difference", "scale": "identity", "type": "proportion"}},
+    "alpha": {"id_strategy": "descriptive", "assumptions": [], "status": "not_identified"}
+  },
+  "literature_estimate": {
+    "theta_hat": null,                         // ← Step 2.1 强制 null：单臂没有 theta
+    "ci": [null, null],
+    "p_value": null,
+    "n": 5,
+    "design": "case_series",
+    "model": "descriptive"
+  },
+  "equation_formula_reported": {
+    "reported_effect_value": 1.0,              // ← 5/5 患者达到 remission，比例 = 1.0 (100%)
+    "reported_ci": [null, null],
+    "reported_p": null,
+    "effect_measure": "proportion",
+    "model_type": "descriptive"
+  },
+  "_step1_evidence": {
+    "statistic_type": "proportion",            // ← 关键！告诉下游"这是描述性比例不是 model effect"
+    "evidence_text": "5/5 patients (100%) achieved complete lymphoma remission after triple therapy",
+    "source_context": "Results, paragraph 2"
+  }
+}
+```
+
+**关键区别**：
+
+| 字段 | 示例 1 (model_effect) | 示例 2 (descriptive) |
+|---|---|---|
+| `_step1_evidence.statistic_type` | `model_effect` | `proportion` |
+| `literature_estimate.theta_hat` | `0.37` (Step 2.1 计算) | `null` (Step 2.1 强制清空) |
+| `literature_estimate.ci` | `[0.25, 0.49]` | `[null, null]` |
+| `literature_estimate.design` | `MR` | `case_series` |
+| `epsilon.alpha.id_strategy` | `MR` | `descriptive` |
+| `epsilon.alpha.assumptions` | `[exchangeability, consistency]` | `[]` |
+| `epsilon.alpha.status` | `partially_identified` | `not_identified` |
+| `equation_formula_reported.reported_effect_value` | `0.37` | `1.0` ✅（数据**没丢**） |
+
+**结论**：
+
+- **示例 1 全字段都有数字**——`theta_hat / ci / reported_effect_value` 都填好。
+- **示例 2 `theta_hat=null` 但原始值 `reported_effect_value=1.0` 在 `equation_formula_reported` 里**——单臂研究因果识别上没有"theta"，但论文报告的真实数据没有任何丢失。下游消费时优先看 `reported_effect_value`。
 
 ### `_validation` 元数据（中间态）
 

@@ -1061,6 +1061,7 @@ def _check_statistic_type_consistency(edge: Dict) -> List[Dict[str, Any]]:
     edge_id = edge.get("edge_id", "?")
     mu = edge.get("epsilon", {}).get("mu", {}).get("core", {}) or {}
     lit = edge.get("literature_estimate", {}) or {}
+    alpha = edge.get("epsilon", {}).get("alpha", {}) or {}
 
     if st_type == "crude_rate":
         if mu.get("family") == "ratio" and mu.get("scale") == "log":
@@ -1075,6 +1076,59 @@ def _check_statistic_type_consistency(edge: Dict) -> List[Dict[str, Any]]:
                         "(family=ratio, scale=log) — a crude incidence "
                         "rate cannot be a Cox HR. Step 1 likely "
                         "mis-labeled statistical_method."
+                    ),
+                }
+            )
+
+    # proportion / descriptive_estimate are single-arm / case-series only.
+    # The mu.core MUST be (family=difference, scale=identity); id_strategy
+    # MUST be "descriptive"; alpha.assumptions MUST be []; theta_hat MUST
+    # be null (forced by Step 2.1). These checks fire when the upstream
+    # produced a "Cox HR style" record for what is actually descriptive.
+    if st_type in ("proportion", "descriptive_estimate"):
+        if mu.get("family") == "ratio" and mu.get("scale") == "log":
+            issues.append(
+                {
+                    "edge_id": edge_id,
+                    "check": "single_arm_packaged_as_ratio",
+                    "severity": "error",
+                    "field": "epsilon.mu.core",
+                    "message": (
+                        f"statistic_type='{st_type}' is single-arm / "
+                        f"descriptive but mu is (family=ratio, scale=log). "
+                        f"Single-arm studies have no comparison group to "
+                        f"derive a Cox HR from. Treat as descriptive."
+                    ),
+                }
+            )
+        id_strat = alpha.get("id_strategy", "")
+        if id_strat and id_strat not in ("descriptive", "other"):
+            issues.append(
+                {
+                    "edge_id": edge_id,
+                    "check": "single_arm_wrong_id_strategy",
+                    "severity": "error",
+                    "field": "epsilon.alpha.id_strategy",
+                    "message": (
+                        f"statistic_type='{st_type}' but "
+                        f"id_strategy='{id_strat}' — single-arm / "
+                        f"case-series has no counterfactual; should be "
+                        f"'descriptive'."
+                    ),
+                }
+            )
+        assumptions = alpha.get("assumptions", [])
+        if isinstance(assumptions, list) and assumptions:
+            issues.append(
+                {
+                    "edge_id": edge_id,
+                    "check": "single_arm_has_causal_assumptions",
+                    "severity": "warning",
+                    "field": "epsilon.alpha.assumptions",
+                    "message": (
+                        f"statistic_type='{st_type}' but assumptions="
+                        f"{assumptions}; causal assumptions don't apply "
+                        f"to descriptive evidence — should be []."
                     ),
                 }
             )

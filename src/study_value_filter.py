@@ -58,12 +58,18 @@ from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
 # Lower rank = higher priority = more likely to be "real" evidence.
+# proportion / descriptive_estimate sit at rank 2 (same as crude_rate) —
+# they're the "best evidence available" for single-arm / case-series
+# studies, so we don't drop them, but a model_effect from the same
+# (X, Y, subgroup) group should win over them.
 _STATISTIC_TYPE_RANK: Dict[str, int] = {
     "model_effect": 0,
     "between_group_effect": 0,
     "within_group_change": 1,
     "group_mean": 1,
     "crude_rate": 2,
+    "proportion": 2,
+    "descriptive_estimate": 2,
     "sensitivity": 3,
     "subgroup": 3,
     "unknown": 4,

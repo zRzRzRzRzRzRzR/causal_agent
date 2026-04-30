@@ -338,6 +338,28 @@ def main():
             "old→new map to final_edge_id_mapping.json. Off by default."
         ),
     )
+    parser.add_argument(
+        "--stop-after",
+        choices=[
+            "step1",
+            "step1_5",
+            "step1_6",
+            "step2",
+            "step2_1",
+            "step2_5",
+            "step3",
+            "step4",
+            "step5",
+            "all",
+        ],
+        default="all",
+        help=(
+            "Stop the pipeline after this step finishes. Useful for "
+            "cost control and debugging — e.g. --stop-after step2_1 "
+            "runs Steps 0/1/1.5/1.6/2/2.1 and skips the LLM-heavy "
+            "Steps 2.5/3/4/5. Default: 'all' (full pipeline)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -419,6 +441,7 @@ def main():
         workflow_mode=args.workflow_mode,
         defer_hpp_mapping=args.defer_hpp_mapping,
         final_renumber_edge_id=args.final_renumber_edge_id,
+        stop_after=args.stop_after,
     )
 
     all_results = []

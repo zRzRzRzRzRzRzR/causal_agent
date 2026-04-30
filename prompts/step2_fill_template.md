@@ -164,13 +164,18 @@ Z: ["Age", "Sex", "TDI"]  ← 错！公式中没有 γ^T·Z 项，Z 必须为 []
 - `epsilon.o.type`: `"binary"`（二分类）、`"continuous"`（连续）或`"survival"`（生存）
 - `epsilon.tau`: 时间坐标（index、horizon，ISO 8601格式如"P5Y"、"P10Y"）
 - `epsilon.mu.core.type`: 对于比率度量（HR/OR/RR），**必须使用log前缀**：`"logHR"`, `"logOR"`, `"logRR"`（因为theta_hat在对数尺度上）。对于差异度量：`"MD"`, `"BETA"`, `"SMD"`
-- `epsilon.alpha.assumptions`: 选择适用的：`"exchangeability"`（可交换性）、`"positivity"`（正性）、`"consistency"`（一致性）。**不要**包含 `"proportional_hazards"`
-- `epsilon.alpha.status`: `"identified"`（已识别，RCT）/ `"partially_identified"`（部分识别，观察性）/ `"not_identified"`（未识别）
+- `epsilon.alpha.assumptions`: 选择适用的：`"exchangeability"`（可交换性）、`"positivity"`（正性）、`"consistency"`（一致性）。**不要**包含 `"proportional_hazards"`。**对于无对照的单臂/case series/描述性研究**：填 `[]` 空列表——这些假设依赖于组间比较结构，单臂研究不成立。
+- `epsilon.alpha.status`: `"identified"`（已识别，RCT）/ `"partially_identified"`（部分识别，观察性）/ `"not_identified"`（未识别 / 描述性研究）。**单臂或 case series 应填 `"not_identified"`**——没有反事实可比组，无法做因果识别。
+
+**⚠️ id_strategy 与 design 一致性**：
+`epsilon.alpha.id_strategy` 必须从下列枚举里选：`"rct" / "observational" / "MR" / "IV" / "pooled_estimates" / "descriptive" / "other"`。
+- **`"descriptive"`**（**新增**）：单臂干预、case series、case report、纯描述性观察研究——没有对照组，没有反事实。配合 `assumptions=[]`、`status="not_identified"`。
+- **不要**把单臂 case series 标 `"observational"`——observational 隐含有可比组，但 case series 没有。这会让下游产生错误的因果声明。
 - `epsilon.rho`: 变量角色 — X（**原样保留 step1 的完整 X**，包括 "vs Control" / "vs reference"；**不**使用 iota 简洁名）、Y（原样保留 step1 的完整 Y，包括 change/timepoint/unit）、Z（调整变量列表）。Z **默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。不要把 baseline table 中的 Age/Sex/BMI/TDI 当成调整变量。IV（仅MR，否则为null）
 
 ### 5. literature_estimate（剩余字段）
 - `n`: 与当前效应值对应的样本量（若 edge 是亚组效应则为**亚组样本量**，不是全队列；若是 completer 分析则为 completer 数）。定位方法：找到 estimate 数值**旁边**的 n/events 计数，不是 Methods 或流程图的总 n。
-- `design`: `"RCT"` / `"cohort"`（队列）/ `"cross-sectional"`（横断面）/ `"case-control"`（病例对照）/ `"meta-analysis"`（荟萃分析）/ `"MR"`
+- `design`: 必须从下列枚举选：`"RCT"` / `"cohort"`（队列）/ `"cross-sectional"`（横断面）/ `"case-control"`（病例对照）/ `"meta-analysis"`（荟萃分析）/ `"MR"` / `"case_series"`（**新增**：病例系列、单臂干预、无对照）/ `"single_arm_trial"`（**新增**：单臂 phase I/II 试验）/ `"descriptive"`（**新增**：纯描述性研究）。**不要**把 case series 凑成 `"cohort"`——cohort 默认有对照或随访队列结构。
 - `grade`: `"A"`（高质量RCT）、`"B"`（中等）、`"C"`（低质量/未调整）
 - `adjustment_set`: 调整变量列表（必须匹配rho.Z）。**默认填 `[]`**；只有论文对当前效应值明确报告了调整变量时才填写。
 - `p_value`: 仅在论文明确报告时填写；**不要**根据 CI、显著性、Bonferroni 校正或常识反推。

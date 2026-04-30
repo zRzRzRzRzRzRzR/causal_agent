@@ -104,17 +104,31 @@ class PDFExtractor:
         final_dir = os.path.join(base_dir, pdf_stem)
         combined_md_path = os.path.join(final_dir, "combined.md")
 
-        if not force_rerun and os.path.exists(combined_md_path):
-            md = Path(combined_md_path).read_text(encoding="utf-8")
+        # Cache hit path search — tolerate three layouts so users don't
+        # have to remember which one was used:
+        #   1. <ocr-dir>/<stem>/combined.md   (original — what we write)
+        #   2. <ocr-dir>/<stem>.md            (flat layout people often hand-curate)
+        #   3. <ocr-dir>/<stem>/<stem>.md     (alt nested layout some pipelines use)
+        cache_candidates = [
+            combined_md_path,
+            os.path.join(base_dir, f"{pdf_stem}.md"),
+            os.path.join(final_dir, f"{pdf_stem}.md"),
+        ]
+        cached_path = next(
+            (p for p in cache_candidates if os.path.exists(p)), None
+        )
+
+        if not force_rerun and cached_path:
+            md = Path(cached_path).read_text(encoding="utf-8")
             if md.strip():
                 pc = md.count("<!-- Page ")
-                print(f"[OCR] Cache hit: {combined_md_path} ({pc} pages)")
+                print(f"[OCR] Cache hit: {cached_path} ({pc} pages)")
                 return {
                     "markdown": md,
                     "output_dir": final_dir,
                     "total_pages": pc,
                     "content_pages": pc,
-                    "combined_md_path": combined_md_path,
+                    "combined_md_path": cached_path,
                 }
 
         print(f"[OCR] Step 1/3: PDF -> images (DPI={self.dpi}) ...")
@@ -163,5 +177,30 @@ def get_extractor() -> PDFExtractor:
     return _default_extractor
 
 
-def get_pdf_text(pdf_path: str, force_rerun: bool = False) -> str:
+def get_pdf_text(
+    pdf_path: str,
+    force_rerun: bool = False,
+    ocr_output_dir: Optional[str] = None,
+) -> str:
+    """
+    Return the OCR'd Markdown for a PDF.
+
+    Cache priority:
+      1. If ocr_output_dir is given, use that directly (bypasses global
+         _default_extractor — defensive against any state-loss issue).
+      2. Otherwise fall back to the module-level _default_extractor that
+         init_extractor() should have set.
+
+    The explicit-arg path is the one we plumb through pipeline because
+    relying on global state has caused tempfile fallbacks under
+    threading / re-import scenarios.
+    """
+    if ocr_output_dir:
+        # Use ad-hoc extractor for this one call — guarantees the right
+        # cache_ocr path no matter what happened to global state.
+        extractor = get_extractor()
+        # Override path on the cached extractor so subsequent calls also
+        # benefit. Cheap (just a string assignment).
+        extractor.ocr_output_dir = ocr_output_dir
+        return extractor.extract_text(pdf_path, force_rerun=force_rerun)
     return get_extractor().extract_text(pdf_path, force_rerun=force_rerun)

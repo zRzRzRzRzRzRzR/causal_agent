@@ -2234,6 +2234,11 @@ class EdgeExtractionPipeline:
                 file=sys.stderr,
             )
 
+        # Remember the OCR cache dir on the pipeline instance so we can
+        # pass it explicitly on every _get_pdf_text() call. Relying on
+        # init_ocr's global _default_extractor has shown to be fragile
+        # under threading / re-import — this guarantees the right path.
+        self._ocr_output_dir = ocr_output_dir
         if ocr_init_func is not None:
             ocr_init_func(
                 ocr_output_dir=ocr_output_dir,
@@ -2243,7 +2248,15 @@ class EdgeExtractionPipeline:
             )
 
     def _get_pdf_text(self, pdf_path: str) -> str:
-        return self.ocr_text_func(pdf_path)
+        # Pass ocr_output_dir through every call so it can never silently
+        # fall back to a tempfile (which would re-OCR every PDF).
+        try:
+            return self.ocr_text_func(
+                pdf_path, ocr_output_dir=self._ocr_output_dir
+            )
+        except TypeError:
+            # Older ocr_text_func signature without the kwarg — fall back.
+            return self.ocr_text_func(pdf_path)
 
     def run(
         self,

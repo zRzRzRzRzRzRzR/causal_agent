@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -46,23 +47,41 @@ def process_single_file(
             "error": None,
         }
 
-    edges = pipeline.run(
-        pdf_path=str(file_path),
-        force_type=force_type,
-        output_dir=str(output_dir),
-        resume=resume,
-    )
-    n_edges = len(edges) if edges else 0
+    try:
+        edges = pipeline.run(
+            pdf_path=str(file_path),
+            force_type=force_type,
+            output_dir=str(output_dir),
+            resume=resume,
+        )
+        n_edges = len(edges) if edges else 0
 
-    elapsed = round(time.time() - t0, 1)
+        elapsed = round(time.time() - t0, 1)
 
-    return {
-        "file": file_path.name,
-        "status": "success",
-        "n_edges": n_edges,
-        "elapsed_sec": elapsed,
-        "error": None,
-    }
+        return {
+            "file": file_path.name,
+            "status": "success",
+            "n_edges": n_edges,
+            "elapsed_sec": elapsed,
+            "error": None,
+        }
+    except Exception as e:
+        # Don't let a single bad PDF kill the whole batch — log it,
+        # mark as failed, and let the outer loop move on.
+        elapsed = round(time.time() - t0, 1)
+        err_msg = f"{type(e).__name__}: {e}"
+        print(
+            f"      [FAIL] {file_path.name}: {err_msg}",
+            file=sys.stderr,
+        )
+        traceback.print_exc(file=sys.stderr)
+        return {
+            "file": file_path.name,
+            "status": "failed",
+            "n_edges": 0,
+            "elapsed_sec": elapsed,
+            "error": err_msg,
+        }
 
 
 def collect_files_from_dir(directory: Path) -> list[Path]:

@@ -2166,11 +2166,6 @@ class EdgeExtractionPipeline:
         self._stop_after_idx = _STOP_AFTER_ORDER.index(stop_after)
         self._STOP_AFTER_ORDER = _STOP_AFTER_ORDER
 
-    def _skip_step(self, step: str) -> bool:
-        """True if `step` should be skipped because stop_after is earlier."""
-        if step not in self._STOP_AFTER_ORDER:
-            return False
-        return self._STOP_AFTER_ORDER.index(step) > self._stop_after_idx
         if workflow_mode == "evidence_first":
             print(
                 "[Pipeline] workflow_mode=evidence_first: enabling new"
@@ -2247,16 +2242,25 @@ class EdgeExtractionPipeline:
                 validate_pages=ocr_validate_pages,
             )
 
+    def _skip_step(self, step: str) -> bool:
+        """True if `step` should be skipped because stop_after is earlier."""
+        if step not in self._STOP_AFTER_ORDER:
+            return False
+        return self._STOP_AFTER_ORDER.index(step) > self._stop_after_idx
+
     def _get_pdf_text(self, pdf_path: str) -> str:
         # Pass ocr_output_dir through every call so it can never silently
         # fall back to a tempfile (which would re-OCR every PDF).
-        try:
-            return self.ocr_text_func(
-                pdf_path, ocr_output_dir=self._ocr_output_dir
-            )
-        except TypeError:
-            # Older ocr_text_func signature without the kwarg — fall back.
-            return self.ocr_text_func(pdf_path)
+        # Use getattr with default in case an older Pipeline instance was
+        # constructed before _ocr_output_dir was being set.
+        ocr_dir = getattr(self, "_ocr_output_dir", None)
+        if ocr_dir:
+            try:
+                return self.ocr_text_func(pdf_path, ocr_output_dir=ocr_dir)
+            except TypeError:
+                # Older ocr_text_func signature without the kwarg.
+                pass
+        return self.ocr_text_func(pdf_path)
 
     def run(
         self,
